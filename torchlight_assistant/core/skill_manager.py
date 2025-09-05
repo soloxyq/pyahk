@@ -1,0 +1,548 @@
+"""重构后的SkillManager - 专注于技能执行逻辑，具备自主调度能力"""
+
+import threading
+import time
+from typing import Dict, Any, Optional
+from queue import Queue, Empty
+import numpy as np
+
+from .input_handler import InputHandler
+from .event_bus import event_bus
+from .states import MacroState
+from .unified_scheduler import UnifiedScheduler
+from ..utils.border_frame_manager import BorderFrameManager
+from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
+
+
+class SkillManager:
+    """重构后的技能管理器 - 专注于技能执行逻辑，具备自主调度能力"""
+
+    def __init__(
+        self,
+        input_handler: InputHandler,
+        macro_engine_ref,
+        border_manager: BorderFrameManager,
+    ):
+        self.input_handler = input_handler
+        self.border_frame_manager = border_manager
+        self._macro_engine = macro_engine_ref
+
+        self._skills_config: Dict[str, Dict[str, Any]] = {}
+
+        self._is_running = False
+        self._is_paused = False
+
+        # 添加缺失的属性
+        self._config_lock = threading.Lock()
+        self._resource_condition_history = {}
+        self._sequence_index = 0
+        self._required_consecutive_checks = 2
+
+        # 自主调度相关属性
+        self._scheduler_threads = {}
+        self._scheduler_stop_events = {}
+        self._global_config = {}
+
+        # 统一调度器
+        self.unified_scheduler = UnifiedScheduler()
+
+        # 订阅MacroEngine事件
+        self._setup_event_subscriptions()
+
+    def _setup_event_subscriptions(self):
+        """设置事件订阅"""
+        # 移除对engine:state_changed的订阅，避免与MacroEngine的直接调用产生竞态条件
+        event_bus.subscribe("engine:config_updated", self._on_config_updated)
+
+    def _on_config_updated(self, skills_config, global_config):
+        """响应配置更新，并动态更新调度器任务"""
+        # 更新内部配置
+        self.update_all_configs(skills_config)
+        self.update_global_config(global_config)
+
+    def _start_autonomous_scheduling(self):
+        """使用统一调度器启动所有定时任务"""
+        if not self._is_running:
+            return
+
+        # 启动统一调度器
+        if not self.unified_scheduler.get_status()["running"]:
+            self.unified_scheduler.start()
+            LOG_INFO("[统一调度器] 启动成功")
+
+        # 设置所有定时任务
+        self._setup_all_scheduled_tasks()
+
+    def _setup_all_scheduled_tasks(self):
+        """根据配置，互斥地设置定时任务到统一调度器"""
+        # 清除现有任务
+        self.unified_scheduler.clear_all_tasks()
+
+        is_sequence_mode = self._global_config.get("sequence_enabled", False)
+
+        if is_sequence_mode:
+            # 序列模式：只添加序列任务
+            seq_interval = (
+                self._global_config.get("sequence_timer_interval", 1000) / 1000.0
+            )
+            self.unified_scheduler.add_task(
+                "sequence_scheduler", seq_interval, self.execute_sequence_step
+            )
+            LOG_INFO(
+                f"[统一调度器] 进入序列模式，添加序列任务，间隔: {seq_interval:.3f}s"
+            )
+        else:
+            # 技能模式：添加定时和冷却任务
+            # 1. 添加定时技能任务
+            self._setup_timed_skills_tasks()
+
+            # 2. 添加冷却检查任务
+            cooldown_interval = (
+                self._global_config.get("cooldown_checker_interval", 100) / 1000.0
+            )
+            self.unified_scheduler.add_task(
+                "cooldown_checker", cooldown_interval, self.check_cooldowns
+            )
+            LOG_INFO(
+                f"[统一调度器] 进入技能模式，添加冷却检查任务，间隔: {cooldown_interval:.3f}s"
+            )
+
+    def _setup_timed_skills_tasks(self):
+        """设置定时技能任务"""
+        timed_skills_count = 0
+        with self._config_lock:
+            for name, config in self._skills_config.items():
+                if config.get("Enabled") and config.get("TriggerMode") == 0:
+                    interval = config.get("Timer", 1000) / 1000.0
+                    task_id = f"timed_skill_{name}"
+
+                    success = self.unified_scheduler.add_task(
+                        task_id, interval, self.execute_timed_skill, args=(name,)
+                    )
+
+                    if success:
+                        timed_skills_count += 1
+                        LOG_INFO(
+                            f"[统一调度器] 添加定时技能: {name}, 间隔: {interval:.3f}s"
+                        )
+
+        LOG_INFO(f"[统一调度器] 共添加 {timed_skills_count} 个定时技能任务")
+
+    def _stop_autonomous_scheduling(self):
+        """停止所有调度器线程并等待它们结束"""
+        # 1. 停止统一调度器
+        if self.unified_scheduler.get_status()["running"]:
+            self.unified_scheduler.stop()
+            LOG_INFO("[统一调度器] 已停止")
+
+    def pause(self):
+        """暂停所有技能活动"""
+        self._is_paused = True
+
+        # 暂停统一调度器
+        if self.unified_scheduler.get_status()["running"]:
+            self.unified_scheduler.pause()
+            LOG_INFO("[统一调度器] 已暂停")
+
+    def resume(self):
+        """恢复所有技能活动"""
+        if self._is_running:
+            self._is_paused = False
+
+            # 恢复统一调度器
+            self.unified_scheduler.resume()
+            LOG_INFO("[统一调度器] 已恢复")
+
+    def update_all_configs(self, skills_config: Dict[str, Any]):
+        """更新所有技能配置并同步调度器"""
+        with self._config_lock:
+            # 记录旧的技能配置用于对比
+            old_timed_skills = {
+                name
+                for name, config in self._skills_config.items()
+                if config.get("Enabled") and config.get("TriggerMode") == 0
+            }
+
+            # 更新配置
+            self._skills_config = skills_config
+
+            # 记录新的技能配置
+            new_timed_skills = {
+                name
+                for name, config in self._skills_config.items()
+                if config.get("Enabled") and config.get("TriggerMode") == 0
+            }
+
+            # 如果调度器正在运行，需要更新任务
+            if self._is_running and self.unified_scheduler.get_status()["running"]:
+                # 移除不再需要的定时技能任务
+                removed_skills = old_timed_skills - new_timed_skills
+                for skill_name in removed_skills:
+                    task_id = f"timed_skill_{skill_name}"
+                    if self.unified_scheduler.remove_task(task_id):
+                        LOG_INFO(f"[统一调度器] 移除定时技能任务: {skill_name}")
+
+                # 添加新的定时技能任务
+                added_skills = new_timed_skills - old_timed_skills
+                for skill_name in added_skills:
+                    config = self._skills_config[skill_name]
+                    interval = config.get("Timer", 1000) / 1000.0
+                    task_id = f"timed_skill_{skill_name}"
+
+                    if self.unified_scheduler.add_task(
+                        task_id, interval, self.execute_timed_skill, args=(skill_name,)
+                    ):
+                        LOG_INFO(
+                            f"[统一调度器] 添加定时技能任务: {skill_name}, 间隔: {interval:.3f}s"
+                        )
+
+                # 更新现有技能的间隔（这里需要保存旧配置才能对比，暂时跳过）
+                # 可以通过重新设置所有任务来简化
+                for skill_name in old_timed_skills & new_timed_skills:
+                    config = self._skills_config[skill_name]
+                    interval = config.get("Timer", 1000) / 1000.0
+                    task_id = f"timed_skill_{skill_name}"
+
+                    # 简单方式：移除后重新添加
+                    self.unified_scheduler.remove_task(task_id)
+                    if self.unified_scheduler.add_task(
+                        task_id, interval, self.execute_timed_skill, args=(skill_name,)
+                    ):
+                        LOG_INFO(
+                            f"[统一调度器] 更新定时技能任务: {skill_name}, 间隔: {interval:.3f}s"
+                        )
+
+    def update_global_config(self, global_config: Dict[str, Any]):
+        """更新全局配置并同步调度器"""
+        old_sequence_enabled = self._global_config.get("sequence_enabled", False)
+        new_sequence_enabled = global_config.get("sequence_enabled", False)
+
+        self._global_config = global_config
+
+        # 如果调度器正在运行，需要更新任务
+        if self._is_running and self.unified_scheduler.get_status()["running"]:
+            # 如果序列模式状态发生变化，重新设置所有任务
+            if old_sequence_enabled != new_sequence_enabled:
+                LOG_INFO(
+                    f"[统一调度器] 序列模式状态变化: {old_sequence_enabled} -> {new_sequence_enabled}"
+                )
+                self._setup_all_scheduled_tasks()
+            else:
+                # 序列模式状态没变，只更新间隔
+                if new_sequence_enabled:
+                    # 序列模式：更新序列任务间隔
+                    seq_interval = (
+                        global_config.get("sequence_timer_interval", 1000) / 1000.0
+                    )
+                    if self.unified_scheduler.update_task_interval(
+                        "sequence_scheduler", seq_interval
+                    ):
+                        LOG_INFO(f"[统一调度器] 更新序列任务间隔: {seq_interval:.3f}s")
+                else:
+                    # 技能模式：更新冷却检查间隔
+                    cooldown_interval = (
+                        global_config.get("cooldown_checker_interval", 100) / 1000.0
+                    )
+                    if self.unified_scheduler.update_task_interval(
+                        "cooldown_checker", cooldown_interval
+                    ):
+                        LOG_INFO(
+                            f"[统一调度器] 更新冷却检查间隔: {cooldown_interval:.3f}s"
+                        )
+
+    def execute_timed_skill(self, skill_name: str):
+        if not self._is_running or self._is_paused:
+            return
+
+        with self._config_lock:
+            skill_config = self._skills_config.get(skill_name)
+
+        if skill_config and skill_config.get("Enabled"):
+            self._try_execute_skill(skill_name, skill_config)
+
+    def execute_sequence_step(self):
+        if not self._is_running or self._is_paused:
+            return
+
+        # 获取序列配置 - 直接从全局配置中读取
+        sequence_keys_str = self._global_config.get("skill_sequence", "")
+        sequence_keys = [
+            key.strip() for key in sequence_keys_str.split(",") if key.strip()
+        ]
+        if not sequence_keys:
+            return
+
+        # 获取当前要执行的按键
+        current_key = sequence_keys[self._sequence_index]
+        self._sequence_index = (self._sequence_index + 1) % len(sequence_keys)
+
+        # 直接执行按键，不需要查找技能配置
+        self.input_handler.execute_key(current_key)
+
+    def check_cooldowns(self):
+        if not self._is_running or self._is_paused:
+            return
+
+        # 性能优化：一次性获取当前帧数据
+        cached_frame = self._prepare_frame_detection_cache()
+        if cached_frame is None:
+            return  # 如果无法获取帧数据，跳过本次检测
+
+        with self._config_lock:
+            skills_to_check = list(self._skills_config.items())
+
+        for skill_name, skill_config in skills_to_check:
+            if skill_config.get("Enabled") and skill_config.get("TriggerMode") == 1:
+                self._try_execute_skill(skill_name, skill_config, cached_frame)
+
+    def _prepare_frame_detection_cache(self) -> Optional[np.ndarray]:
+        """
+        性能优化：一次性获取当前帧数据
+        返回帧数据，供后续所有检测使用
+        """
+        try:
+            return self.border_frame_manager.get_current_frame()
+        except Exception as e:
+            LOG_ERROR(f"[帧缓存] 准备检测缓存失败: {e}")
+            return None
+
+    def _try_execute_skill(
+        self,
+        skill_name: str,
+        skill_config: Dict[str, Any],
+        cached_frame: Optional[np.ndarray] = None,
+    ):
+        """
+        统一的技能执行方法
+        - 如果提供了cached_frame，使用缓存帧数据进行检测（高性能）
+        - 如果没有提供cached_frame，使用实时检测（兼容性）
+        """
+        trigger_mode = skill_config.get("TriggerMode")
+        alt_key = skill_config.get("AltKey", "")
+        execute_condition = skill_config.get("ExecuteCondition", 0)
+
+        is_ready = True
+        # 1. 检查冷却（仅当是冷却模式时）
+        if trigger_mode == 1:  # 冷却模式
+            is_ready = self._check_cooldown_ready(skill_name, skill_config, cached_frame)
+
+        # 2. 如果冷却就绪，再检查执行条件
+        condition_result = True
+        if is_ready:
+            condition_result = self._check_execution_conditions(
+                skill_name, skill_config, cached_frame
+            )
+
+        # 3. 根据条件类型和结果决定按键执行逻辑
+        if not is_ready:
+            # 冷却未就绪，不执行任何按键
+            return
+
+        key_to_use = None
+        if execute_condition == 1:  # BUFF限制模式
+            if not condition_result:
+                key_to_use = skill_config.get("Key", "")
+        elif execute_condition == 2:  # 资源条件模式
+            if condition_result:
+                key_to_use = skill_config.get("Key", "")
+            else:
+                key_to_use = alt_key
+        else:  # 无条件模式 (execute_condition == 0)
+            key_to_use = skill_config.get("Key", "")
+
+        if key_to_use:
+            self.input_handler.execute_key(key_to_use)
+
+    def _check_cooldown_ready(
+        self, skill_name: str, skill_config: Dict[str, Any], cached_frame: Optional[np.ndarray] = None
+    ) -> bool:
+        if skill_config.get("TriggerMode") != 1:
+            return True
+        x, y, size = (
+            skill_config.get("CooldownCoordX", 0),
+            skill_config.get("CooldownCoordY", 0),
+            skill_config.get("CooldownSize", 12),
+        )
+        # 使用统一的接口，支持缓存帧数据
+        is_ready = self.border_frame_manager.compare_cooldown_image(
+            cached_frame, x, y, skill_name, size, threshold=0.95
+        )
+        return is_ready
+
+
+
+    def _check_execution_conditions(
+        self, skill_name: str, skill_config: Dict[str, Any], cached_frame: Optional[np.ndarray] = None
+    ) -> bool:
+        condition = skill_config.get("ExecuteCondition", 0)
+
+        if condition == 0:
+            return True
+
+        x, y = skill_config.get("ConditionCoordX", 0), skill_config.get(
+            "ConditionCoordY", 0
+        )
+
+        if x == 0 or y == 0:
+            return True
+
+        # 使用统一的接口进行条件检测
+        result = self._evaluate_condition(condition, skill_name, skill_config, cached_frame)
+
+        return result
+
+
+
+    def _evaluate_condition(
+        self, condition: int, skill_name: str, skill_config: Dict[str, Any], cached_frame: Optional[np.ndarray] = None
+    ) -> bool:
+        x, y = skill_config.get("ConditionCoordX", 0), skill_config.get(
+            "ConditionCoordY", 0
+        )
+        color, tolerance = skill_config.get("ConditionColor", 0), skill_config.get(
+            "ColorTolerance", 12
+        )
+
+        if condition == 1:  # BUFF限制模式
+            if color == 0:
+                result = self.border_frame_manager.is_resource_sufficient(
+                    cached_frame, x, y, color_range_threshold=tolerance
+                )
+            elif color == 1:
+                result = self.border_frame_manager.is_hp_sufficient(cached_frame, x, y)
+            else:
+                result = self.border_frame_manager.rgb_similarity(
+                    cached_frame, x, y, color, tolerance
+                )
+
+            return result
+
+        elif condition == 2:  # 资源条件模式
+            try:
+                if color == 0:
+                    is_sufficient = self.border_frame_manager.is_resource_sufficient(
+                        cached_frame, x, y, color_range_threshold=tolerance
+                    )
+                elif color == 1:
+                    is_sufficient = self.border_frame_manager.is_hp_sufficient(cached_frame, x, y)
+                else:
+                    is_sufficient = not self.border_frame_manager.rgb_similarity(
+                        cached_frame, x, y, color, tolerance
+                    )
+
+                # 对于资源条件，使用连续性检查确保稳定性
+                final_result = self._check_resource_continuity(
+                    skill_name, is_sufficient
+                )
+                return final_result
+            except Exception as e:
+                LOG_ERROR(f"[资源条件] {skill_name} - 检查异常: {e}")
+                # 异常时默认返回False，执行AltKey
+                return False
+
+        # 未知条件类型，默认返回True
+        return True
+
+    def _check_resource_continuity(self, skill_name: str, current_result: bool) -> bool:
+        """
+        资源条件连续性检查
+        - 如果当前结果为True（资源充足），需要连续多次True才执行主按键
+        - 如果当前结果为False（资源不足），立即执行备用按键
+        """
+        history = self._resource_condition_history.setdefault(skill_name, [])
+        history.append(current_result)
+        if len(history) > self._required_consecutive_checks:
+            history.pop(0)
+
+        # 如果当前结果为False（资源不足），立即返回False执行AltKey
+        if not current_result:
+            return False
+
+        # 如果当前结果为True（资源充足），需要连续多次True才返回True
+        if all(history) and len(history) == self._required_consecutive_checks:
+            # 不再清空历史记录，实现滑动窗口效果
+            return True
+
+        return False
+
+    def prepare_border_only(self):
+        """仅准备边框区域，不启动循环捕获"""
+        with self._config_lock:
+            self.border_frame_manager.prepare_border(self._skills_config)
+
+    def start_capture_loop(self, interval_ms: int):
+        """启动边框图循环捕获"""
+        self.border_frame_manager.start_capture_loop(interval_ms)
+
+    def start(self):
+        if self._is_running:
+            return
+        self._is_running = True
+        self._is_paused = False
+        self._sequence_index = 0
+
+        # 设置技能坐标并计算边框
+        with self._config_lock:
+            self.border_frame_manager.prepare_border(self._skills_config)
+
+        # 直接启动自主调度
+        self._start_autonomous_scheduling()
+
+    def stop(self):
+        if not self._is_running:
+            return
+        self._is_running = False
+        self._is_paused = False
+
+        # 停止自主调度
+        self._stop_autonomous_scheduling()
+
+        self.border_frame_manager.stop()
+        self.clear_cache()
+
+    def clear_cache(self):
+        # 清理资源条件历史记录（不再需要其他缓存）
+        self._resource_condition_history.clear()
+
+    def emergency_stop(self):
+        """紧急停止 - 强制终止所有线程"""
+        LOG_ERROR("[紧急停止] 强制终止所有技能管理器线程")
+
+        # 强制设置停止标志
+        self._is_running = False
+        self._is_paused = True
+
+        # 强制停止统一调度器
+        try:
+            self.unified_scheduler.stop()
+            LOG_INFO("[紧急停止] 统一调度器已强制停止")
+        except Exception as e:
+            LOG_ERROR(f"[紧急停止] 统一调度器停止失败: {e}")
+
+        # 停止边框管理器
+        if self.border_frame_manager:
+            try:
+                self.border_frame_manager.stop()
+            except Exception as e:
+                LOG_ERROR(f"[紧急停止] 边框管理器停止失败: {e}")
+
+    def cleanup(self):
+        """清理资源"""
+        try:
+            self.stop()
+        except Exception as e:
+            LOG_ERROR(f"[清理] 正常停止失败，执行紧急停止: {e}")
+            self.emergency_stop()
+
+        # 清理统一调度器
+        try:
+            self.unified_scheduler.clear_all_tasks()
+            LOG_INFO("[清理] 统一调度器任务已清理")
+        except Exception as e:
+            LOG_ERROR(f"[清理] 统一调度器清理失败: {e}")
+
+        # 取消事件订阅
+        try:
+            event_bus.unsubscribe("engine:config_updated", self._on_config_updated)
+        except Exception as e:
+            LOG_ERROR(f"[清理] 事件订阅取消失败: {e}")

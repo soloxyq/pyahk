@@ -1,0 +1,179 @@
+{
+    "skills": {
+        "Skill1": {
+            "Enabled": true,
+            "Key": "C",
+            "Priority": false,
+            "Timer": 200,
+            "TriggerMode": 0,
+            "CooldownCoordX": 795,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 900,
+            "ConditionCoordY": 600,
+            "ConditionColor": 0,
+            "AltKey": "9"
+        },
+        "Skill2": {
+            "Enabled": true,
+            "Key": "Lbutton",
+            "Priority": true,
+            "Timer": 75,
+            "TriggerMode": 0,
+            "CooldownCoordX": 857,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 2,
+            "ConditionCoordX": 1310,
+            "ConditionCoordY": 992,
+            "ConditionColor": 0,
+            "AltKey": "2"
+        },
+        "Skill3": {
+            "Enabled": true,
+            "Key": "3",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "CooldownCoordX": 919,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill4": {
+            "Enabled": true,
+            "Key": "4",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "CooldownCoordX": 981,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill5": {
+            "Enabled": true,
+            "Key": "x",
+            "Priority": false,
+            "Timer": 200,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 1,
+            "ConditionCoordX": 611,
+            "ConditionCoordY": 933,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill6": {
+            "Enabled": false,
+            "Key": "6",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill7": {
+            "Enabled": false,
+            "Key": "7",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill8": {
+            "Enabled": false,
+            "Key": "8",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        }
+    },
+    "global": {
+        "sequence_enabled": false,
+        "skill_sequence": "1,2,3,4,5,6,7,8",
+        "queue_processor_interval": 35,
+        "cooldown_checker_interval": 110,
+        "key_press_duration": 10,
+        "mouse_click_duration": 5,
+        "sequence_timer_interval": 1000,
+        "capture_interval": 60,
+        "sound_feedback_enabled": true,
+        "window_activation": {
+            "enabled": true,
+            "ahk_class": "Diablo IV Main Window Class",
+            "ahk_exe": "Diablo IV.exe"
+        },
+        "stationary_mode_config": {
+            "hotkey": "xbutton1",
+            "mode_type": "shift_modifier"
+        },
+        "affix_reroll": {
+            "enabled": true,
+            "target_affixes": [
+                "毒伤",
+                "生命上限"
+            ],
+            "max_attempts": 99,
+            "click_delay": 200,
+            "enchant_button_coord": [
+                489,
+                907
+            ],
+            "first_affix_button_coord": [
+                143,
+                554
+            ],
+            "replace_button_coord": [
+                345,
+                916
+            ],
+            "close_button_coord": [
+                351,
+                654
+            ]
+        },
+        "process_history": {},
+        "pathfinding_config": {
+            "hotkey": "f9",
+            "minimap_area": [
+                0,
+                0,
+                0,
+                0
+            ]
+        }
+    }
+}

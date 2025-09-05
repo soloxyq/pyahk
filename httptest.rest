@@ -1,0 +1,22 @@
+# Startover Dash - 2h  :
+https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.mpd?timeStart=2025/06/13/07/42
+
+### Startover HLS - 2h : 
+GET https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.m3u8?timeStart=2025/06/13/07/42
+# Catchup Dash - 24h :
+https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.mpd?timeStart=2025/06/13/07/42&timeEnd=2025/06/13/07/47
+# Catchup HLS - 24h :
+https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.m3u8?timeStart=2025/06/13/07/42&timeEnd=2025/06/13/07/47
+
+
+### Startover Dash - 2h  :
+https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.mpd?timeStart=2025/08/26/10/01
+
+### Startover HLS - 2h : 
+https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.m3u8?timeStart=2025/08/26/10/01
+
+### Catchup Dash - 24h :
+https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.mpd?timeStart=2025/08/26/09/56&timeEnd=2025/08/26/10/01
+
+###Catchup HLS - 24h :
+https://vxvideowizard.mn.streamvx.dev/vxwizard/output/d176b50f-1c90-402a-b393-06589e24d41f/playlist.m3u8?timeStart=2025/08/26/09/56&timeEnd=2025/08/26/10/01

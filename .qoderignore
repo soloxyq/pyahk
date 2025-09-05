@@ -1,0 +1,6 @@
+.vscode/
+.qoder/
+.github/
+主界面UI展示/
+build/
+__pycache__/
