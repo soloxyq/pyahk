@@ -2,42 +2,42 @@
     "skills": {
         "Skill1": {
             "Enabled": false,
-            "Key": "1",
+            "Key": "C",
             "Priority": false,
-            "Timer": 1000,
-            "TriggerMode": 1,
-            "CooldownCoordX": 782,
-            "CooldownCoordY": 1008,
+            "Timer": 200,
+            "TriggerMode": 0,
+            "CooldownCoordX": 795,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 0,
-            "ConditionCoordY": 0,
+            "ConditionCoordX": 900,
+            "ConditionCoordY": 600,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "9"
         },
         "Skill2": {
             "Enabled": true,
-            "Key": "2",
+            "Key": "Lbutton",
             "Priority": false,
             "Timer": 125,
             "TriggerMode": 0,
-            "CooldownCoordX": 847,
-            "CooldownCoordY": 1008,
+            "CooldownCoordX": 857,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 0,
-            "ConditionCoordY": 0,
+            "ConditionCoordX": 1310,
+            "ConditionCoordY": 992,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "2"
         },
         "Skill3": {
             "Enabled": true,
-            "Key": "3",
+            "Key": "Rbutton",
             "Priority": false,
-            "Timer": 125,
+            "Timer": 650,
             "TriggerMode": 0,
-            "CooldownCoordX": 912,
-            "CooldownCoordY": 1008,
+            "CooldownCoordX": 919,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -46,13 +46,13 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "4",
             "Priority": false,
-            "Timer": 125,
-            "TriggerMode": 0,
-            "CooldownCoordX": 977,
-            "CooldownCoordY": 1008,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "CooldownCoordX": 981,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -61,32 +61,32 @@
             "AltKey": ""
         },
         "Skill5": {
-            "Enabled": true,
-            "Key": "lbutton",
+            "Enabled": false,
+            "Key": "1",
             "Priority": false,
-            "Timer": 75,
+            "Timer": 150,
             "TriggerMode": 0,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
-            "ExecuteCondition": 0,
-            "ConditionCoordX": 0,
-            "ConditionCoordY": 0,
-            "ConditionColor": 0,
+            "ExecuteCondition": 1,
+            "ConditionCoordX": 126,
+            "ConditionCoordY": 970,
+            "ConditionColor": 1,
             "AltKey": ""
         },
         "Skill6": {
             "Enabled": false,
-            "Key": "6",
+            "Key": "2",
             "Priority": false,
-            "Timer": 1000,
+            "Timer": 200,
             "TriggerMode": 0,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
-            "ExecuteCondition": 0,
-            "ConditionCoordX": 0,
-            "ConditionCoordY": 0,
+            "ExecuteCondition": 1,
+            "ConditionCoordX": 1800,
+            "ConditionCoordY": 970,
             "ConditionColor": 0,
             "AltKey": ""
         },
@@ -123,32 +123,47 @@
     },
     "global": {
         "sequence_enabled": false,
-        "queue_processor_interval": 50,
+        "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
-        "cooldown_checker_interval": 100,
+        "cooldown_checker_interval": 110,
         "sequence_timer_interval": 1000,
-        "capture_interval": 40,
+        "capture_interval": 60,
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
-            "ahk_class": "ConsoleWindowClass",
-            "ahk_exe": "Last Epoch.exe"
+            "ahk_class": "POEWindowClass",
+            "ahk_exe": "PathOfExile_x64.exe"
         },
         "stationary_mode_config": {
-            "hotkey": "",
-            "mode_type": "block_mouse",
+            "hotkey": "xbutton1",
+            "mode_type": "shift_modifier",
             "force_move_hotkey": ""
         },
         "affix_reroll": {
-            "enabled": false,
-            "target_affixes": [],
-            "max_attempts": 100,
+            "enabled": true,
+            "target_affixes": [
+                "毒伤",
+                "生命上限"
+            ],
+            "max_attempts": 99,
             "click_delay": 200,
-            "enchant_button_coord": null,
-            "first_affix_button_coord": null,
-            "replace_button_coord": null,
-            "close_button_coord": null
+            "enchant_button_coord": [
+                489,
+                907
+            ],
+            "first_affix_button_coord": [
+                143,
+                554
+            ],
+            "replace_button_coord": [
+                345,
+                916
+            ],
+            "close_button_coord": [
+                351,
+                654
+            ]
         },
         "pathfinding_config": {
             "hotkey": "f9",
