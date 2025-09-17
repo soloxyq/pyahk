@@ -48,10 +48,17 @@ class MacroEngine:
         self.config_manager = ConfigManager()
         self.input_handler = InputHandler(hotkey_manager=hotkey_manager)
         self.border_manager = BorderFrameManager()
-        self.skill_manager = SkillManager(self.input_handler, self, self.border_manager)
         self.sound_manager = sound_manager or SoundManager()
-        from .simple_affix_reroll_manager import SimpleAffixRerollManager
 
+        # 初始化ResourceManager
+        from .resource_manager import ResourceManager
+        self.resource_manager = ResourceManager(
+            self.border_manager, self.input_handler
+        )
+
+        self.skill_manager = SkillManager(self.input_handler, self, self.border_manager, self.resource_manager)
+
+        from .simple_affix_reroll_manager import SimpleAffixRerollManager
         self.affix_reroll_manager = SimpleAffixRerollManager(
             self.border_manager, self.input_handler
         )
@@ -120,6 +127,7 @@ class MacroEngine:
         if state == MacroState.STOPPED:
             self.skill_manager.stop()
             self.pathfinding_manager.stop()
+            self.resource_manager.stop()
             self.border_manager.stop()
             self.input_handler.cleanup()
             self._prepared_mode = "none"
@@ -142,6 +150,7 @@ class MacroEngine:
                     self.skill_manager.resume()
                 elif self._prepared_mode == "pathfinding":
                     self.pathfinding_manager.resume()
+                self.resource_manager.resume()
                 self.border_manager.resume_capture()
             else:
                 # 首次启动
@@ -152,6 +161,7 @@ class MacroEngine:
                 self.skill_manager.pause()
             elif self._prepared_mode == "pathfinding":
                 self.pathfinding_manager.pause()
+            self.resource_manager.pause()
             self.border_manager.pause_capture()
 
         event_bus.publish(f"engine:macro_{state.name.lower()}")
@@ -172,6 +182,10 @@ class MacroEngine:
 
         # 恢复捕获（如果之前是暂停状态）
         self.border_manager.resume_capture()
+
+        # 启动资源管理器（如果有启用配置）
+        self.resource_manager.start()
+
         LOG_INFO("[状态转换] 子系统启动完成")
 
     def _publish_status_update(
@@ -242,7 +256,12 @@ class MacroEngine:
     def _on_config_updated(
         self, skills_config: Dict[str, Any], global_config: Dict[str, Any]
     ):
-        """响应配置更新，安全地更新所有可配置的热键。"""
+        """响应配置更新，安全地更新所有可配置的热键和资源管理器。"""
+        # 更新资源管理器配置
+        resource_config = global_config.get("resource_management", {})
+        if resource_config:
+            self.resource_manager.update_config(resource_config)
+
         # 提取新的热键配置
         stationary_config = global_config.get("stationary_mode_config", {})
         pathfinding_config = global_config.get("pathfinding_config", {})
@@ -525,6 +544,7 @@ class MacroEngine:
                     self.skill_manager,
                     self.pathfinding_manager,
                     self.affix_reroll_manager,
+                    self.resource_manager,
                 ],
             ),
             # Layer 2: 停止核心服务和IO

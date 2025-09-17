@@ -2,7 +2,7 @@
     "skills": {
         "Skill1": {
             "Enabled": true,
-            "Key": "1",
+            "Key": "7",
             "Priority": false,
             "Timer": 200,
             "TriggerMode": 0,
@@ -17,7 +17,7 @@
         },
         "Skill2": {
             "Enabled": true,
-            "Key": "2",
+            "Key": "8",
             "Priority": false,
             "Timer": 999,
             "TriggerMode": 1,
@@ -47,7 +47,7 @@
         },
         "Skill4": {
             "Enabled": true,
-            "Key": "4",
+            "Key": "5",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 1,
@@ -62,7 +62,7 @@
         },
         "Skill5": {
             "Enabled": false,
-            "Key": "5",
+            "Key": "4",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 0,
@@ -77,7 +77,7 @@
         },
         "Skill6": {
             "Enabled": false,
-            "Key": "6",
+            "Key": "3",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 0,
@@ -158,6 +158,41 @@
                 0,
                 0
             ]
+        },
+        "resource_management": {
+            "hp_config": {
+                "enabled": true,
+                "key": "1",
+                "threshold": 50,
+                "cooldown": 1000,
+                "region_x1": 81,
+                "region_y1": 125,
+                "region_x2": 126,
+                "region_y2": 274,
+                "target_h": 0,
+                "target_s": 0,
+                "target_v": 255,
+                "tolerance_h": 10,
+                "tolerance_s": 20,
+                "tolerance_v": 20
+            },
+            "mp_config": {
+                "enabled": true,
+                "key": "2",
+                "threshold": 50,
+                "cooldown": 2000,
+                "region_x1": 1221,
+                "region_y1": 133,
+                "region_x2": 1265,
+                "region_y2": 221,
+                "target_h": 0,
+                "target_s": 0,
+                "target_v": 255,
+                "tolerance_h": 7,
+                "tolerance_s": 5,
+                "tolerance_v": 5
+            },
+            "check_interval": 200
         },
         "skill_sequence": "1,2,3,4,5,6,7,8,9",
         "process_history": {

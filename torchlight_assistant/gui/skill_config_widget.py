@@ -85,6 +85,8 @@ class SimplifiedSkillWidget(QWidget):
         self.cooldown_frame = self._create_cooldown_frame()
         layout.addWidget(self.cooldown_frame)
 
+        # 移除内部冷却框架 - 该功能未实现
+
     def _create_timer_frame(self):
         frame = QFrame()
         frame_layout = QHBoxLayout(frame)
@@ -117,6 +119,8 @@ class SimplifiedSkillWidget(QWidget):
 
         return frame
 
+    # _create_internal_cooldown_frame 方法已移除 - 该功能未实现
+
     def _create_condition_settings(self, layout):
         layout.addWidget(QLabel("条件:"))
 
@@ -130,7 +134,7 @@ class SimplifiedSkillWidget(QWidget):
         # 添加工具提示说明不同条件的逻辑
         self._ui_widgets["ExecuteCondition"].setToolTip(
             "无限制：直接执行主按键\n"
-            "BUFF限制：检测成功时不执行，检测失败时执行主按键（无额外键）\n"
+            "BUFF限制：检测成功时不执行，检测失败时执行主按键\n"
             "资源条件：检测成功时执行主按键，检测失败时执行额外键"
         )
         layout.addWidget(self._ui_widgets["ExecuteCondition"])
@@ -160,23 +164,48 @@ class SimplifiedSkillWidget(QWidget):
         frame_layout.setContentsMargins(0, 0, 0, 0)
         frame_layout.setSpacing(1)
 
+        # 普通条件检测控件
+        self.normal_condition_frame = QFrame()
+        normal_layout = QHBoxLayout(self.normal_condition_frame)
+        normal_layout.setContentsMargins(0, 0, 0, 0)
+        normal_layout.setSpacing(1)
+
         for prop, label, width in [
             ("ConditionCoordX", "检测X:", 40),
             ("ConditionCoordY", "Y:", 40),
         ]:
-            frame_layout.addWidget(QLabel(label))
+            normal_layout.addWidget(QLabel(label))
             self._ui_widgets[prop] = ConfigLineEdit()
             self._ui_widgets[prop].setMaximumWidth(width)
-            frame_layout.addWidget(self._ui_widgets[prop])
+            normal_layout.addWidget(self._ui_widgets[prop])
 
-        frame_layout.addWidget(QLabel("颜色:"))
+        normal_layout.addWidget(QLabel("颜色:"))
         self._ui_widgets["ConditionColor"] = ConfigLineEdit()
         self._ui_widgets["ConditionColor"].setMaximumWidth(80)
-        frame_layout.addWidget(self._ui_widgets["ConditionColor"])
+        normal_layout.addWidget(self._ui_widgets["ConditionColor"])
 
         note_label = QLabel("(0=智能,1=血量)")
         note_label.setStyleSheet("font-size: 8pt;")
-        frame_layout.addWidget(note_label)
+        normal_layout.addWidget(note_label)
+
+        frame_layout.addWidget(self.normal_condition_frame)
+
+        # 区域资源检测控件
+        self.region_condition_frame = QFrame()
+        region_layout = QVBoxLayout(self.region_condition_frame)
+        region_layout.setContentsMargins(0, 0, 0, 0)
+        region_layout.setSpacing(2)
+
+        # 区域资源检测功能已移至独立的"智能药剂"配置
+        # 这里不再需要resource相关的配置字段
+        info_label = QLabel("💡 资源检测功能已移至'智能药剂'标签页进行配置")
+        info_label.setStyleSheet("color: #666; font-style: italic; padding: 10px;")
+        region_layout.addWidget(info_label)
+
+        frame_layout.addWidget(self.region_condition_frame)
+
+        # 默认隐藏区域资源检测控件
+        self.region_condition_frame.hide()
 
         return frame
 
@@ -188,9 +217,10 @@ class SimplifiedSkillWidget(QWidget):
             changes["Key"] = self._ui_widgets["Key"].text()
             changes["Priority"] = self._ui_widgets["Priority"].isChecked()
             changes["Timer"] = int(self._ui_widgets["Timer"].text() or 0)
-            changes["TriggerMode"] = (
-                1 if self._ui_widgets["TriggerMode_cooldown"].isChecked() else 0
-            )
+            if self._ui_widgets["TriggerMode_cooldown"].isChecked():
+                changes["TriggerMode"] = 1
+            else:
+                changes["TriggerMode"] = 0
             changes["CooldownCoordX"] = int(
                 self._ui_widgets["CooldownCoordX"].text() or 0
             )
@@ -198,23 +228,32 @@ class SimplifiedSkillWidget(QWidget):
                 self._ui_widgets["CooldownCoordY"].text() or 0
             )
             changes["CooldownSize"] = int(self._ui_widgets["CooldownSize"].text() or 0)
+            # InternalCooldown 字段已移除 - 该功能未实现
             changes["ExecuteCondition"] = {
                 "无限制": 0,
                 "BUFF限制": 1,
                 "资源条件": 2,
             }.get(self._ui_widgets["ExecuteCondition"].currentText(), 0)
-            changes["ConditionCoordX"] = int(
-                self._ui_widgets["ConditionCoordX"].text() or 0
-            )
-            changes["ConditionCoordY"] = int(
-                self._ui_widgets["ConditionCoordY"].text() or 0
-            )
-            color_text = self._ui_widgets["ConditionColor"].text()
-            changes["ConditionColor"] = (
-                int(color_text, 16)
-                if color_text.startswith("0x")
-                else int(color_text or 0)
-            )
+            # 普通条件检测配置
+            if "ConditionCoordX" in self._ui_widgets:
+                changes["ConditionCoordX"] = int(
+                    self._ui_widgets["ConditionCoordX"].text() or 0
+                )
+            if "ConditionCoordY" in self._ui_widgets:
+                changes["ConditionCoordY"] = int(
+                    self._ui_widgets["ConditionCoordY"].text() or 0
+                )
+            if "ConditionColor" in self._ui_widgets:
+                color_text = self._ui_widgets["ConditionColor"].text()
+                changes["ConditionColor"] = (
+                    int(color_text, 16)
+                    if color_text.startswith("0x")
+                    else int(color_text or 0)
+                )
+
+            # 区域资源检测配置已移至独立的"智能药剂"配置
+            # 不再在skill配置中保存resource相关字段
+
             changes["AltKey"] = self._ui_widgets["AltKey"].text()
         except (ValueError, TypeError) as e:
             LOG_ERROR(
@@ -238,7 +277,8 @@ class SimplifiedSkillWidget(QWidget):
             self._ui_widgets["Priority"].setChecked(config.get("Priority", False))
             self._ui_widgets["Timer"].setText(str(config.get("Timer", 1000)))
 
-            if config.get("TriggerMode") == 1:
+            trigger_mode = config.get("TriggerMode", 0)
+            if trigger_mode == 1:
                 self._ui_widgets["TriggerMode_cooldown"].setChecked(True)
             else:
                 self._ui_widgets["TriggerMode_timer"].setChecked(True)
@@ -252,21 +292,55 @@ class SimplifiedSkillWidget(QWidget):
             self._ui_widgets["CooldownSize"].setText(
                 str(config.get("CooldownSize", 12))
             )
+            # InternalCooldown 字段已移除
 
             condition_map = {0: "无限制", 1: "BUFF限制", 2: "资源条件"}
             self._ui_widgets["ExecuteCondition"].setCurrentText(
                 condition_map.get(config.get("ExecuteCondition", 0), "无限制")
             )
 
-            self._ui_widgets["ConditionCoordX"].setText(
-                str(config.get("ConditionCoordX", 0))
-            )
-            self._ui_widgets["ConditionCoordY"].setText(
-                str(config.get("ConditionCoordY", 0))
-            )
-            self._ui_widgets["ConditionColor"].setText(
-                f"0x{config.get('ConditionColor', 0):06X}"
-            )
+            # 普通条件检测配置
+            if "ConditionCoordX" in self._ui_widgets:
+                self._ui_widgets["ConditionCoordX"].setText(
+                    str(config.get("ConditionCoordX", 0))
+                )
+            if "ConditionCoordY" in self._ui_widgets:
+                self._ui_widgets["ConditionCoordY"].setText(
+                    str(config.get("ConditionCoordY", 0))
+                )
+            if "ConditionColor" in self._ui_widgets:
+                self._ui_widgets["ConditionColor"].setText(
+                    f"0x{config.get('ConditionColor', 0):06X}"
+                )
+
+            # 区域资源检测配置
+            if "RegionX1" in self._ui_widgets:
+                self._ui_widgets["RegionX1"].setText(str(config.get("RegionX1", 0)))
+            if "RegionY1" in self._ui_widgets:
+                self._ui_widgets["RegionY1"].setText(str(config.get("RegionY1", 0)))
+            if "RegionX2" in self._ui_widgets:
+                self._ui_widgets["RegionX2"].setText(str(config.get("RegionX2", 0)))
+            if "RegionY2" in self._ui_widgets:
+                self._ui_widgets["RegionY2"].setText(str(config.get("RegionY2", 0)))
+            if "ResourceThreshold" in self._ui_widgets:
+                self._ui_widgets["ResourceThreshold"].setText(str(config.get("ResourceThreshold", 50)))
+            if "ColorType" in self._ui_widgets:
+                self._ui_widgets["ColorType"].setText(str(config.get("ColorType", 0)))
+
+            # HSV颜色和容差配置
+            if "TargetH" in self._ui_widgets:
+                self._ui_widgets["TargetH"].setText(str(config.get("TargetH", 0)))
+            if "TargetS" in self._ui_widgets:
+                self._ui_widgets["TargetS"].setText(str(config.get("TargetS", 0)))
+            if "TargetV" in self._ui_widgets:
+                self._ui_widgets["TargetV"].setText(str(config.get("TargetV", 0)))
+            if "ToleranceH" in self._ui_widgets:
+                self._ui_widgets["ToleranceH"].setText(str(config.get("ToleranceH", 10)))
+            if "ToleranceS" in self._ui_widgets:
+                self._ui_widgets["ToleranceS"].setText(str(config.get("ToleranceS", 20)))
+            if "ToleranceV" in self._ui_widgets:
+                self._ui_widgets["ToleranceV"].setText(str(config.get("ToleranceV", 20)))
+
             self._ui_widgets["AltKey"].setText(config.get("AltKey", ""))
 
             self._update_ui_visibility(config)
@@ -274,13 +348,22 @@ class SimplifiedSkillWidget(QWidget):
             self._updating_ui = False
 
     def _update_ui_visibility(self, config):
-        is_cooldown_mode = config.get("TriggerMode") == 1
+        trigger_mode = config.get("TriggerMode", 0)
+        is_cooldown_mode = trigger_mode == 1
+
         self.cooldown_frame.setVisible(is_cooldown_mode)
-        self.timer_frame.setVisible(not is_cooldown_mode)
+        self.timer_frame.setVisible(trigger_mode == 0)
 
         condition = config.get("ExecuteCondition", 0)
         self.condition_frame.setVisible(condition != 0)
-        # BUFF限制(1)没有额外键，只有资源条件(2)才显示额外键
+
+        # 普通条件检测UI（所有条件类型都使用相同的UI）
+        if hasattr(self, 'normal_condition_frame'):
+            self.normal_condition_frame.setVisible(True)
+        if hasattr(self, 'region_condition_frame'):
+            self.region_condition_frame.setVisible(False)
+
+        # BUFF限制(1)和区域资源检测(3)没有额外键，只有资源条件(2)才显示额外键
         self.alt_key_frame.setVisible(condition == 2)
 
     def get_frame(self):
@@ -324,13 +407,37 @@ class SimplifiedSkillWidget(QWidget):
             "CooldownCoordX",
             "CooldownCoordY",
             "CooldownSize",
+            # "InternalCooldown" 已移除
             "ExecuteCondition",
+            "AltKey",
+        ]
+
+        # 条件相关的控件（根据条件类型动态检查）
+        condition_widgets = [
             "ConditionCoordX",
             "ConditionCoordY",
             "ConditionColor",
-            "AltKey",
+            "RegionX1",
+            "RegionY1",
+            "RegionX2",
+            "RegionY2",
+            "ResourceThreshold",
+            "ColorType",
+            "TargetH",
+            "TargetS",
+            "TargetV",
+            "ToleranceH",
+            "ToleranceS",
+            "ToleranceV",
         ]
-        return all(widget_name in self._ui_widgets for widget_name in required_widgets)
+
+        # 检查基础控件
+        if not all(widget_name in self._ui_widgets for widget_name in required_widgets):
+            return False
+
+        # 检查条件控件（至少要有一些）
+        has_condition_widgets = any(widget_name in self._ui_widgets for widget_name in condition_widgets)
+        return has_condition_widgets
 
     def destroy(self):
         self.deleteLater()
