@@ -174,6 +174,72 @@
                 0
             ]
         },
+        "resource_management": {
+            "hp_config": {
+                "enabled": true,
+                "key": "1",
+                "threshold": 50,
+                "cooldown": 1000,
+                "region_x1": 100,
+                "region_y1": 918,
+                "region_x2": 137,
+                "region_y2": 1043,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "enabled": true,
+                        "target_h": 178,
+                        "target_s": 188,
+                        "target_v": 134,
+                        "tolerance_h": 10,
+                        "tolerance_s": 20,
+                        "tolerance_v": 20
+                    }
+                ],
+                "target_h": 178,
+                "target_s": 188,
+                "target_v": 134,
+                "tolerance_h": 10,
+                "tolerance_s": 20,
+                "tolerance_v": 20,
+                "poison_enabled": false,
+                "poison_h": 80,
+                "poison_s": 84,
+                "poison_v": 48,
+                "poison_tolerance_h": 20,
+                "poison_tolerance_s": 27,
+                "poison_tolerance_v": 27
+            },
+            "mp_config": {
+                "enabled": true,
+                "key": "2",
+                "threshold": 10,
+                "cooldown": 2000,
+                "region_x1": 1780,
+                "region_y1": 918,
+                "region_x2": 1817,
+                "region_y2": 1043,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "enabled": true,
+                        "target_h": 105,
+                        "target_s": 212,
+                        "target_v": 141,
+                        "tolerance_h": 10,
+                        "tolerance_s": 20,
+                        "tolerance_v": 20
+                    }
+                ],
+                "target_h": 105,
+                "target_s": 212,
+                "target_v": 141,
+                "tolerance_h": 10,
+                "tolerance_s": 20,
+                "tolerance_v": 20
+            },
+            "check_interval": 150
+        },
         "skill_sequence": "1,2,3,4,5,6,7,8",
         "process_history": {}
     }
