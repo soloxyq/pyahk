@@ -136,7 +136,7 @@ class ResourceManager:
     def _calculate_region_resource_percentage(
         self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int, config: Dict[str, Any]
     ) -> float:
-        """计算区域内的资源百分比"""
+        """计算区域内的资源百分比（支持多颜色检测）"""
         if frame is None:
             return 100.0
 
@@ -151,55 +151,119 @@ class ResourceManager:
 
             # 提取区域
             region = frame[y1:y2, x1:x2]
-
-            # 获取HSV目标颜色和容差
-            target_h = config.get("target_h", 0)
-            target_s = config.get("target_s", 75)
-            target_v = config.get("target_v", 29)
-
-            tolerance_h = config.get("tolerance_h", 10)
-            tolerance_s = config.get("tolerance_s", 20)
-            tolerance_v = config.get("tolerance_v", 20)
-
-            # 计算符合颜色的像素数量
             total_pixels = region.shape[0] * region.shape[1]
             if total_pixels == 0:
                 return 100.0
 
-            # 使用HSV颜色匹配
             import cv2
             hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
 
-            # 将Qt的H值(0-359)转换为OpenCV的H值(0-179)
-            opencv_h = int(target_h / 2) if target_h > 0 else 0
-            opencv_h_tolerance = int(tolerance_h / 2)
+            # 获取颜色列表配置
+            colors_to_check = self._get_colors_config(config)
+            
+            if not colors_to_check:
+                LOG_ERROR(f"[ResourceManager] 没有配置任何检测颜色")
+                return 100.0
 
-            lower_bound = np.array([
-                max(0, opencv_h - opencv_h_tolerance),
-                max(0, target_s - tolerance_s),
-                max(0, target_v - tolerance_v)
-            ], dtype=np.uint8)
+            # 从全黑的mask开始
+            final_mask = np.zeros(hsv_region.shape[:2], dtype=np.uint8)
+            total_matching_pixels = 0
 
-            upper_bound = np.array([
-                min(179, opencv_h + opencv_h_tolerance),
-                min(255, target_s + tolerance_s),
-                min(255, target_v + tolerance_v)
-            ], dtype=np.uint8)
+            # 循环处理颜色列表
+            for i, color_profile in enumerate(colors_to_check):
+                if not color_profile.get("enabled", True):
+                    continue
+                    
+                current_mask = self._create_color_mask(hsv_region, color_profile)
+                current_pixels = cv2.countNonZero(current_mask)
+                
+                # 使用位或(OR)操作，将当前mask合并到最终mask中
+                final_mask = cv2.bitwise_or(final_mask, current_mask)
+                
+                LOG_INFO(f"[ResourceManager] 颜色{i+1}({color_profile.get('name', 'Unknown')}) - 匹配像素: {current_pixels}")
 
-            mask = cv2.inRange(hsv_region, lower_bound, upper_bound)
-            matching_pixels = cv2.countNonZero(mask)
-
-            # 计算百分比
+            # 计算合并后mask的总匹配像素
+            matching_pixels = cv2.countNonZero(final_mask)
             percentage = (matching_pixels / total_pixels) * 100.0
             
-            LOG_INFO(f"[ResourceManager] 区域检测结果 - 匹配像素: {matching_pixels}/{total_pixels}, 百分比: {percentage:.1f}%")
-            LOG_INFO(f"[ResourceManager] HSV范围 - H: {opencv_h}±{opencv_h_tolerance}, S: {target_s}±{tolerance_s}, V: {target_v}±{tolerance_v}")
+            LOG_INFO(f"[ResourceManager] 区域检测结果 - 总匹配像素: {matching_pixels}/{total_pixels}, 百分比: {percentage:.1f}%")
             
             return min(100.0, max(0.0, percentage))
 
         except Exception as e:
             LOG_ERROR(f"[ResourceManager] 区域资源计算异常: {e}")
             return 100.0
+
+    def _get_colors_config(self, config: Dict[str, Any]) -> list:
+        """获取颜色配置列表，兼容新旧格式"""
+        # 新格式：直接使用colors列表
+        if "colors" in config:
+            return config["colors"]
+        
+        # 旧格式兼容：从单一颜色配置构建列表
+        colors = []
+        
+        # 主颜色（必须）
+        main_color = {
+            "name": "Normal",
+            "enabled": True,
+            "target_h": config.get("target_h", 0),
+            "target_s": config.get("target_s", 75),
+            "target_v": config.get("target_v", 29),
+            "tolerance_h": config.get("tolerance_h", 10),
+            "tolerance_s": config.get("tolerance_s", 20),
+            "tolerance_v": config.get("tolerance_v", 20)
+        }
+        colors.append(main_color)
+        
+        # 中毒状态颜色（可选）
+        if config.get("poison_enabled", False):
+            poison_color = {
+                "name": "Poison",
+                "enabled": True,
+                "target_h": config.get("poison_h", 80),
+                "target_s": config.get("poison_s", 84),
+                "target_v": config.get("poison_v", 48),
+                "tolerance_h": config.get("poison_tolerance_h", 20),
+                "tolerance_s": config.get("poison_tolerance_s", 27),
+                "tolerance_v": config.get("poison_tolerance_v", 27)
+            }
+            colors.append(poison_color)
+        
+        return colors
+
+    def _create_color_mask(self, hsv_region: np.ndarray, color_profile: Dict[str, Any]) -> np.ndarray:
+        """为单个颜色配置创建mask"""
+        import cv2
+        
+        target_h = color_profile.get("target_h", 0)
+        target_s = color_profile.get("target_s", 75)
+        target_v = color_profile.get("target_v", 29)
+        tolerance_h = color_profile.get("tolerance_h", 10)
+        tolerance_s = color_profile.get("tolerance_s", 20)
+        tolerance_v = color_profile.get("tolerance_v", 20)
+
+        # 将Qt的H值(0-359)转换为OpenCV的H值(0-179)
+        opencv_h = int(target_h / 2) if target_h > 0 else 0
+        opencv_h_tolerance = int(tolerance_h / 2)
+
+        lower_bound = np.array([
+            max(0, opencv_h - opencv_h_tolerance),
+            max(0, target_s - tolerance_s),
+            max(0, target_v - tolerance_v)
+        ], dtype=np.uint8)
+
+        upper_bound = np.array([
+            min(179, opencv_h + opencv_h_tolerance),
+            min(255, target_s + tolerance_s),
+            min(255, target_v + tolerance_v)
+        ], dtype=np.uint8)
+
+        mask = cv2.inRange(hsv_region, lower_bound, upper_bound)
+        
+        LOG_INFO(f"[ResourceManager] {color_profile.get('name', 'Unknown')}颜色 - HSV: H={opencv_h}±{opencv_h_tolerance}, S={target_s}±{tolerance_s}, V={target_v}±{tolerance_v}")
+        
+        return mask
 
     def _execute_resource(self, resource_type: str, config: Dict[str, Any]):
         """执行资源操作"""

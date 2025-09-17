@@ -155,7 +155,7 @@ class ResourceManagementWidget(QWidget):
         else:
             x1_edit.setValue(1552)  # 蓝药左上角X
         coords_layout.addWidget(x1_edit, 0, 1)
-        
+
         y1_edit = ConfigSpinBox()
         y1_edit.setRange(0, 8000)
         if prefix == "hp":
@@ -172,7 +172,7 @@ class ResourceManagementWidget(QWidget):
         else:
             x2_edit.setValue(1560)  # 蓝药右下角X
         coords_layout.addWidget(x2_edit, 1, 1)
-        
+
         y2_edit = ConfigSpinBox()
         y2_edit.setRange(0, 8000)
         if prefix == "hp":
@@ -210,92 +210,60 @@ class ResourceManagementWidget(QWidget):
         color_layout = QVBoxLayout(color_group)
         color_layout.setContentsMargins(8, 12, 8, 8)
 
-        # 颜色拾取
-        pick_layout = QHBoxLayout()
-        pick_layout.addWidget(QLabel("目标颜色:"))
-        color_display = QLabel("█")
-        color_display.setStyleSheet(
-            f"""
-            background-color: {color};
-            color: {color};
-            font-size: 16px;
-            font-weight: bold;
-            padding: 2px 8px;
-            border: 1px solid #ccc;
-            border-radius: 3px;
-        """
+        # 移除旧的颜色拾取区域，将在颜色配置输入框旁边添加
+
+        # 简化的颜色配置 - 使用逗号分隔格式
+        colors_layout = QVBoxLayout()
+
+        # 颜色配置说明
+        colors_info = QLabel("颜色配置格式: H,S,V,H容差,S容差,V容差 (多颜色用逗号继续)")
+        colors_info.setStyleSheet("color: #666; font-size: 10pt; font-style: italic;")
+        colors_layout.addWidget(colors_info)
+
+        # 颜色配置输入框
+        colors_input_layout = QHBoxLayout()
+        colors_input_layout.addWidget(QLabel("颜色配置:"))
+
+        colors_edit = ConfigLineEdit()
+        colors_edit.setPlaceholderText("例如: 314,75,29,10,20,20,80,84,48,20,27,27")
+
+        # 设置默认值
+        if prefix == "hp":
+            # HP默认：正常血量 + 中毒状态
+            default_colors = "314,75,29,10,20,20,80,84,48,20,27,27"
+        else:
+            # MP默认：只有蓝色
+            default_colors = "208,80,58,7,5,5"
+
+        colors_edit.setText(default_colors)
+        colors_edit.setMinimumWidth(400)
+        colors_input_layout.addWidget(colors_edit)
+
+        # 添加解析按钮
+        parse_btn = QPushButton("🔍 解析")
+        parse_btn.setMaximumWidth(60)
+        parse_btn.clicked.connect(
+            lambda: self._parse_colors_input(prefix, colors_edit.text())
         )
-        pick_btn = QPushButton("🎨 拾取颜色")
-        pick_btn.setMaximumWidth(80)
-        pick_btn.clicked.connect(lambda: self._start_color_picking(prefix))
-        pick_layout.addWidget(color_display)
-        pick_layout.addWidget(pick_btn)
-        pick_layout.addStretch()
-        color_layout.addLayout(pick_layout)
+        colors_input_layout.addWidget(parse_btn)
 
-        # HSV值设置
-        hsv_layout = QGridLayout()
-        hsv_layout.addWidget(QLabel("色相 (H):"), 0, 0)
-        h_spinbox = ConfigSpinBox()
-        h_spinbox.setRange(0, 359)
-        # 设置实际测量的HSV值
-        if prefix == "hp":
-            h_spinbox.setValue(314)  # 血药色相
-        else:
-            h_spinbox.setValue(208)  # 蓝药色相
-        hsv_layout.addWidget(h_spinbox, 0, 1)
+        # 添加颜色拾取按钮
+        pick_btn = QPushButton("🎨 拾取")
+        pick_btn.setMaximumWidth(60)
+        pick_btn.clicked.connect(
+            lambda: self._start_color_picking_for_input(prefix, colors_edit)
+        )
+        colors_input_layout.addWidget(pick_btn)
 
-        hsv_layout.addWidget(QLabel("饱和度 (S):"), 0, 2)
-        s_spinbox = ConfigSpinBox()
-        s_spinbox.setRange(0, 255)
-        if prefix == "hp":
-            s_spinbox.setValue(75)  # 血药饱和度
-        else:
-            s_spinbox.setValue(80)  # 蓝药饱和度
-        hsv_layout.addWidget(s_spinbox, 0, 3)
+        colors_layout.addLayout(colors_input_layout)
 
-        hsv_layout.addWidget(QLabel("明度 (V):"), 1, 0)
-        v_spinbox = ConfigSpinBox()
-        v_spinbox.setRange(0, 255)
-        if prefix == "hp":
-            v_spinbox.setValue(29)  # 血药明度
-        else:
-            v_spinbox.setValue(58)  # 蓝药明度
-        hsv_layout.addWidget(v_spinbox, 1, 1)
+        # 解析结果显示
+        colors_result = QLabel("")
+        colors_result.setStyleSheet("color: #333; font-size: 9pt; padding: 5px;")
+        colors_result.setWordWrap(True)
+        colors_layout.addWidget(colors_result)
 
-        color_layout.addLayout(hsv_layout)
-
-        # 容差设置
-        tolerance_layout = QGridLayout()
-        tolerance_layout.addWidget(QLabel("H容差:"), 0, 0)
-        h_tolerance_spinbox = ConfigSpinBox()
-        h_tolerance_spinbox.setRange(0, 50)
-        # 设置实际测量的容差值
-        if prefix == "hp":
-            h_tolerance_spinbox.setValue(10)  # 血药H容差
-        else:
-            h_tolerance_spinbox.setValue(7)   # 蓝药H容差
-        tolerance_layout.addWidget(h_tolerance_spinbox, 0, 1)
-
-        tolerance_layout.addWidget(QLabel("S容差:"), 0, 2)
-        s_tolerance_spinbox = ConfigSpinBox()
-        s_tolerance_spinbox.setRange(0, 100)
-        if prefix == "hp":
-            s_tolerance_spinbox.setValue(20)  # 血药S容差
-        else:
-            s_tolerance_spinbox.setValue(5)   # 蓝药S容差
-        tolerance_layout.addWidget(s_tolerance_spinbox, 0, 3)
-
-        tolerance_layout.addWidget(QLabel("V容差:"), 1, 0)
-        v_tolerance_spinbox = ConfigSpinBox()
-        v_tolerance_spinbox.setRange(0, 100)
-        if prefix == "hp":
-            v_tolerance_spinbox.setValue(20)  # 血药V容差
-        else:
-            v_tolerance_spinbox.setValue(5)   # 蓝药V容差
-        tolerance_layout.addWidget(v_tolerance_spinbox, 1, 1)
-
-        color_layout.addLayout(tolerance_layout)
+        color_layout.addLayout(colors_layout)
         layout.addWidget(color_group)
 
         # 保存控件引用
@@ -309,25 +277,15 @@ class ResourceManagementWidget(QWidget):
             "x2": x2_edit,
             "y2": y2_edit,
             "select_region_btn": select_btn,
-            "color_display": color_display,
-            "pick_color_btn": pick_btn,
-            "target_h": h_spinbox,
-            "target_s": s_spinbox,
-            "target_v": v_spinbox,
-            "tolerance_h": h_tolerance_spinbox,
-            "tolerance_s": s_tolerance_spinbox,
-            "tolerance_v": v_tolerance_spinbox,
+            "colors_edit": colors_edit,
+            "colors_result": colors_result,
+            "parse_btn": parse_btn,
+            "pick_btn": pick_btn,
         }
 
-        # 连接HSV值变化事件，实时更新颜色显示
-        h_spinbox.valueChanged.connect(
-            lambda: self._update_color_display_from_hsv(prefix)
-        )
-        s_spinbox.valueChanged.connect(
-            lambda: self._update_color_display_from_hsv(prefix)
-        )
-        v_spinbox.valueChanged.connect(
-            lambda: self._update_color_display_from_hsv(prefix)
+        # 连接颜色配置变化事件
+        colors_edit.textChanged.connect(
+            lambda: self._parse_colors_input(prefix, colors_edit.text())
         )
 
         if prefix == "hp":
@@ -381,42 +339,197 @@ class ResourceManagementWidget(QWidget):
 
         return group
 
+    def _parse_colors_input(self, prefix: str, colors_text: str):
+        """解析颜色配置输入"""
+        try:
+            # 获取对应的结果显示控件
+            widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+            result_label = widgets["colors_result"]
+
+            if not colors_text.strip():
+                result_label.setText("请输入颜色配置")
+                return
+
+            # 解析逗号分隔的数值
+            values = [int(x.strip()) for x in colors_text.split(",") if x.strip()]
+
+            if len(values) % 6 != 0:
+                result_label.setText(
+                    "❌ 格式错误：每种颜色需要6个值 (H,S,V,H容差,S容差,V容差)"
+                )
+                return
+
+            color_count = len(values) // 6
+            result_text = f"✅ 解析成功：{color_count}种颜色\n"
+
+            for i in range(color_count):
+                base_idx = i * 6
+                h, s, v = values[base_idx : base_idx + 3]
+                h_tol, s_tol, v_tol = values[base_idx + 3 : base_idx + 6]
+
+                # 验证范围
+                if not (0 <= h <= 359):
+                    result_label.setText(f"❌ 颜色{i+1}的H值({h})超出范围(0-359)")
+                    return
+                if not (0 <= s <= 255):
+                    result_label.setText(f"❌ 颜色{i+1}的S值({s})超出范围(0-255)")
+                    return
+                if not (0 <= v <= 255):
+                    result_label.setText(f"❌ 颜色{i+1}的V值({v})超出范围(0-255)")
+                    return
+
+                result_text += (
+                    f"  颜色{i+1}: HSV({h},{s},{v}) 容差(±{h_tol},±{s_tol},±{v_tol})\n"
+                )
+
+            result_label.setText(result_text.strip())
+
+        except ValueError:
+            result_label.setText("❌ 格式错误：请输入数字，用逗号分隔")
+        except Exception as e:
+            result_label.setText(f"❌ 解析错误：{str(e)}")
+
+    def _build_hp_config(self) -> Dict[str, Any]:
+        """构建HP配置，使用新的colors列表格式"""
+        # 基础配置
+        hp_config = {
+            "enabled": self.hp_widgets["enabled"].isChecked(),
+            "key": self.hp_widgets["key"].text().strip(),
+            "threshold": self.hp_widgets["threshold"].value(),
+            "cooldown": self.hp_widgets["cooldown"].value(),
+            "region_x1": self.hp_widgets["x1"].value(),
+            "region_y1": self.hp_widgets["y1"].value(),
+            "region_x2": self.hp_widgets["x2"].value(),
+            "region_y2": self.hp_widgets["y2"].value(),
+        }
+
+        # 从颜色配置输入框解析颜色列表
+        colors = self._parse_colors_to_list(self.hp_widgets["colors_edit"].text())
+        hp_config["colors"] = colors
+
+        # 为了向后兼容，从第一个颜色提取旧格式字段
+        if colors:
+            first_color = colors[0]
+            hp_config.update(
+                {
+                    "target_h": first_color.get("target_h", 314),
+                    "target_s": first_color.get("target_s", 75),
+                    "target_v": first_color.get("target_v", 29),
+                    "tolerance_h": first_color.get("tolerance_h", 10),
+                    "tolerance_s": first_color.get("tolerance_s", 20),
+                    "tolerance_v": first_color.get("tolerance_v", 20),
+                }
+            )
+
+            # 如果有第二个颜色，设置poison字段
+            if len(colors) > 1:
+                second_color = colors[1]
+                hp_config.update(
+                    {
+                        "poison_enabled": True,
+                        "poison_h": second_color.get("target_h", 80),
+                        "poison_s": second_color.get("target_s", 84),
+                        "poison_v": second_color.get("target_v", 48),
+                        "poison_tolerance_h": second_color.get("tolerance_h", 20),
+                        "poison_tolerance_s": second_color.get("tolerance_s", 27),
+                        "poison_tolerance_v": second_color.get("tolerance_v", 27),
+                    }
+                )
+            else:
+                hp_config.update(
+                    {
+                        "poison_enabled": False,
+                        "poison_h": 80,
+                        "poison_s": 84,
+                        "poison_v": 48,
+                        "poison_tolerance_h": 20,
+                        "poison_tolerance_s": 27,
+                        "poison_tolerance_v": 27,
+                    }
+                )
+
+        return hp_config
+
+    def _parse_colors_to_list(self, colors_text: str) -> list:
+        """将颜色配置文本解析为颜色列表"""
+        colors = []
+        try:
+            values = [int(x.strip()) for x in colors_text.split(",") if x.strip()]
+            if len(values) % 6 == 0:
+                color_count = len(values) // 6
+                for i in range(color_count):
+                    base_idx = i * 6
+                    h, s, v = values[base_idx : base_idx + 3]
+                    h_tol, s_tol, v_tol = values[base_idx + 3 : base_idx + 6]
+
+                    color = {
+                        "name": f"Color{i+1}",
+                        "enabled": True,
+                        "target_h": h,
+                        "target_s": s,
+                        "target_v": v,
+                        "tolerance_h": h_tol,
+                        "tolerance_s": s_tol,
+                        "tolerance_v": v_tol,
+                    }
+                    colors.append(color)
+        except:
+            # 如果解析失败，返回默认配置
+            colors = [
+                {
+                    "name": "Default",
+                    "enabled": True,
+                    "target_h": 314,
+                    "target_s": 75,
+                    "target_v": 29,
+                    "tolerance_h": 10,
+                    "tolerance_s": 20,
+                    "tolerance_v": 20,
+                }
+            ]
+
+        return colors
+
+    def _build_mp_config(self) -> Dict[str, Any]:
+        """构建MP配置，使用新的colors列表格式"""
+        # 基础配置
+        mp_config = {
+            "enabled": self.mp_widgets["enabled"].isChecked(),
+            "key": self.mp_widgets["key"].text().strip(),
+            "threshold": self.mp_widgets["threshold"].value(),
+            "cooldown": self.mp_widgets["cooldown"].value(),
+            "region_x1": self.mp_widgets["x1"].value(),
+            "region_y1": self.mp_widgets["y1"].value(),
+            "region_x2": self.mp_widgets["x2"].value(),
+            "region_y2": self.mp_widgets["y2"].value(),
+        }
+
+        # 从颜色配置输入框解析颜色列表
+        colors = self._parse_colors_to_list(self.mp_widgets["colors_edit"].text())
+        mp_config["colors"] = colors
+
+        # 为了向后兼容，从第一个颜色提取旧格式字段
+        if colors:
+            first_color = colors[0]
+            mp_config.update(
+                {
+                    "target_h": first_color.get("target_h", 208),
+                    "target_s": first_color.get("target_s", 80),
+                    "target_v": first_color.get("target_v", 58),
+                    "tolerance_h": first_color.get("tolerance_h", 7),
+                    "tolerance_s": first_color.get("tolerance_s", 5),
+                    "tolerance_v": first_color.get("tolerance_v", 5),
+                }
+            )
+
+        return mp_config
+
     def get_config(self) -> Dict[str, Any]:
         """获取配置（匹配ResourceManager期望的格式）"""
         return {
             "resource_management": {
-                "hp_config": {
-                    "enabled": self.hp_widgets["enabled"].isChecked(),
-                    "key": self.hp_widgets["key"].text().strip(),
-                    "threshold": self.hp_widgets["threshold"].value(),
-                    "cooldown": self.hp_widgets["cooldown"].value(),
-                    "region_x1": self.hp_widgets["x1"].value(),
-                    "region_y1": self.hp_widgets["y1"].value(),
-                    "region_x2": self.hp_widgets["x2"].value(),
-                    "region_y2": self.hp_widgets["y2"].value(),
-                    "target_h": self.hp_widgets["target_h"].value(),
-                    "target_s": self.hp_widgets["target_s"].value(),
-                    "target_v": self.hp_widgets["target_v"].value(),
-                    "tolerance_h": self.hp_widgets["tolerance_h"].value(),
-                    "tolerance_s": self.hp_widgets["tolerance_s"].value(),
-                    "tolerance_v": self.hp_widgets["tolerance_v"].value(),
-                },
-                "mp_config": {
-                    "enabled": self.mp_widgets["enabled"].isChecked(),
-                    "key": self.mp_widgets["key"].text().strip(),
-                    "threshold": self.mp_widgets["threshold"].value(),
-                    "cooldown": self.mp_widgets["cooldown"].value(),
-                    "region_x1": self.mp_widgets["x1"].value(),
-                    "region_y1": self.mp_widgets["y1"].value(),
-                    "region_x2": self.mp_widgets["x2"].value(),
-                    "region_y2": self.mp_widgets["y2"].value(),
-                    "target_h": self.mp_widgets["target_h"].value(),
-                    "target_s": self.mp_widgets["target_s"].value(),
-                    "target_v": self.mp_widgets["target_v"].value(),
-                    "tolerance_h": self.mp_widgets["tolerance_h"].value(),
-                    "tolerance_s": self.mp_widgets["tolerance_s"].value(),
-                    "tolerance_v": self.mp_widgets["tolerance_v"].value(),
-                },
+                "hp_config": self._build_hp_config(),
+                "mp_config": self._build_mp_config(),
                 "check_interval": self.check_interval_spinbox.value(),  # 从UI获取检测间隔
             }
         }
@@ -430,47 +543,160 @@ class ResourceManagementWidget(QWidget):
         if self.hp_widgets:
             self.hp_widgets["enabled"].setChecked(hp_config.get("enabled", True))
             self.hp_widgets["key"].setText(hp_config.get("key", "1"))
-            self.hp_widgets["threshold"].setValue(hp_config.get("threshold", 50))  # 默认50%
+            self.hp_widgets["threshold"].setValue(
+                hp_config.get("threshold", 50)
+            )  # 默认50%
             self.hp_widgets["cooldown"].setValue(hp_config.get("cooldown", 5000))
-            self.hp_widgets["x1"].setValue(hp_config.get("region_x1", 136))  # 1080P血药区域
+            self.hp_widgets["x1"].setValue(
+                hp_config.get("region_x1", 136)
+            )  # 1080P血药区域
             self.hp_widgets["y1"].setValue(hp_config.get("region_y1", 910))
             self.hp_widgets["x2"].setValue(hp_config.get("region_x2", 213))
             self.hp_widgets["y2"].setValue(hp_config.get("region_y2", 1004))
-            self.hp_widgets["target_h"].setValue(hp_config.get("target_h", 314))  # 血药HSV
-            self.hp_widgets["target_s"].setValue(hp_config.get("target_s", 75))
-            self.hp_widgets["target_v"].setValue(hp_config.get("target_v", 29))
-            self.hp_widgets["tolerance_h"].setValue(hp_config.get("tolerance_h", 10))  # 血药容差
-            self.hp_widgets["tolerance_s"].setValue(hp_config.get("tolerance_s", 20))
-            self.hp_widgets["tolerance_v"].setValue(hp_config.get("tolerance_v", 20))
 
-            # 更新颜色显示
-            self._update_color_display_from_hsv("hp")
+            # 加载颜色配置
+            colors_text = self._colors_list_to_text(hp_config.get("colors", []))
+            if not colors_text:
+                # 如果没有colors配置，从旧格式构建
+                colors_text = self._build_colors_text_from_old_format(hp_config, True)
+
+            self.hp_widgets["colors_edit"].setText(colors_text)
+            self._parse_colors_input("hp", colors_text)
 
         # MP配置 - 使用1080P默认值
         mp_config = res_config.get("mp_config", {})
         if self.mp_widgets:
             self.mp_widgets["enabled"].setChecked(mp_config.get("enabled", True))
             self.mp_widgets["key"].setText(mp_config.get("key", "2"))
-            self.mp_widgets["threshold"].setValue(mp_config.get("threshold", 50))  # 默认50%
+            self.mp_widgets["threshold"].setValue(
+                mp_config.get("threshold", 50)
+            )  # 默认50%
             self.mp_widgets["cooldown"].setValue(mp_config.get("cooldown", 8000))
-            self.mp_widgets["x1"].setValue(mp_config.get("region_x1", 1552))  # 1080P蓝药区域
+            self.mp_widgets["x1"].setValue(
+                mp_config.get("region_x1", 1552)
+            )  # 1080P蓝药区域
             self.mp_widgets["y1"].setValue(mp_config.get("region_y1", 910))
             self.mp_widgets["x2"].setValue(mp_config.get("region_x2", 1560))
             self.mp_widgets["y2"].setValue(mp_config.get("region_y2", 1004))
-            self.mp_widgets["target_h"].setValue(mp_config.get("target_h", 208))  # 蓝药HSV
-            self.mp_widgets["target_s"].setValue(mp_config.get("target_s", 80))
-            self.mp_widgets["target_v"].setValue(mp_config.get("target_v", 58))
-            self.mp_widgets["tolerance_h"].setValue(mp_config.get("tolerance_h", 7))  # 蓝药容差
-            self.mp_widgets["tolerance_s"].setValue(mp_config.get("tolerance_s", 5))
-            self.mp_widgets["tolerance_v"].setValue(mp_config.get("tolerance_v", 5))
 
-            # 更新颜色显示
-            self._update_color_display_from_hsv("mp")
+            # 加载颜色配置
+            colors_text = self._colors_list_to_text(mp_config.get("colors", []))
+            if not colors_text:
+                # 如果没有colors配置，从旧格式构建
+                colors_text = self._build_colors_text_from_old_format(mp_config, False)
+
+            self.mp_widgets["colors_edit"].setText(colors_text)
+            self._parse_colors_input("mp", colors_text)
 
         # 更新全局设置
         check_interval = res_config.get("check_interval", 200)
-        if hasattr(self, 'check_interval_spinbox'):
+        if hasattr(self, "check_interval_spinbox"):
             self.check_interval_spinbox.setValue(check_interval)
+
+    def _colors_list_to_text(self, colors_list: list) -> str:
+        """将颜色列表转换为文本格式"""
+        if not colors_list:
+            return ""
+
+        values = []
+        for color in colors_list:
+            if color.get("enabled", True):
+                values.extend(
+                    [
+                        color.get("target_h", 0),
+                        color.get("target_s", 75),
+                        color.get("target_v", 29),
+                        color.get("tolerance_h", 10),
+                        color.get("tolerance_s", 20),
+                        color.get("tolerance_v", 20),
+                    ]
+                )
+
+        return ",".join(map(str, values))
+
+    def _build_colors_text_from_old_format(self, config: dict, is_hp: bool) -> str:
+        """从旧格式配置构建颜色文本"""
+        values = []
+
+        # 主颜色
+        if is_hp:
+            values.extend(
+                [
+                    config.get("target_h", 314),
+                    config.get("target_s", 75),
+                    config.get("target_v", 29),
+                    config.get("tolerance_h", 10),
+                    config.get("tolerance_s", 20),
+                    config.get("tolerance_v", 20),
+                ]
+            )
+
+            # 中毒状态颜色（如果启用）
+            if config.get("poison_enabled", False):
+                values.extend(
+                    [
+                        config.get("poison_h", 80),
+                        config.get("poison_s", 84),
+                        config.get("poison_v", 48),
+                        config.get("poison_tolerance_h", 20),
+                        config.get("poison_tolerance_s", 27),
+                        config.get("poison_tolerance_v", 27),
+                    ]
+                )
+        else:
+            # MP只有一种颜色
+            values.extend(
+                [
+                    config.get("target_h", 208),
+                    config.get("target_s", 80),
+                    config.get("target_v", 58),
+                    config.get("tolerance_h", 7),
+                    config.get("tolerance_s", 5),
+                    config.get("tolerance_v", 5),
+                ]
+            )
+
+        return ",".join(map(str, values))
+
+    def _start_color_picking_for_input(self, prefix: str, colors_edit):
+        """启动颜色拾取，将结果添加到输入框末尾"""
+        if self.main_window:
+            self.main_window.hide()
+
+        dialog = ColorPickingDialog()
+
+        def on_color_picked(h, s, v):
+            # 获取当前输入框的内容
+            current_text = colors_edit.text().strip()
+
+            # 构建新的颜色值（HSV + 默认容差）
+            # h, s, v 已经是独立的参数
+
+            # 设置默认容差
+            if prefix == "hp":
+                default_tolerance = "10,20,20"  # HP默认容差
+            else:
+                default_tolerance = "7,5,5"  # MP默认容差
+
+            new_color = f"{h},{s},{v},{default_tolerance}"
+
+            # 添加到输入框末尾
+            if current_text:
+                updated_text = f"{current_text},{new_color}"
+            else:
+                updated_text = new_color
+
+            colors_edit.setText(updated_text)
+
+            # 自动解析新的配置
+            self._parse_colors_input(prefix, updated_text)
+
+            # 显示主窗口
+            if self.main_window:
+                self.main_window.show()
+
+        dialog.color_picked.connect(on_color_picked)
+        dialog.exec()
 
     def set_main_window(self, main_window):
         """设置主窗口引用，用于隐藏/显示界面"""
@@ -505,35 +731,6 @@ class ResourceManagementWidget(QWidget):
         # 延迟100ms执行对话框显示
         QTimer.singleShot(100, show_dialog)
 
-    def _start_color_picking(self, prefix: str):
-        """开始颜色拾取"""
-        if not self.main_window:
-            return
-
-        # 使用QTimer延迟执行，确保界面完全隐藏
-        from PySide6.QtCore import QTimer
-
-        def show_dialog():
-            # 创建颜色拾取对话框
-            dialog = ColorPickingDialog(None)  # 不设置父窗口，避免焦点问题
-            dialog.color_picked.connect(
-                lambda h, s, v: self._on_color_picked(prefix, h, s, v)
-            )
-
-            # 执行对话框（showEvent会自动处理焦点）
-            result = dialog.exec()
-
-            # 显示主界面
-            self.main_window.show()
-            self.main_window.raise_()
-            self.main_window.activateWindow()
-
-        # 隐藏主界面
-        self.main_window.hide()
-
-        # 延迟100ms执行对话框显示
-        QTimer.singleShot(100, show_dialog)
-
     def _on_region_selected(self, prefix: str, x1: int, y1: int, x2: int, y2: int):
         """区域选择完成回调"""
         widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
@@ -541,49 +738,6 @@ class ResourceManagementWidget(QWidget):
         widgets["y1"].setValue(y1)
         widgets["x2"].setValue(x2)
         widgets["y2"].setValue(y2)
-
-    def _on_color_picked(self, prefix: str, h: int, s: int, v: int):
-        """颜色拾取完成回调"""
-        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
-
-        # 更新HSV控件值
-        widgets["target_h"].setValue(h)
-        widgets["target_s"].setValue(s)
-        widgets["target_v"].setValue(v)
-
-        # 保存到内部存储
-        if prefix == "hp":
-            self.hp_hsv_values = {"h": h, "s": s, "v": v}
-        else:
-            self.mp_hsv_values = {"h": h, "s": s, "v": v}
-
-        # 更新颜色显示
-        self._update_color_display_from_hsv(prefix)
-
-    def _update_color_display_from_hsv(self, prefix: str):
-        """根据HSV值更新颜色显示"""
-        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
-
-        h = widgets["target_h"].value()
-        s = widgets["target_s"].value()
-        v = widgets["target_v"].value()
-
-        # 将HSV转换为RGB用于显示
-        rgb_color = self._hsv_to_rgb(h, s, v)
-        color_hex = f"#{rgb_color[0]:02x}{rgb_color[1]:02x}{rgb_color[2]:02x}"
-
-        # 更新颜色显示
-        widgets["color_display"].setStyleSheet(
-            f"""
-            background-color: {color_hex};
-            color: {color_hex};
-            font-size: 16px;
-            font-weight: bold;
-            padding: 2px 8px;
-            border: 1px solid #ccc;
-            border-radius: 3px;
-        """
-        )
 
     def _hsv_to_rgb(self, h: int, s: int, v: int) -> tuple:
         """将HSV值转换为RGB值"""
@@ -799,6 +953,15 @@ class ColorPickingDialog(QDialog):
 
                 # 转换为HSV
                 h, s, v, _ = color.getHsv()
+
+                # 转换Qt HSV到OpenCV HSV格式
+                # Qt: H(0-359/-1), S(0-255), V(0-255)
+                # OpenCV: H(0-179), S(0-255), V(0-255)
+                if h == -1:  # 灰色/无色相
+                    h = 0
+                else:
+                    h = h // 2  # 将360度范围转换为180度范围
+
                 self.color_picked.emit(h, s, v)
 
             self.accept()
