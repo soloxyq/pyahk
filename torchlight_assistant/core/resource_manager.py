@@ -156,7 +156,12 @@ class ResourceManager:
                 return 100.0
 
             import cv2
-            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+            # Capture库返回BGRA格式，统一使用OpenCV转换
+            if region.shape[2] == 4:  # BGRA格式
+                region_bgr = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
+            else:  # 已经是BGR格式
+                region_bgr = region
+            hsv_region = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2HSV)
 
             # 获取颜色列表配置
             colors_to_check = self._get_colors_config(config)
@@ -171,9 +176,6 @@ class ResourceManager:
 
             # 循环处理颜色列表
             for i, color_profile in enumerate(colors_to_check):
-                if not color_profile.get("enabled", True):
-                    continue
-                    
                 current_mask = self._create_color_mask(hsv_region, color_profile)
                 current_pixels = cv2.countNonZero(current_mask)
                 
@@ -206,7 +208,6 @@ class ResourceManager:
         # 主颜色（必须）
         main_color = {
             "name": "Normal",
-            "enabled": True,
             "target_h": config.get("target_h", 0),
             "target_s": config.get("target_s", 75),
             "target_v": config.get("target_v", 29),
@@ -220,7 +221,6 @@ class ResourceManager:
         if config.get("poison_enabled", False):
             poison_color = {
                 "name": "Poison",
-                "enabled": True,
                 "target_h": config.get("poison_h", 80),
                 "target_s": config.get("poison_s", 84),
                 "target_v": config.get("poison_v", 48),

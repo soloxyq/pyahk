@@ -40,7 +40,6 @@ class SkillManager:
         self._sequence_index = 0
         self._required_consecutive_checks = 2
 
-
         # 自主调度相关属性
         self._scheduler_threads = {}
         self._scheduler_stop_events = {}
@@ -109,6 +108,17 @@ class SkillManager:
             LOG_INFO(
                 f"[统一调度器] 进入技能模式，添加冷却检查任务，间隔: {cooldown_interval:.3f}s"
             )
+
+            # 3. 添加资源管理任务（独立调度）
+            if self.resource_manager:
+                resource_config = self._global_config.get("resource_management", {})
+                resource_interval = resource_config.get("check_interval", 200) / 1000.0
+                self.unified_scheduler.add_task(
+                    "resource_checker", resource_interval, self.check_resources
+                )
+                LOG_INFO(
+                    f"[统一调度器] 添加资源管理任务，间隔: {resource_interval:.3f}s"
+                )
 
     def _setup_timed_skills_tasks(self):
         """设置定时技能任务"""
@@ -242,7 +252,7 @@ class SkillManager:
                     ):
                         LOG_INFO(f"[统一调度器] 更新序列任务间隔: {seq_interval:.3f}s")
                 else:
-                    # 技能模式：更新冷却检查间隔
+                    # 技能模式：更新冷却检查间隔和资源管理间隔
                     cooldown_interval = (
                         global_config.get("cooldown_checker_interval", 100) / 1000.0
                     )
@@ -252,6 +262,19 @@ class SkillManager:
                         LOG_INFO(
                             f"[统一调度器] 更新冷却检查间隔: {cooldown_interval:.3f}s"
                         )
+
+                    # 更新资源管理间隔
+                    if self.resource_manager:
+                        resource_config = global_config.get("resource_management", {})
+                        resource_interval = (
+                            resource_config.get("check_interval", 200) / 1000.0
+                        )
+                        if self.unified_scheduler.update_task_interval(
+                            "resource_checker", resource_interval
+                        ):
+                            LOG_INFO(
+                                f"[统一调度器] 更新资源管理间隔: {resource_interval:.3f}s"
+                            )
 
     def execute_timed_skill(self, skill_name: str):
         if not self._is_running or self._is_paused:
@@ -299,9 +322,20 @@ class SkillManager:
             if skill_config.get("Enabled") and skill_config.get("TriggerMode") == 1:
                 self._try_execute_skill(skill_name, skill_config, cached_frame)
 
-        # 检查资源管理（调用ResourceManager）
-        if self.resource_manager:
-            self.resource_manager.check_and_execute_resources(cached_frame)
+        # 注意：资源管理现在有独立的调度任务，不在这里调用
+
+    def check_resources(self):
+        """独立的资源管理检查任务（被统一调度器调用）"""
+        if not self._is_running or self._is_paused or not self.resource_manager:
+            return
+
+        # 获取帧数据用于资源检测
+        cached_frame = self._prepare_frame_detection_cache()
+        if cached_frame is None:
+            return
+
+        # 执行资源管理检查
+        self.resource_manager.check_and_execute_resources(cached_frame)
 
     def _prepare_frame_detection_cache(self) -> Optional[np.ndarray]:
         """
@@ -332,7 +366,9 @@ class SkillManager:
         is_ready = True
         # 1. 检查冷却（仅当是冷却模式时）
         if trigger_mode == 1:  # 冷却模式（技能图标检测）
-            is_ready = self._check_cooldown_ready(skill_name, skill_config, cached_frame)
+            is_ready = self._check_cooldown_ready(
+                skill_name, skill_config, cached_frame
+            )
         # 2. 如果冷却就绪，再检查执行条件
         condition_result = True
         if is_ready:
@@ -361,7 +397,10 @@ class SkillManager:
             self.input_handler.execute_key(key_to_use)
 
     def _check_cooldown_ready(
-        self, skill_name: str, skill_config: Dict[str, Any], cached_frame: Optional[np.ndarray] = None
+        self,
+        skill_name: str,
+        skill_config: Dict[str, Any],
+        cached_frame: Optional[np.ndarray] = None,
     ) -> bool:
         if skill_config.get("TriggerMode") != 1:
             return True
@@ -376,11 +415,11 @@ class SkillManager:
         )
         return is_ready
 
-
-
-
     def _check_execution_conditions(
-        self, skill_name: str, skill_config: Dict[str, Any], cached_frame: Optional[np.ndarray] = None
+        self,
+        skill_name: str,
+        skill_config: Dict[str, Any],
+        cached_frame: Optional[np.ndarray] = None,
     ) -> bool:
         condition = skill_config.get("ExecuteCondition", 0)
 
@@ -395,14 +434,18 @@ class SkillManager:
             return True
 
         # 使用统一的接口进行条件检测
-        result = self._evaluate_condition(condition, skill_name, skill_config, cached_frame)
+        result = self._evaluate_condition(
+            condition, skill_name, skill_config, cached_frame
+        )
 
         return result
 
-
-
     def _evaluate_condition(
-        self, condition: int, skill_name: str, skill_config: Dict[str, Any], cached_frame: Optional[np.ndarray] = None
+        self,
+        condition: int,
+        skill_name: str,
+        skill_config: Dict[str, Any],
+        cached_frame: Optional[np.ndarray] = None,
     ) -> bool:
         x, y = skill_config.get("ConditionCoordX", 0), skill_config.get(
             "ConditionCoordY", 0
@@ -432,7 +475,9 @@ class SkillManager:
                         cached_frame, x, y, color_range_threshold=tolerance
                     )
                 elif color == 1:
-                    is_sufficient = self.border_frame_manager.is_hp_sufficient(cached_frame, x, y)
+                    is_sufficient = self.border_frame_manager.is_hp_sufficient(
+                        cached_frame, x, y
+                    )
                 else:
                     is_sufficient = not self.border_frame_manager.rgb_similarity(
                         cached_frame, x, y, color, tolerance
@@ -446,37 +491,6 @@ class SkillManager:
             except Exception as e:
                 LOG_ERROR(f"[资源条件] {skill_name} - 检查异常: {e}")
                 # 异常时默认返回False，执行AltKey
-                return False
-
-        elif condition == 3:  # 区域资源比例检测模式（用于喝药）
-            try:
-                # 获取区域坐标信息（存储在技能配置中）
-                region_x1 = skill_config.get("RegionX1", 0)
-                region_y1 = skill_config.get("RegionY1", 0)
-                region_x2 = skill_config.get("RegionX2", 0)
-                region_y2 = skill_config.get("RegionY2", 0)
-
-                if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
-                    return True  # 区域未设置，跳过检测
-
-                # 计算区域内的资源比例
-                resource_percentage = self._calculate_region_resource_percentage(
-                    cached_frame, region_x1, region_y1, region_x2, region_y2,
-                    color, tolerance, skill_config
-                )
-
-                # 获取阈值设置
-                threshold = skill_config.get("ResourceThreshold", 50)
-
-                # 判断是否需要喝药（当前百分比低于阈值）
-                needs_resource = resource_percentage < threshold
-
-                LOG_INFO(f"[区域资源检测] {skill_name} - 当前: {resource_percentage:.1f}%, 阈值: {threshold}%, 需要补充: {needs_resource}")
-
-                return needs_resource
-
-            except Exception as e:
-                LOG_ERROR(f"[区域资源检测] {skill_name} - 检查异常: {e}")
                 return False
 
         # 未知条件类型，默认返回True
@@ -504,83 +518,6 @@ class SkillManager:
 
         return False
 
-    def _calculate_region_resource_percentage(
-        self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int,
-        color_type: int, tolerance: int, skill_config: Dict[str, Any]
-    ) -> float:
-        """
-        计算区域内的资源百分比（用于喝药功能）
-
-        Args:
-            frame: 当前帧图像
-            x1, y1, x2, y2: 区域坐标
-            color_type: 颜色类型 (0=HP红色, 1=MP蓝色, 2=中毒浅绿)
-            tolerance: 颜色容差
-            skill_config: 技能配置
-
-        Returns:
-            float: 资源百分比 (0-100)
-        """
-        if frame is None:
-            return 100.0  # 如果没有帧数据，默认满血
-
-        try:
-            # 确保坐标在图像范围内
-            height, width = frame.shape[:2]
-            x1, x2 = max(0, min(x1, x2)), min(width, max(x1, x2))
-            y1, y2 = max(0, min(y1, y2)), min(height, max(y1, y2))
-
-            if x2 <= x1 or y2 <= y1:
-                return 100.0  # 无效区域
-
-            # 提取区域
-            region = frame[y1:y2, x1:x2]
-
-            # 获取HSV目标颜色和容差（从技能配置中读取）
-            target_h = skill_config.get("TargetH", 0)
-            target_s = skill_config.get("TargetS", 75)
-            target_v = skill_config.get("TargetV", 29)
-
-            tolerance_h = skill_config.get("ToleranceH", 10)
-            tolerance_s = skill_config.get("ToleranceS", 20)
-            tolerance_v = skill_config.get("ToleranceV", 20)
-
-            # 计算符合颜色的像素数量
-            total_pixels = region.shape[0] * region.shape[1]
-            if total_pixels == 0:
-                return 100.0
-
-            # 使用HSV颜色匹配
-            import cv2
-            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
-
-            # 创建HSV范围掩码
-            lower_bound = np.array([
-                max(0, target_h - tolerance_h),
-                max(0, target_s - tolerance_s),
-                max(0, target_v - tolerance_v)
-            ], dtype=np.uint8)
-
-            upper_bound = np.array([
-                min(179, target_h + tolerance_h),  # HSV H范围是0-179
-                min(255, target_s + tolerance_s),
-                min(255, target_v + tolerance_v)
-            ], dtype=np.uint8)
-
-            # 创建掩码
-            mask = cv2.inRange(hsv_region, lower_bound, upper_bound)
-
-            # 统计符合条件的像素数量
-            matching_pixels = cv2.countNonZero(mask)
-
-            # 计算百分比
-            percentage = (matching_pixels / total_pixels) * 100.0
-
-            return min(100.0, max(0.0, percentage))
-
-        except Exception as e:
-            LOG_ERROR(f"[区域资源计算] 计算异常: {e}")
-            return 100.0  # 异常时默认满血
 
     def prepare_border_only(self):
         """仅准备边框区域，不启动循环捕获"""

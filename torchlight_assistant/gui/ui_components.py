@@ -10,11 +10,9 @@ from .config_widgets import (
     PathfindingWidget,
 )
 from .feature_widgets import AffixRerollWidget, SkillConfigWidget
-from .resource_widgets import (
-    ResourceManagementWidget,
-    RegionSelectionDialog,
-    ColorPickingDialog,
-)
+from .resource_widgets import ResourceManagementWidget
+from .region_selection_dialog import RegionSelectionDialog
+from .color_picker_dialog import ColorPickingDialog
 
 # 为了向后兼容，重新导出所有组件
 __all__ = [

@@ -1,32 +1,36 @@
-# Torchlight Assistant - 高性能游戏自动化辅助工具
+# pyahk - 高性能ARPG游戏自动化辅助工具
 
-一个基于 Python 和 C++的现代化桌面游戏自动化辅助工具，专为 ARPG 游戏（如《暗黑破坏神 4》、《流放之路》等）设计。采用先进的**事件驱动架构**和**零拷贝屏幕捕获技术**，提供毫秒级响应的技能循环自动化、智能药剂管理、装备词缀洗练、自动寻路和热键管理等功能。项目经过全面重构和优化，确保卓越的性能表现和用户体验。
+一个基于 Python 和 C++ 的现代化桌面游戏自动化辅助工具，专为 ARPG 游戏（如《暗黑破坏神 4》、《流放之路 2》等）设计。采用先进的**事件驱动架构**和**零拷贝屏幕捕获技术**，提供毫秒级响应的技能循环自动化、智能药剂管理、装备词缀洗练、自动寻路和热键管理等功能。项目采用现代化的分层架构设计，确保卓越的性能表现和用户体验。
 
-项目包含两个主要入口：
+## 项目概述
 
-- `main.py`：完整的 GUI 版本，包含所有功能模块
-- `main_special.py`：简化的命令行版本，专注于特定自动化任务
+**pyahk** 是一个强大的ARPG游戏自动化辅助工具，由Python与C++合作开发。项目面向《暗黑破坏神4》、《流放之路2》等现代ARPG游戏设计，提供毫秒级的高性能游戏操作自动化。
 
-## 核心特性
+与传统的AutoHotkey脚本相比，pyahk采用现代化的技术架构：
 
-- **高性能零拷贝屏幕捕获**: 利用现代 **Windows Graphics Capture API** 和 C++实现，Python 层通过内存共享直接访问帧数据，避免了传统方式的内存拷贝开销，确保毫秒级的响应速度。采用双缓冲机制和智能帧率控制，进一步优化性能表现。
-- **事件驱动与模块化架构**:
-  - **事件驱动核心**: 系统的核心组件（如 UI、热键管理器、宏引擎、技能管理器）通过中央**事件总线（EventBus）**进行通信，完全解耦，极大地提高了代码的可维护性和可扩展性。支持异步事件处理和性能监控。
-  - **统一调度器 (`UnifiedScheduler`)**: `SkillManager` 的核心。它使用一个基于 `heapq` 的单一线程调度器来管理所有时间相关的任务（包括定时技能、冷却检测和序列执行），取代了旧的多线程模型，显著降低了资源开销，并提高了计时精度。
-- **即时音频反馈**: 通过预置的音频文件（hello.wav, goodbye.wav, pause.wav, resume.wav），为启动、停止、暂停和恢复等核心操作提供清晰、无延迟的声音提示，增强了"无视觉"操作的确认感。支持配置开关控制是否启用声音反馈。
-- **配置驱动的装备词缀洗练**:
-  - 一个独立的、由 **F7** 热键控制的自动化模块，用于执行装备词缀的洗练（重铸）操作。
-  - 采用**三状态智能识别**：通过 OCR 识别“随机词缀”（初始界面）、“关闭”（确认弹窗）和词缀选择界面，精准判断当前游戏状态。
-  - **实时 OSD 反馈**：通过颜色编码的 OSD 窗口显示详细状态信息，包括当前操作（“准备点击附魔”、“正在查找目标”等）、尝试次数、目标词缀列表等。
-  - **按需 OCR 加载**：OCR 引擎仅在用户点击“加载 OCR 引擎”按钮时初始化，避免程序启动时的资源占用，提高兼容性。
-- **智能自动寻路与探索**: 采用先进的地图拼接技术、相位相关位移追踪和 A*算法，实现对随机地图的自主探索和精确路径规划。支持双模式运行（探索模式和寻路模式）、实时目标识别、智能地图构建和路点跟随执行。全局地图使用 5000x5000 像素的 numpy 数组，支持 8 方向移动的 A*路径规划算法。
-- **“一次捕获，多次使用”性能优化**: 在每个检测周期中，程序只进行一次屏幕捕获，然后将该帧数据在内存中复用给所有需要图像识别的技能。这从根本上避免了重复的、高成本的截图操作，显著降低了 CPU 占用率。
-- **模式互斥逻辑**: 严格区分“技能模式”、“洗练模式”和“寻路模式”。程序会根据用户指令和配置自动选择一种模式运行，确保逻辑清晰，行为可预测。
-- **智能图像与文字识别**:
-  - **冷却检测**: 采用高效的图像相似度对比算法，实现精准的技能冷却状态识别。
-  - **文字识别 (OCR)**: 集成 **PaddleOCR** 引擎，用于装备洗练时的词缀识别。OCR 引擎按需加载，在用户第一次点击“加载 OCR 引擎”时初始化，避免了程序启动时不必要的资源占用。
-- **简化的技能触发系统**: 支持两种核心技能触发模式：**定时模式**(Timer)和**冷却模式**(Cooldown)。移除了未实现的内部冷却模式，确保配置的准确性。支持多种执行条件判断，包括 BUFF 检测、资源条件等。所有条件判断都遵循"一次捕获，多次使用"的优化设计。
-- **智能药剂助手**: 专为 ARPG 游戏设计的智能药剂管理系统。支持 HP/MP 的精确颜色检测、自动喝药功能、内置冷却机制，以及界面隐藏的可视化区域选择和颜色拾取工具。采用 HSV 颜色空间实现像素级精确匹配，被动式检测架构确保与主系统的完美集成。内置 1080P 优化的默认配置，开箱即用。
+- **事件驱动架构**：所有组件通过中央事件总线进行通信，实现高度解耦
+- **零拷贝捕获技术**：基于Windows Graphics Capture API的C++底层实现，极大降低性能开销
+- **统一调度器**：取代传统多线程模型，提供更精确的定时任务管理
+- **模块化设计**：清晰的功能分离，易于维护和扩展
+
+## 项目入口
+
+pyahk提供两种使用方式：
+
+1. **GUI版本** (`main.py`)：完整的图形用户界面，支持所有功能模块的可视化配置和控制
+2. **命令行版本** (`main_special.py`)：轻量级版本，专注于特定游戏场景的自动化任务
+
+## 核心功能特性
+
+- **零拷贝屏幕捕获技术**: 利用现代Windows Graphics Capture API和C++底层实现，Python层通过ctypes直接访问帧数据，避免内存拷贝开销，确保毫秒级响应速度
+- **事件驱动架构**: 系统核心组件通过中央事件总线(EventBus)进行通信，实现完全解耦，极大提高代码可维护性和可扩展性
+- **统一调度器**: 基于heapq的单线程调度器，管理所有定时任务，取代传统多线程模型，显著降低资源开销并提高计时精度
+- **智能药剂管理**: 采用HSV颜色空间匹配技术的被动式检测系统，支持HP/MP的精确检测和自动喂药功能，内置1080P优化配置
+- **装备词缀洗练**: 独立的F7热键控制模块，采用三状态智能识别，通过PaddleOCR进行词缀识别，支持实时OSD反馈
+- **自动寻路与探索**: 采用相位相关位移跟踪和A*算法，实现随机地图的自主探索和精确路径规划，支持双模式运行
+- **模式互斥逻辑**: 严格区分"技能模式"、"洗练模式"和"寻路模式"，确保逻辑清晰、行为可预测
+- **简化的技能触发系统**: 支持定时模式(Timer)和冷却模式(Cooldown)两种核心触发模式，移除未实现的内部冷却模式
+- **音频反馈系统**: 通过预置音频文件为启动、停止、暂停和恢复等操作提供无延迟声音提示
 
 ## 自动寻路功能详解 (已实现)
 
@@ -74,7 +78,7 @@
 
 #### 2. 智能资源检测算法
 
-```python
+```
 # 计算区域内匹配颜色的像素百分比
 matching_pixels = cv2.countNonZero(mask)
 percentage = (matching_pixels / total_pixels) * 100.0
@@ -89,7 +93,7 @@ mask = cv2.inRange(hsv_region, lower_hsv, upper_hsv)
 
 采用被动式检测模式，由 SkillManager 统一调度：
 
-```python
+```
 def check_and_execute_resources(self, cached_frame: Optional[np.ndarray] = None) -> bool:
     """被动调用的资源检测，避免独立线程开销"""
     if not self._is_running or self._is_paused:
@@ -107,7 +111,7 @@ def check_and_execute_resources(self, cached_frame: Optional[np.ndarray] = None)
 
 #### 4. 内部冷却机制
 
-```python
+```
 def _check_internal_cooldown_ready(self, resource_type: str) -> bool:
     config = self.hp_config if resource_type == "hp" else self.mp_config
     current_time = time.time()
@@ -132,7 +136,7 @@ def _check_internal_cooldown_ready(self, resource_type: str) -> bool:
 
 #### 2. 默认配置优化 (1080P)
 
-```python
+```
 # 血药默认配置
 hp_defaults = {
     "region": (136, 910, 213, 1004),    # 1080P血条区域
@@ -227,7 +231,7 @@ mp_defaults = {
 
 ### 配置示例
 
-```json
+```
 {
   "resource_management": {
     "hp_config": {
@@ -286,7 +290,7 @@ mp_defaults = {
 
 ### 代码清理成果
 
-```python
+```
 # 简化后的技能配置结构
 {
   "Enabled": true,
@@ -429,31 +433,43 @@ paddleocr==2.7.3      # OCR文字识别
 ### 项目结构
 
 ```
-torchlight_assistant/
-├── core/                    # 核心业务逻辑
-│   ├── macro_engine.py     # 主控制器与状态管理
-│   ├── skill_manager.py    # 技能管理与统一调度
-│   ├── resource_manager.py # 智能药剂管理器
-│   ├── input_handler.py    # 输入处理与队列管理
-│   ├── pathfinding_manager.py # 自动寻路管理器
-│   ├── simple_affix_reroll_manager.py # 装备洗练管理器
-│   └── ...
-├── gui/                    # 用户界面
-│   ├── main_window.py      # 主窗口
-│   ├── ui_components.py    # 通用UI组件
-│   ├── resource_widgets.py # 智能药剂配置界面
-│   ├── skill_config_widget.py # 技能配置界面(已优化)
-│   ├── custom_widgets.py   # 自定义控件
-│   └── ...
-├── utils/                  # 工具类
-│   ├── native_graphics_capture_manager.py # 原生屏幕捕获
-│   ├── border_frame_manager.py # 边框图管理
-│   ├── event_bus.py        # 事件总线
-│   ├── unified_scheduler.py # 统一调度器
-│   ├── debug_log.py        # 调试日志
-│   └── ...
-└── native_capture/         # C++原生捕获库
-    ├── capture_lib.cpp     # C++捕获实现
-    ├── python_wrapper.py   # Python包装器
-    └── ...
-```
+pyahk/
+├── main.py                     # GUI版本主入口
+├── main_special.py             # 命令行版本入口
+├── requirements.txt            # Python依赖列表
+├── *.json                     # 配置文件(default.json, d4.json等)
+├── native_capture/            # C++原生捕获库
+│   ├── capture_lib.cpp       # C++捕获实现
+│   ├── capture_lib.h         # C++头文件
+│   ├── python_wrapper.py     # Python ctypes包装器
+│   ├── CMakeLists.txt        # CMake构建配置
+│   └── build.bat             # Windows构建脚本
+└── torchlight_assistant/      # Python主应用包
+    ├── core/                  # 核心业务逻辑
+    │   ├── macro_engine.py    # 宏引擎：状态管理与事件协调
+    │   ├── skill_manager.py   # 技能管理器：统一调度器集成
+    │   ├── resource_manager.py # 资源管理器：被动式药剂检测
+    │   ├── input_handler.py   # 输入处理器：键鼠队列管理
+    │   ├── pathfinding_manager.py # 寻路管理器：A*算法实现
+    │   ├── simple_affix_reroll_manager.py # 洗练管理器
+    │   ├── event_bus.py       # 事件总线：发布订阅模式
+    │   ├── unified_scheduler.py # 统一调度器：heapq实现
+    │   ├── config_manager.py  # 配置管理器：JSON处理
+    │   └── states.py          # 状态定义：MacroState枚举
+    ├── gui/                   # 用户界面层
+    │   ├── main_window.py     # 主窗口：集成所有界面组件
+    │   ├── status_window.py   # OSD状态窗口
+    │   ├── ui_components.py   # UI组件：标签页和控件
+    │   ├── resource_widgets.py # 智能药剂配置界面
+    │   ├── skill_config_widget.py # 技能配置界面
+    │   ├── custom_widgets.py  # 自定义控件
+    │   └── styles.py          # 界面样式定义
+    └── utils/                 # 工具类层
+        ├── native_graphics_capture_manager.py # 原生捕获管理
+        ├── border_frame_manager.py # 边框图管理：帧数据分发
+        ├── hotkey_manager.py   # 热键管理：Windows API钩子
+        ├── paddle_ocr_manager.py # OCR管理：PaddleOCR封装
+        ├── sound_manager.py    # 声音管理：音频反馈
+        ├── window_utils.py     # 窗口工具：进程查找
+        ├── debug_log.py        # 调试日志：条件输出
+        └── a_star.py           # A*算法：路径规划实现

@@ -178,65 +178,53 @@
             "hp_config": {
                 "enabled": true,
                 "key": "1",
-                "threshold": 50,
+                "threshold": 30,
                 "cooldown": 1000,
-                "region_x1": 100,
-                "region_y1": 918,
-                "region_x2": 137,
-                "region_y2": 1043,
+                "region_x1": 960,
+                "region_y1": 1044,
+                "region_x2": 968,
+                "region_y2": 1052,
                 "colors": [
                     {
                         "name": "Color1",
-                        "enabled": true,
-                        "target_h": 178,
-                        "target_s": 188,
-                        "target_v": 134,
-                        "tolerance_h": 10,
-                        "tolerance_s": 20,
-                        "tolerance_v": 20
+                        "target_h": 135,
+                        "target_s": 55,
+                        "target_v": 37,
+                        "tolerance_h": 5,
+                        "tolerance_s": 15,
+                        "tolerance_v": 15
+                    },
+                    {
+                        "name": "Color2",
+                        "target_h": 130,
+                        "target_s": 169,
+                        "target_v": 241,
+                        "tolerance_h": 5,
+                        "tolerance_s": 18,
+                        "tolerance_v": 51
                     }
-                ],
-                "target_h": 178,
-                "target_s": 188,
-                "target_v": 134,
-                "tolerance_h": 10,
-                "tolerance_s": 20,
-                "tolerance_v": 20,
-                "poison_enabled": false,
-                "poison_h": 80,
-                "poison_s": 84,
-                "poison_v": 48,
-                "poison_tolerance_h": 20,
-                "poison_tolerance_s": 27,
-                "poison_tolerance_v": 27
+                ]
             },
             "mp_config": {
                 "enabled": true,
                 "key": "2",
-                "threshold": 10,
+                "threshold": 30,
                 "cooldown": 2000,
-                "region_x1": 1780,
-                "region_y1": 918,
-                "region_x2": 1817,
-                "region_y2": 1043,
+                "region_x1": 1552,
+                "region_y1": 910,
+                "region_x2": 1560,
+                "region_y2": 1004,
                 "colors": [
                     {
                         "name": "Color1",
-                        "enabled": true,
-                        "target_h": 105,
-                        "target_s": 212,
-                        "target_v": 141,
-                        "tolerance_h": 10,
-                        "tolerance_s": 20,
-                        "tolerance_v": 20
+                        "target_h": 104,
+                        "target_s": 80,
+                        "target_v": 58,
+                        "tolerance_h": 7,
+                        "tolerance_s": 5,
+                        "tolerance_v": 5
                     }
-                ],
-                "target_h": 105,
-                "target_s": 212,
-                "target_v": 141,
-                "tolerance_h": 10,
-                "tolerance_s": 20,
-                "tolerance_v": 20
+                ]
             },
             "check_interval": 150
         },

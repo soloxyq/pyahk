@@ -23,6 +23,8 @@ from .custom_widgets import (
     ConfigComboBox,
     ConfigCheckBox,
 )
+from .color_picker_dialog import ColorPickingDialog
+from .region_selection_dialog import RegionSelectionDialog
 
 
 class ResourceManagementWidget(QWidget):
@@ -216,7 +218,9 @@ class ResourceManagementWidget(QWidget):
         colors_layout = QVBoxLayout()
 
         # 颜色配置说明
-        colors_info = QLabel("颜色配置格式: H,S,V,H容差,S容差,V容差 (多颜色用逗号继续)")
+        colors_info = QLabel(
+            "颜色配置格式: H,S,V,H容差,S容差,V容差 (OpenCV格式: H=0-179, 多颜色用逗号继续)"
+        )
         colors_info.setStyleSheet("color: #666; font-size: 10pt; font-style: italic;")
         colors_layout.addWidget(colors_info)
 
@@ -227,13 +231,13 @@ class ResourceManagementWidget(QWidget):
         colors_edit = ConfigLineEdit()
         colors_edit.setPlaceholderText("例如: 314,75,29,10,20,20,80,84,48,20,27,27")
 
-        # 设置默认值
+        # 设置默认值 (OpenCV HSV格式: H=0-179)
         if prefix == "hp":
-            # HP默认：正常血量 + 中毒状态
-            default_colors = "314,75,29,10,20,20,80,84,48,20,27,27"
+            # HP默认：正常血量 + 中毒状态 (转换为OpenCV格式)
+            default_colors = "157,75,29,5,20,20,40,84,48,10,27,27"  # 314°→157°, 80°→40°
         else:
-            # MP默认：只有蓝色
-            default_colors = "208,80,58,7,5,5"
+            # MP默认：只有蓝色 (转换为OpenCV格式)
+            default_colors = "104,80,58,4,5,5"  # 208°→104°
 
         colors_edit.setText(default_colors)
         colors_edit.setMinimumWidth(400)
@@ -259,8 +263,11 @@ class ResourceManagementWidget(QWidget):
 
         # 解析结果显示
         colors_result = QLabel("")
-        colors_result.setStyleSheet("color: #333; font-size: 9pt; padding: 5px;")
+        colors_result.setStyleSheet(
+            "font-size: 9pt; padding: 5px; background-color: #f5f5f5; border-radius: 3px;"
+        )
         colors_result.setWordWrap(True)
+        colors_result.setTextFormat(Qt.RichText)  # 支持HTML格式
         colors_layout.addWidget(colors_result)
 
         color_layout.addLayout(colors_layout)
@@ -292,6 +299,9 @@ class ResourceManagementWidget(QWidget):
             self.hp_widgets = widgets
         else:
             self.mp_widgets = widgets
+
+        # 立即解析默认值，显示彩色背景
+        self._parse_colors_input(prefix, default_colors)
 
         return group
 
@@ -339,11 +349,33 @@ class ResourceManagementWidget(QWidget):
 
         return group
 
+    def _hsv_to_rgb(self, h: int, s: int, v: int) -> tuple:
+        """将OpenCV HSV颜色转换为RGB (使用OpenCV确保一致性)"""
+        import cv2
+        import numpy as np
+
+        # 输入的h,s,v已经是OpenCV格式 (H: 0-179, S: 0-255, V: 0-255)
+        hsv_array = np.uint8([[[h, s, v]]])
+        rgb_array = cv2.cvtColor(hsv_array, cv2.COLOR_HSV2RGB)
+        r, g, b = rgb_array[0][0]
+
+        return int(r), int(g), int(b)
+
+    def _get_contrast_color(self, r: int, g: int, b: int) -> str:
+        """根据背景色亮度返回合适的文字颜色"""
+        # 计算亮度 (使用相对亮度公式)
+        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
+        return "#ffffff" if luminance < 0.5 else "#000000"
+
     def _parse_colors_input(self, prefix: str, colors_text: str):
-        """解析颜色配置输入"""
+        """解析颜色配置输入并显示带实际颜色的结果"""
         try:
             # 获取对应的结果显示控件
             widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+            
+            if not widgets or "colors_result" not in widgets:
+                return
+                
             result_label = widgets["colors_result"]
 
             if not colors_text.strip():
@@ -360,16 +392,20 @@ class ResourceManagementWidget(QWidget):
                 return
 
             color_count = len(values) // 6
-            result_text = f"✅ 解析成功：{color_count}种颜色\n"
+
+            # 构建HTML格式的结果文本
+            html_parts = [
+                f"<div style='margin-bottom: 8px; font-weight: bold;'>✅ 解析成功：{color_count}种颜色</div>"
+            ]
 
             for i in range(color_count):
                 base_idx = i * 6
                 h, s, v = values[base_idx : base_idx + 3]
                 h_tol, s_tol, v_tol = values[base_idx + 3 : base_idx + 6]
 
-                # 验证范围
-                if not (0 <= h <= 359):
-                    result_label.setText(f"❌ 颜色{i+1}的H值({h})超出范围(0-359)")
+                # 验证OpenCV HSV范围
+                if not (0 <= h <= 179):
+                    result_label.setText(f"❌ 颜色{i+1}的H值({h})超出OpenCV范围(0-179)")
                     return
                 if not (0 <= s <= 255):
                     result_label.setText(f"❌ 颜色{i+1}的S值({s})超出范围(0-255)")
@@ -378,16 +414,30 @@ class ResourceManagementWidget(QWidget):
                     result_label.setText(f"❌ 颜色{i+1}的V值({v})超出范围(0-255)")
                     return
 
-                result_text += (
-                    f"  颜色{i+1}: HSV({h},{s},{v}) 容差(±{h_tol},±{s_tol},±{v_tol})\n"
-                )
+                # 转换HSV到RGB
+                r, g, b = self._hsv_to_rgb(h, s, v)
+                bg_color = f"rgb({r},{g},{b})"
+                text_color = self._get_contrast_color(r, g, b)
 
-            result_label.setText(result_text.strip())
+                # 创建带颜色背景的HTML块
+                color_html = f"""
+                <div style='margin: 3px 0; padding: 6px 10px; border-radius: 6px; 
+                           background-color: {bg_color}; color: {text_color}; 
+                           border: 1px solid #ddd; font-size: 10pt; font-weight: bold;'>
+                    颜色{i+1}: OpenCV-HSV({h},{s},{v}) 容差(±{h_tol},±{s_tol},±{v_tol})
+                </div>
+                """
+                html_parts.append(color_html)
+
+            result_html = "".join(html_parts)
+            result_label.setText(result_html)
 
         except ValueError:
-            result_label.setText("❌ 格式错误：请输入数字，用逗号分隔")
+            if 'result_label' in locals():
+                result_label.setText("❌ 格式错误：请输入数字，用逗号分隔")
         except Exception as e:
-            result_label.setText(f"❌ 解析错误：{str(e)}")
+            if 'result_label' in locals():
+                result_label.setText(f"❌ 解析错误：{str(e)}")
 
     def _build_hp_config(self) -> Dict[str, Any]:
         """构建HP配置，使用新的colors列表格式"""
@@ -407,46 +457,7 @@ class ResourceManagementWidget(QWidget):
         colors = self._parse_colors_to_list(self.hp_widgets["colors_edit"].text())
         hp_config["colors"] = colors
 
-        # 为了向后兼容，从第一个颜色提取旧格式字段
-        if colors:
-            first_color = colors[0]
-            hp_config.update(
-                {
-                    "target_h": first_color.get("target_h", 314),
-                    "target_s": first_color.get("target_s", 75),
-                    "target_v": first_color.get("target_v", 29),
-                    "tolerance_h": first_color.get("tolerance_h", 10),
-                    "tolerance_s": first_color.get("tolerance_s", 20),
-                    "tolerance_v": first_color.get("tolerance_v", 20),
-                }
-            )
-
-            # 如果有第二个颜色，设置poison字段
-            if len(colors) > 1:
-                second_color = colors[1]
-                hp_config.update(
-                    {
-                        "poison_enabled": True,
-                        "poison_h": second_color.get("target_h", 80),
-                        "poison_s": second_color.get("target_s", 84),
-                        "poison_v": second_color.get("target_v", 48),
-                        "poison_tolerance_h": second_color.get("tolerance_h", 20),
-                        "poison_tolerance_s": second_color.get("tolerance_s", 27),
-                        "poison_tolerance_v": second_color.get("tolerance_v", 27),
-                    }
-                )
-            else:
-                hp_config.update(
-                    {
-                        "poison_enabled": False,
-                        "poison_h": 80,
-                        "poison_s": 84,
-                        "poison_v": 48,
-                        "poison_tolerance_h": 20,
-                        "poison_tolerance_s": 27,
-                        "poison_tolerance_v": 27,
-                    }
-                )
+        # 注意：不再写入旧格式字段，只使用新的colors数组格式
 
         return hp_config
 
@@ -464,7 +475,6 @@ class ResourceManagementWidget(QWidget):
 
                     color = {
                         "name": f"Color{i+1}",
-                        "enabled": True,
                         "target_h": h,
                         "target_s": s,
                         "target_v": v,
@@ -478,7 +488,6 @@ class ResourceManagementWidget(QWidget):
             colors = [
                 {
                     "name": "Default",
-                    "enabled": True,
                     "target_h": 314,
                     "target_s": 75,
                     "target_v": 29,
@@ -508,19 +517,7 @@ class ResourceManagementWidget(QWidget):
         colors = self._parse_colors_to_list(self.mp_widgets["colors_edit"].text())
         mp_config["colors"] = colors
 
-        # 为了向后兼容，从第一个颜色提取旧格式字段
-        if colors:
-            first_color = colors[0]
-            mp_config.update(
-                {
-                    "target_h": first_color.get("target_h", 208),
-                    "target_s": first_color.get("target_s", 80),
-                    "target_v": first_color.get("target_v", 58),
-                    "tolerance_h": first_color.get("tolerance_h", 7),
-                    "tolerance_s": first_color.get("tolerance_s", 5),
-                    "tolerance_v": first_color.get("tolerance_v", 5),
-                }
-            )
+        # 注意：不再写入旧格式字段，只使用新的colors数组格式
 
         return mp_config
 
@@ -557,8 +554,8 @@ class ResourceManagementWidget(QWidget):
             # 加载颜色配置
             colors_text = self._colors_list_to_text(hp_config.get("colors", []))
             if not colors_text:
-                # 如果没有colors配置，从旧格式构建
-                colors_text = self._build_colors_text_from_old_format(hp_config, True)
+                # 如果没有colors配置，使用默认值
+                colors_text = "157,75,29,5,20,20,40,84,48,10,27,27"  # HP默认：红色+绿色
 
             self.hp_widgets["colors_edit"].setText(colors_text)
             self._parse_colors_input("hp", colors_text)
@@ -582,8 +579,8 @@ class ResourceManagementWidget(QWidget):
             # 加载颜色配置
             colors_text = self._colors_list_to_text(mp_config.get("colors", []))
             if not colors_text:
-                # 如果没有colors配置，从旧格式构建
-                colors_text = self._build_colors_text_from_old_format(mp_config, False)
+                # 如果没有colors配置，使用默认值
+                colors_text = "104,80,58,4,5,5"  # MP默认：蓝色
 
             self.mp_widgets["colors_edit"].setText(colors_text)
             self._parse_colors_input("mp", colors_text)
@@ -600,8 +597,7 @@ class ResourceManagementWidget(QWidget):
 
         values = []
         for color in colors_list:
-            if color.get("enabled", True):
-                values.extend(
+            values.extend(
                     [
                         color.get("target_h", 0),
                         color.get("target_s", 75),
@@ -614,89 +610,73 @@ class ResourceManagementWidget(QWidget):
 
         return ",".join(map(str, values))
 
-    def _build_colors_text_from_old_format(self, config: dict, is_hp: bool) -> str:
-        """从旧格式配置构建颜色文本"""
-        values = []
 
-        # 主颜色
-        if is_hp:
-            values.extend(
-                [
-                    config.get("target_h", 314),
-                    config.get("target_s", 75),
-                    config.get("target_v", 29),
-                    config.get("tolerance_h", 10),
-                    config.get("tolerance_s", 20),
-                    config.get("tolerance_v", 20),
-                ]
-            )
-
-            # 中毒状态颜色（如果启用）
-            if config.get("poison_enabled", False):
-                values.extend(
-                    [
-                        config.get("poison_h", 80),
-                        config.get("poison_s", 84),
-                        config.get("poison_v", 48),
-                        config.get("poison_tolerance_h", 20),
-                        config.get("poison_tolerance_s", 27),
-                        config.get("poison_tolerance_v", 27),
-                    ]
-                )
-        else:
-            # MP只有一种颜色
-            values.extend(
-                [
-                    config.get("target_h", 208),
-                    config.get("target_s", 80),
-                    config.get("target_v", 58),
-                    config.get("tolerance_h", 7),
-                    config.get("tolerance_s", 5),
-                    config.get("tolerance_v", 5),
-                ]
-            )
-
-        return ",".join(map(str, values))
 
     def _start_color_picking_for_input(self, prefix: str, colors_edit):
         """启动颜色拾取，将结果添加到输入框末尾"""
+        # 完全隐藏主窗口，就像截图工具一样
         if self.main_window:
             self.main_window.hide()
+            self.main_window.setWindowState(
+                self.main_window.windowState() | Qt.WindowMinimized
+            )
 
-        dialog = ColorPickingDialog()
+        # 延迟一下确保窗口完全隐藏
+        from PySide6.QtCore import QTimer
 
-        def on_color_picked(h, s, v):
-            # 获取当前输入框的内容
-            current_text = colors_edit.text().strip()
+        def start_color_picking():
+            dialog = ColorPickingDialog()
 
-            # 构建新的颜色值（HSV + 默认容差）
-            # h, s, v 已经是独立的参数
+            def on_color_picked(r, g, b):
+                # 获取当前输入框的内容
+                current_text = colors_edit.text().strip()
 
-            # 设置默认容差
-            if prefix == "hp":
-                default_tolerance = "10,20,20"  # HP默认容差
-            else:
-                default_tolerance = "7,5,5"  # MP默认容差
+                # 使用OpenCV将RGB转换为HSV
+                import cv2
+                import numpy as np
 
-            new_color = f"{h},{s},{v},{default_tolerance}"
+                rgb_array = np.uint8([[[r, g, b]]])
+                hsv_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2HSV)
+                h, s, v = hsv_array[0][0]
 
-            # 添加到输入框末尾
-            if current_text:
-                updated_text = f"{current_text},{new_color}"
-            else:
-                updated_text = new_color
+                # 设置默认容差
+                if prefix == "hp":
+                    default_tolerance = "10,20,20"  # HP默认容差
+                else:
+                    default_tolerance = "7,5,5"  # MP默认容差
 
-            colors_edit.setText(updated_text)
+                new_color = f"{h},{s},{v},{default_tolerance}"
 
-            # 自动解析新的配置
-            self._parse_colors_input(prefix, updated_text)
+                # 添加到输入框末尾
+                if current_text:
+                    updated_text = f"{current_text},{new_color}"
+                else:
+                    updated_text = new_color
 
-            # 显示主窗口
-            if self.main_window:
-                self.main_window.show()
+                colors_edit.setText(updated_text)
 
-        dialog.color_picked.connect(on_color_picked)
-        dialog.exec()
+                # 输出调试信息
+                print(f"[颜色拾取] RGB({r},{g},{b}) -> HSV({h},{s},{v})")
+                print(f"[颜色拾取] 已追加到配置: {new_color}")
+                print(f"[颜色拾取] 完整配置: {updated_text}")
+
+                # 自动解析新的配置
+                self._parse_colors_input(prefix, updated_text)
+
+                # 恢复显示主窗口
+                if self.main_window:
+                    self.main_window.setWindowState(
+                        self.main_window.windowState() & ~Qt.WindowMinimized
+                    )
+                    self.main_window.show()
+                    self.main_window.raise_()
+                    self.main_window.activateWindow()
+
+            dialog.color_picked.connect(on_color_picked)
+            dialog.exec()
+
+        # 延迟200ms启动，确保主窗口完全隐藏
+        QTimer.singleShot(200, start_color_picking)
 
     def set_main_window(self, main_window):
         """设置主窗口引用，用于隐藏/显示界面"""
@@ -716,20 +696,31 @@ class ResourceManagementWidget(QWidget):
             dialog.region_selected.connect(
                 lambda x1, y1, x2, y2: self._on_region_selected(prefix, x1, y1, x2, y2)
             )
+            dialog.region_analyzed.connect(
+                lambda x1, y1, x2, y2, analysis: self._on_region_analyzed(
+                    prefix, x1, y1, x2, y2, analysis
+                )
+            )
 
             # 执行对话框（showEvent会自动处理焦点）
             result = dialog.exec()
 
-            # 显示主界面
+            # 恢复显示主界面
+            self.main_window.setWindowState(
+                self.main_window.windowState() & ~Qt.WindowMinimized
+            )
             self.main_window.show()
             self.main_window.raise_()
             self.main_window.activateWindow()
 
-        # 隐藏主界面
+        # 完全隐藏主界面，就像截图工具一样
         self.main_window.hide()
+        self.main_window.setWindowState(
+            self.main_window.windowState() | Qt.WindowMinimized
+        )
 
-        # 延迟100ms执行对话框显示
-        QTimer.singleShot(100, show_dialog)
+        # 延迟200ms执行对话框显示，确保主窗口完全隐藏
+        QTimer.singleShot(200, show_dialog)
 
     def _on_region_selected(self, prefix: str, x1: int, y1: int, x2: int, y2: int):
         """区域选择完成回调"""
@@ -738,234 +729,70 @@ class ResourceManagementWidget(QWidget):
         widgets["y1"].setValue(y1)
         widgets["x2"].setValue(x2)
         widgets["y2"].setValue(y2)
+        print(f"[区域更新] {prefix.upper()}检测区域已更新为: ({x1},{y1}) -> ({x2},{y2})")
 
-    def _hsv_to_rgb(self, h: int, s: int, v: int) -> tuple:
-        """将HSV值转换为RGB值"""
-        import colorsys
+    def _on_region_analyzed(
+        self, prefix: str, x1: int, y1: int, x2: int, y2: int, analysis: dict
+    ):
+        """智能颜色分析完成回调"""
+        if not analysis or not analysis.get("analysis_success"):
+            return
 
-        # 将HSV值标准化到0-1范围
-        h_norm = h / 359.0
-        s_norm = s / 255.0
-        v_norm = v / 255.0
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
 
-        # 转换为RGB
-        r, g, b = colorsys.hsv_to_rgb(h_norm, s_norm, v_norm)
+        # 🎯 关键修复：更新检测区域坐标为用户最后选择的区域
+        widgets["x1"].setValue(x1)
+        widgets["y1"].setValue(y1)
+        widgets["x2"].setValue(x2)
+        widgets["y2"].setValue(y2)
+        print(f"[区域更新] {prefix.upper()}检测区域已更新为: ({x1},{y1}) -> ({x2},{y2})")
 
-        # 转换回0-255范围
-        return (int(r * 255), int(g * 255), int(b * 255))
+        # 获取分析结果
+        mean_h, mean_s, mean_v = analysis["mean_hsv"]
+        tolerance_h, tolerance_s, tolerance_v = analysis["tolerance"]
+        total_pixels = analysis["total_pixels"]
+        region_size = analysis["region_size"]
 
-
-class RegionSelectionDialog(QDialog):
-    """区域选择对话框"""
-
-    region_selected = QSignal(int, int, int, int)  # x1, y1, x2, y2
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("选择检测区域")
-        self.setWindowFlags(
-            Qt.WindowStaysOnTopHint
-            | Qt.FramelessWindowHint
-            | Qt.Tool  # 添加Tool标志，避免任务栏显示
-            | Qt.WindowDoesNotAcceptFocus  # 移除这个标志，允许接收焦点
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-
-        # 获取屏幕截图
-        screen = QApplication.primaryScreen()
-        self.screenshot = screen.grabWindow(0)
-
-        self.start_pos = None
-        self.end_pos = None
-        self.is_selecting = False
-
-        self.setGeometry(screen.geometry())
-
-        # 设置鼠标追踪
-        self.setMouseTracking(True)
-
-        # 确保窗口能接收键盘事件
-        self.setFocusPolicy(Qt.StrongFocus)
-
-    def showEvent(self, event):
-        """窗口显示事件"""
-        super().showEvent(event)
-        # 确保窗口获得焦点
-        self.raise_()
-        self.activateWindow()
-        self.setFocus()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.screenshot)
-
-        # 绘制半透明遮罩
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 100))
-
-        # 绘制选择区域
-        if self.start_pos and self.end_pos:
-            rect = QRect(self.start_pos, self.end_pos).normalized()
-            # 清除选择区域的遮罩
-            painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            painter.fillRect(rect, QColor(0, 0, 0, 0))
-            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-
-            # 绘制边框
-            pen = QPen(QColor(255, 0, 0), 2)
-            painter.setPen(pen)
-            painter.drawRect(rect)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            self.start_pos = event.pos()
-            self.is_selecting = True
-
-    def mouseMoveEvent(self, event):
-        if self.is_selecting:
-            self.end_pos = event.pos()
-            self.update()
-
-    def mouseReleaseEvent(self, event):
-        if event.button() == Qt.LeftButton and self.is_selecting:
-            self.end_pos = event.pos()
-            self.is_selecting = False
-
-            if self.start_pos and self.end_pos:
-                rect = QRect(self.start_pos, self.end_pos).normalized()
-                self.region_selected.emit(
-                    rect.left(), rect.top(), rect.right(), rect.bottom()
-                )
-
-            self.accept()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            self.reject()
-        super().keyPressEvent(event)
-
-
-class ColorPickingDialog(QDialog):
-    """颜色拾取对话框"""
-
-    color_picked = QSignal(int, int, int)  # h, s, v
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("拾取颜色")
-        self.setWindowFlags(
-            Qt.WindowStaysOnTopHint
-            | Qt.FramelessWindowHint
-            | Qt.Tool  # 添加Tool标志，避免任务栏显示
-        )
-        self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setAttribute(Qt.WA_DeleteOnClose)
-
-        # 获取屏幕截图
-        screen = QApplication.primaryScreen()
-        self.screenshot = screen.grabWindow(0)
-
-        self.setGeometry(screen.geometry())
-
-        # 创建放大镜效果
-        self.magnifier_size = 100
-        self.zoom_factor = 4
-
-        # 设置鼠标追踪
-        self.setMouseTracking(True)
-
-        # 确保窗口能接收键盘事件
-        self.setFocusPolicy(Qt.StrongFocus)
-
-    def showEvent(self, event):
-        """窗口显示事件"""
-        super().showEvent(event)
-        # 确保窗口获得焦点
-        self.raise_()
-        self.activateWindow()
-        self.setFocus()
-
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.drawPixmap(0, 0, self.screenshot)
-
-        # 绘制半透明遮罩
-        painter.fillRect(self.rect(), QColor(0, 0, 0, 150))
-
-        # 绘制十字线
-        cursor_pos = self.mapFromGlobal(QCursor.pos())
-        pen = QPen(QColor(255, 255, 255), 1)
-        painter.setPen(pen)
-        painter.drawLine(0, cursor_pos.y(), self.width(), cursor_pos.y())
-        painter.drawLine(cursor_pos.x(), 0, cursor_pos.x(), self.height())
-
-        # 绘制放大镜
-        magnifier_rect = QRect(
-            cursor_pos.x() - self.magnifier_size // 2,
-            cursor_pos.y() - self.magnifier_size // 2,
-            self.magnifier_size,
-            self.magnifier_size,
+        # 构建颜色配置字符串
+        new_color_config = (
+            f"{mean_h},{mean_s},{mean_v},{tolerance_h},{tolerance_s},{tolerance_v}"
         )
 
-        # 放大镜背景
-        painter.fillRect(magnifier_rect, QColor(255, 255, 255, 200))
+        # 获取当前输入框内容
+        current_text = widgets["colors_edit"].text().strip()
 
-        # 绘制放大的像素
-        for x in range(self.magnifier_size):
-            for y in range(self.magnifier_size):
-                src_x = (
-                    cursor_pos.x()
-                    - self.magnifier_size // (2 * self.zoom_factor)
-                    + x // self.zoom_factor
-                )
-                src_y = (
-                    cursor_pos.y()
-                    - self.magnifier_size // (2 * self.zoom_factor)
-                    + y // self.zoom_factor
-                )
+        # 追加到输入框末尾（支持多HSV）
+        if current_text:
+            updated_text = f"{current_text},{new_color_config}"
+        else:
+            updated_text = new_color_config
 
-                if (
-                    0 <= src_x < self.screenshot.width()
-                    and 0 <= src_y < self.screenshot.height()
-                ):
-                    color = self.screenshot.toImage().pixelColor(src_x, src_y)
-                    painter.fillRect(
-                        magnifier_rect.left() + x, magnifier_rect.top() + y, 1, 1, color
-                    )
+        # 更新颜色配置输入框
+        widgets["colors_edit"].setText(updated_text)
 
-        # 放大镜边框
-        pen.setColor(QColor(0, 0, 0))
-        pen.setWidth(2)
-        painter.setPen(pen)
-        painter.drawRect(magnifier_rect)
+        # 自动解析并显示
+        self._parse_colors_input(prefix, updated_text)
 
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton:
-            cursor_pos = self.mapFromGlobal(QCursor.pos())
+        # 显示分析信息
+        from PySide6.QtWidgets import QMessageBox
 
-            if (
-                0 <= cursor_pos.x() < self.screenshot.width()
-                and 0 <= cursor_pos.y() < self.screenshot.height()
-            ):
-                color = self.screenshot.toImage().pixelColor(
-                    cursor_pos.x(), cursor_pos.y()
-                )
+        info_msg = f"""🎯 智能颜色分析完成！
 
-                # 转换为HSV
-                h, s, v, _ = color.getHsv()
+📊 分析结果：
+• 区域大小: {region_size[0]}×{region_size[1]} 像素
+• 总像素数: {total_pixels:,} 个
+• 平均颜色: HSV({mean_h}, {mean_s}, {mean_v})
+• 智能容差: ±({tolerance_h}, {tolerance_s}, {tolerance_v})
 
-                # 转换Qt HSV到OpenCV HSV格式
-                # Qt: H(0-359/-1), S(0-255), V(0-255)
-                # OpenCV: H(0-179), S(0-255), V(0-255)
-                if h == -1:  # 灰色/无色相
-                    h = 0
-                else:
-                    h = h // 2  # 将360度范围转换为180度范围
+✅ 已自动配置颜色检测参数
+💡 容差基于区域内颜色分布自动计算，覆盖约95%的像素"""
 
-                self.color_picked.emit(h, s, v)
-
-            self.accept()
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Escape:
-            self.reject()
+        # 使用简单的print输出替代消息框，避免UI问题
+        print("=" * 50)
+        print("🎯 智能颜色分析完成！")
+        print(f"📊 区域大小: {region_size[0]}×{region_size[1]} 像素")
+        print(f"📊 总像素数: {total_pixels:,} 个")
+        print(f"🎨 平均颜色: HSV({mean_h}, {mean_s}, {mean_v})")
+        print(f"⚙️  智能容差: ±({tolerance_h}, {tolerance_s}, {tolerance_v})")
+        print(f"✅ 已追加到颜色配置: {new_color_config}")
+        print("=" * 50)

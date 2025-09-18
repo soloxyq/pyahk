@@ -313,33 +313,8 @@ class SimplifiedSkillWidget(QWidget):
                     f"0x{config.get('ConditionColor', 0):06X}"
                 )
 
-            # 区域资源检测配置
-            if "RegionX1" in self._ui_widgets:
-                self._ui_widgets["RegionX1"].setText(str(config.get("RegionX1", 0)))
-            if "RegionY1" in self._ui_widgets:
-                self._ui_widgets["RegionY1"].setText(str(config.get("RegionY1", 0)))
-            if "RegionX2" in self._ui_widgets:
-                self._ui_widgets["RegionX2"].setText(str(config.get("RegionX2", 0)))
-            if "RegionY2" in self._ui_widgets:
-                self._ui_widgets["RegionY2"].setText(str(config.get("RegionY2", 0)))
-            if "ResourceThreshold" in self._ui_widgets:
-                self._ui_widgets["ResourceThreshold"].setText(str(config.get("ResourceThreshold", 50)))
-            if "ColorType" in self._ui_widgets:
-                self._ui_widgets["ColorType"].setText(str(config.get("ColorType", 0)))
-
-            # HSV颜色和容差配置
-            if "TargetH" in self._ui_widgets:
-                self._ui_widgets["TargetH"].setText(str(config.get("TargetH", 0)))
-            if "TargetS" in self._ui_widgets:
-                self._ui_widgets["TargetS"].setText(str(config.get("TargetS", 0)))
-            if "TargetV" in self._ui_widgets:
-                self._ui_widgets["TargetV"].setText(str(config.get("TargetV", 0)))
-            if "ToleranceH" in self._ui_widgets:
-                self._ui_widgets["ToleranceH"].setText(str(config.get("ToleranceH", 10)))
-            if "ToleranceS" in self._ui_widgets:
-                self._ui_widgets["ToleranceS"].setText(str(config.get("ToleranceS", 20)))
-            if "ToleranceV" in self._ui_widgets:
-                self._ui_widgets["ToleranceV"].setText(str(config.get("ToleranceV", 20)))
+            # 区域资源检测配置已移至独立的“智能药剂”选项卡
+            # 此处不再需要加载相关UI元素
 
             self._ui_widgets["AltKey"].setText(config.get("AltKey", ""))
 
