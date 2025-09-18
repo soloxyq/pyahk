@@ -1,8 +1,8 @@
 @echo off
 REM ---------------- 配置 ----------------
 REM 如果系统 PATH 没有 AutoHotkey.exe，请把下面改为完整路径，例如:
-REM set "AHK_EXE=C:\Program Files\AutoHotkey\AutoHotkey.exe"
-set "AHK_EXE=AutoHotkey.exe"
+REM set "AHK_EXE=D:\Program Files\AutoHotkey\v2\AutoHotkey.exe"
+set "AHK_EXE=D:\Program Files\AutoHotkey\v2\AutoHotkey.exe"
 
 REM 与服务脚本同目录下的文件名
 set "SCRIPT=%~dp0hold_server.ahk"

@@ -178,51 +178,42 @@
             "hp_config": {
                 "enabled": true,
                 "key": "1",
-                "threshold": 30,
+                "threshold": 10,
                 "cooldown": 1000,
-                "region_x1": 960,
-                "region_y1": 1044,
-                "region_x2": 968,
-                "region_y2": 1052,
+                "region_x1": 111,
+                "region_y1": 909,
+                "region_x2": 128,
+                "region_y2": 1047,
                 "colors": [
                     {
                         "name": "Color1",
-                        "target_h": 135,
-                        "target_s": 55,
-                        "target_v": 37,
-                        "tolerance_h": 5,
-                        "tolerance_s": 15,
-                        "tolerance_v": 15
-                    },
-                    {
-                        "name": "Color2",
-                        "target_h": 130,
-                        "target_s": 169,
-                        "target_v": 241,
-                        "tolerance_h": 5,
+                        "target_h": 178,
+                        "target_s": 195,
+                        "target_v": 116,
+                        "tolerance_h": 25,
                         "tolerance_s": 18,
-                        "tolerance_v": 51
+                        "tolerance_v": 64
                     }
                 ]
             },
             "mp_config": {
                 "enabled": true,
                 "key": "2",
-                "threshold": 30,
+                "threshold": 10,
                 "cooldown": 2000,
-                "region_x1": 1552,
-                "region_y1": 910,
-                "region_x2": 1560,
-                "region_y2": 1004,
+                "region_x1": 1788,
+                "region_y1": 913,
+                "region_x2": 1808,
+                "region_y2": 1036,
                 "colors": [
                     {
                         "name": "Color1",
-                        "target_h": 104,
-                        "target_s": 80,
-                        "target_v": 58,
-                        "tolerance_h": 7,
-                        "tolerance_s": 5,
-                        "tolerance_v": 5
+                        "target_h": 106,
+                        "target_s": 208,
+                        "target_v": 134,
+                        "tolerance_h": 5,
+                        "tolerance_s": 15,
+                        "tolerance_v": 51
                     }
                 ]
             },
