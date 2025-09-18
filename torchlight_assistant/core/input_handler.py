@@ -31,6 +31,33 @@ try:
 except ImportError:
     WIN32_AVAILABLE = False
 
+# ========== WM_COPYDATA 客户端（用于 AHK 按住/释放）==========
+import ctypes
+from ctypes import wintypes
+
+WM_COPYDATA = 0x004A
+user32 = ctypes.WinDLL('user32', use_last_error=True)
+
+FindWindowW = user32.FindWindowW
+FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+FindWindowW.restype = wintypes.HWND
+
+SendMessageW = user32.SendMessageW
+SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+SendMessageW.restype = wintypes.LRESULT
+
+IsWindow = user32.IsWindow
+IsWindow.argtypes = [wintypes.HWND]
+IsWindow.restype = wintypes.BOOL
+
+class COPYDATASTRUCT(ctypes.Structure):
+    _fields_ = [
+        ("dwData", ctypes.c_void_p),
+        ("cbData", ctypes.c_ulong),
+        ("lpData", ctypes.c_void_p),
+    ]
+# ============================================================
+
 
 class InputHandler:
     """
@@ -141,6 +168,11 @@ class InputHandler:
             "9": "9",
             "0": "0",
         }
+        # --- 新增：AHK Hold 集成配置 ---
+        self._ahk_enabled = True
+        self._ahk_window_title = "HoldServer_Window_UniqueName_12345"
+        self._ahk_hwnd = None  # 缓存句柄，减少 FindWindow 频率
+
         self._setup_event_subscriptions()
 
     def _setup_event_subscriptions(self):
@@ -595,6 +627,61 @@ class InputHandler:
         except Exception as e:
             LOG_ERROR(f"Error sending key sequence: {e}")
             return False
+
+    # ========== AHK Hold/Release 对外接口 ==========
+    def set_ahk_hold(self, enabled: bool = True, window_title: Optional[str] = None):
+        """配置是否启用 AHK 处理 hold/release，以及服务窗口标题"""
+        self._ahk_enabled = bool(enabled)
+        if window_title:
+            self._ahk_window_title = window_title
+            self._ahk_hwnd = None  # 标题变更后重置缓存
+
+    def hold_key(self, key: str) -> bool:
+        """通过 AHK 发送按住指令（仅处理按住/释放，不影响其他输入路径）"""
+        if not key or not self._ahk_enabled:
+            return False
+        try:
+            text = f"hold:{key}"
+            return self._ahk_send(text)
+        except Exception as e:
+            LOG_ERROR(f"[AHK] hold_key 失败: {e}")
+            return False
+
+    def release_key(self, key: str) -> bool:
+        """通过 AHK 发送释放指令"""
+        if not key or not self._ahk_enabled:
+            return False
+        try:
+            text = f"release:{key}"
+            return self._ahk_send(text)
+        except Exception as e:
+            LOG_ERROR(f"[AHK] release_key 失败: {e}")
+            return False
+
+    # ---------- 内部：WM_COPYDATA 发送 ----------
+    def _ahk_get_hwnd(self):
+        """获取/缓存 AHK 服务窗口句柄"""
+        if self._ahk_hwnd and IsWindow(self._ahk_hwnd):
+            return self._ahk_hwnd
+        hwnd = FindWindowW(None, self._ahk_window_title)
+        self._ahk_hwnd = hwnd
+        return hwnd
+
+    def _ahk_send(self, text: str) -> bool:
+        """向 AHK 服务窗口发送 WM_COPYDATA 文本（UTF-8，含 NUL）"""
+        hwnd = self._ahk_get_hwnd()
+        if not hwnd:
+            LOG_ERROR(f"[AHK] 找不到服务窗口: {self._ahk_window_title}")
+            return False
+        data_bytes = text.encode("utf-8")
+        buf = ctypes.create_string_buffer(data_bytes)  # 包含结尾 NUL
+        cds = COPYDATASTRUCT()
+        cds.dwData = 1
+        cds.cbData = len(data_bytes) + 1  # 更稳：包含 NUL
+        cds.lpData = ctypes.cast(buf, ctypes.c_void_p)
+        res = SendMessageW(hwnd, WM_COPYDATA, 0, ctypes.byref(cds))
+        return bool(res)
+    # =================================================
 
     def get_window_activation_status(self) -> Dict[str, Any]:
         """获取窗口激活配置状态

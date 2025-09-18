@@ -125,6 +125,7 @@ class MacroEngine:
         self, state: MacroState, from_state: Optional[MacroState] = None
     ):
         if state == MacroState.STOPPED:
+
             self.skill_manager.stop()
             self.pathfinding_manager.stop()
             self.resource_manager.stop()
@@ -156,6 +157,7 @@ class MacroEngine:
                 # 首次启动
                 self._start_subsystems_based_on_mode()
 
+
         elif state == MacroState.PAUSED:
             if self._prepared_mode == "combat":
                 self.skill_manager.pause()
@@ -163,6 +165,7 @@ class MacroEngine:
                 self.pathfinding_manager.pause()
             self.resource_manager.pause()
             self.border_manager.pause_capture()
+
 
         event_bus.publish(f"engine:macro_{state.name.lower()}")
 
@@ -478,6 +481,12 @@ class MacroEngine:
         event_bus.publish(
             "engine:config_updated", self._skills_config, self._global_config
         )
+
+
+
+
+
+
 
     def _generate_default_config(self) -> Dict[str, Any]:
         """生成包含默认值的完整配置"""

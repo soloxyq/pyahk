@@ -69,15 +69,11 @@ class SimplifiedSkillWidget(QWidget):
         layout.addWidget(self._ui_widgets["Priority"])
 
     def _create_trigger_settings(self, layout):
-        self._ui_widgets["TriggerMode_timer"] = ConfigRadioButton(
-            "定时", self._on_trigger_mode_changed
-        )
-        self._ui_widgets["TriggerMode_cooldown"] = ConfigRadioButton(
-            "冷却", self._on_trigger_mode_changed
-        )
-
-        layout.addWidget(self._ui_widgets["TriggerMode_timer"])
-        layout.addWidget(self._ui_widgets["TriggerMode_cooldown"])
+        layout.addWidget(QLabel("触发方式:"))
+        self._ui_widgets["TriggerModeCombo"] = ConfigComboBox(self._on_trigger_mode_changed)
+        self._ui_widgets["TriggerModeCombo"].addItems(["定时", "冷却", "按住"])
+        self._ui_widgets["TriggerModeCombo"].setMaximumWidth(80)
+        layout.addWidget(self._ui_widgets["TriggerModeCombo"])
 
         self.timer_frame = self._create_timer_frame()
         layout.addWidget(self.timer_frame)
@@ -217,10 +213,9 @@ class SimplifiedSkillWidget(QWidget):
             changes["Key"] = self._ui_widgets["Key"].text()
             changes["Priority"] = self._ui_widgets["Priority"].isChecked()
             changes["Timer"] = int(self._ui_widgets["Timer"].text() or 0)
-            if self._ui_widgets["TriggerMode_cooldown"].isChecked():
-                changes["TriggerMode"] = 1
-            else:
-                changes["TriggerMode"] = 0
+            # 触发方式：0=定时, 1=冷却, 2=按住
+            trigger_text = self._ui_widgets["TriggerModeCombo"].currentText()
+            changes["TriggerMode"] = {"定时": 0, "冷却": 1, "按住": 2}.get(trigger_text, 0)
             changes["CooldownCoordX"] = int(
                 self._ui_widgets["CooldownCoordX"].text() or 0
             )
@@ -278,10 +273,8 @@ class SimplifiedSkillWidget(QWidget):
             self._ui_widgets["Timer"].setText(str(config.get("Timer", 1000)))
 
             trigger_mode = config.get("TriggerMode", 0)
-            if trigger_mode == 1:
-                self._ui_widgets["TriggerMode_cooldown"].setChecked(True)
-            else:
-                self._ui_widgets["TriggerMode_timer"].setChecked(True)
+            trigger_map = {0: "定时", 1: "冷却", 2: "按住"}
+            self._ui_widgets["TriggerModeCombo"].setCurrentText(trigger_map.get(trigger_mode, "定时"))
 
             self._ui_widgets["CooldownCoordX"].setText(
                 str(config.get("CooldownCoordX", 0))
@@ -325,9 +318,12 @@ class SimplifiedSkillWidget(QWidget):
     def _update_ui_visibility(self, config):
         trigger_mode = config.get("TriggerMode", 0)
         is_cooldown_mode = trigger_mode == 1
+        is_timer_mode = trigger_mode == 0
+        is_hold_mode = trigger_mode == 2
 
+        # 选择“按住”时隐藏定时/冷却参数
         self.cooldown_frame.setVisible(is_cooldown_mode)
-        self.timer_frame.setVisible(trigger_mode == 0)
+        self.timer_frame.setVisible(is_timer_mode)
 
         condition = config.get("ExecuteCondition", 0)
         self.condition_frame.setVisible(condition != 0)
@@ -377,8 +373,7 @@ class SimplifiedSkillWidget(QWidget):
             "Key",
             "Priority",
             "Timer",
-            "TriggerMode_timer",
-            "TriggerMode_cooldown",
+            "TriggerModeCombo",
             "CooldownCoordX",
             "CooldownCoordY",
             "CooldownSize",

@@ -38,7 +38,13 @@ class SkillManager:
         self._config_lock = threading.Lock()
         self._resource_condition_history = {}
         self._sequence_index = 0
+
+        # 启动前防残留：释放所有按住键
+        self._release_hold_keys()
         self._required_consecutive_checks = 2
+
+        # 按住键状态跟踪（一次性按下/释放，不在循环中）
+        self._held_hold_keys = set()
 
         # 自主调度相关属性
         self._scheduler_threads = {}
@@ -150,6 +156,8 @@ class SkillManager:
 
     def pause(self):
         """暂停所有技能活动"""
+        # 一次性释放所有按住键
+        self._release_hold_keys()
         self._is_paused = True
 
         # 暂停统一调度器
@@ -166,6 +174,9 @@ class SkillManager:
             self.unified_scheduler.resume()
             LOG_INFO("[统一调度器] 已恢复")
 
+            # 一次性重新按住
+            self._apply_hold_keys()
+
     def update_all_configs(self, skills_config: Dict[str, Any]):
         """更新所有技能配置并同步调度器"""
         with self._config_lock:
@@ -176,8 +187,14 @@ class SkillManager:
                 if config.get("Enabled") and config.get("TriggerMode") == 0
             }
 
+            # 在覆盖前提取旧的“按住”集合
+            old_hold_keys = self._get_configured_hold_keys()
+
             # 更新配置
             self._skills_config = skills_config
+
+            # 覆盖后提取新的“按住”集合
+            new_hold_keys = self._get_configured_hold_keys()
 
             # 记录新的技能配置
             new_timed_skills = {
@@ -188,6 +205,9 @@ class SkillManager:
 
             # 如果调度器正在运行，需要更新任务
             if self._is_running and self.unified_scheduler.get_status()["running"]:
+                # 非暂停状态下，同步按住集合的增量（一次性按/放）
+                if not self._is_paused:
+                    self._apply_delta_hold_keys(old_hold_keys, new_hold_keys)
                 # 移除不再需要的定时技能任务
                 removed_skills = old_timed_skills - new_timed_skills
                 for skill_name in removed_skills:
@@ -519,6 +539,68 @@ class SkillManager:
         return False
 
 
+    # ===== 按住/释放：一次性生命周期管理（不在循环中） =====
+    def _get_configured_hold_keys(self):
+        keys = set()
+        try:
+            for name, cfg in self._skills_config.items():
+                if cfg.get("Enabled") and cfg.get("TriggerMode") == 2:
+                    k = (cfg.get("Key") or "").strip()
+                    if k:
+                        keys.add(k)
+        except Exception as e:
+            LOG_ERROR(f"[按住] 提取配置失败: {e}")
+        return keys
+
+    def _apply_hold_keys(self):
+        """按下当前应按住但尚未按住的键，并记录在 _held_hold_keys"""
+        target = self._get_configured_hold_keys()
+        to_press = target - self._held_hold_keys
+        if not to_press:
+            return
+        LOG_INFO(f"[按住] 按下: {sorted(to_press)}")
+        for k in to_press:
+            try:
+                self.input_handler.hold_key(k)
+                self._held_hold_keys.add(k)
+            except Exception as e:
+                LOG_ERROR(f"[按住] hold_key 失败 {k}: {e}")
+
+    def _release_hold_keys(self):
+        """释放当前已按住的所有键，并清空 _held_hold_keys"""
+        if not self._held_hold_keys:
+            return
+        keys = list(self._held_hold_keys)
+        LOG_INFO(f"[按住] 释放: {sorted(keys)}")
+        for k in keys:
+            try:
+                self.input_handler.release_key(k)
+            except Exception as e:
+                LOG_ERROR(f"[按住] release_key 失败 {k}: {e}")
+        self._held_hold_keys.clear()
+
+    def _apply_delta_hold_keys(self, old_set, new_set):
+        """运行中配置热更新：按下新增，释放移除，保持一次性语义"""
+        to_press = new_set - old_set
+        to_release = old_set - new_set
+        if to_press:
+            LOG_INFO(f"[按住] 配置变更-按下: {sorted(to_press)}")
+            for k in to_press:
+                try:
+                    self.input_handler.hold_key(k)
+                    self._held_hold_keys.add(k)
+                except Exception as e:
+                    LOG_ERROR(f"[按住] hold_key 失败 {k}: {e}")
+        if to_release:
+            LOG_INFO(f"[按住] 配置变更-释放: {sorted(to_release)}")
+            for k in to_release:
+                try:
+                    self.input_handler.release_key(k)
+                    self._held_hold_keys.discard(k)
+                except Exception as e:
+                    LOG_ERROR(f"[按住] release_key 失败 {k}: {e}")
+
+    # ===== 现有逻辑 =====
     def prepare_border_only(self):
         """仅准备边框区域，不启动循环捕获"""
         with self._config_lock:
@@ -542,9 +624,14 @@ class SkillManager:
         # 直接启动自主调度
         self._start_autonomous_scheduling()
 
+        # 一次性按住配置中的按住键
+        self._apply_hold_keys()
+
     def stop(self):
         if not self._is_running:
             return
+        # 一次性释放所有按住键
+        self._release_hold_keys()
         self._is_running = False
         self._is_paused = False
 
