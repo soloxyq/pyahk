@@ -34,6 +34,8 @@ except ImportError:
 # ========== WM_COPYDATA 客户端（用于 AHK 按住/释放）==========
 import ctypes
 from ctypes import wintypes
+# 兼容部分环境无 wintypes.LRESULT：LRESULT 为 LONG_PTR，使用 c_ssize_t 跨 32/64 位
+LRESULT = ctypes.c_ssize_t
 
 WM_COPYDATA = 0x004A
 user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -44,7 +46,7 @@ FindWindowW.restype = wintypes.HWND
 
 SendMessageW = user32.SendMessageW
 SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-SendMessageW.restype = wintypes.LRESULT
+SendMessageW.restype = LRESULT
 
 IsWindow = user32.IsWindow
 IsWindow.argtypes = [wintypes.HWND]

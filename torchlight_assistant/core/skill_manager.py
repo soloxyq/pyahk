@@ -38,10 +38,9 @@ class SkillManager:
         self._config_lock = threading.Lock()
         self._resource_condition_history = {}
         self._sequence_index = 0
-
-        # 启动前防残留：释放所有按住键
-        self._release_hold_keys()
         self._required_consecutive_checks = 2
+        # 跟踪已按住的键（一次性动作管理）
+        self._held_hold_keys = set()
 
         # 按住键状态跟踪（一次性按下/释放，不在循环中）
         self._held_hold_keys = set()
@@ -56,6 +55,7 @@ class SkillManager:
 
         # 订阅MacroEngine事件
         self._setup_event_subscriptions()
+        # 注意：初始化阶段不执行按住/释放（_release_hold_keys），按住/释放只在 start/pause/resume/stop 或配置热更新时一次性执行
 
     def _setup_event_subscriptions(self):
         """设置事件订阅"""

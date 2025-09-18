@@ -1,5 +1,7 @@
 import ctypes
 from ctypes import wintypes
+# 兼容部分环境无 wintypes.LRESULT：LRESULT 为 LONG_PTR，使用 c_ssize_t 跨 32/64 位
+LRESULT = ctypes.c_ssize_t
 
 WM_COPYDATA = 0x004A
 
@@ -11,7 +13,7 @@ FindWindowW.restype = wintypes.HWND
 
 SendMessageW = user32.SendMessageW
 SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
-SendMessageW.restype = wintypes.LRESULT
+SendMessageW.restype = LRESULT
 
 class COPYDATASTRUCT(ctypes.Structure):
     _fields_ = [
