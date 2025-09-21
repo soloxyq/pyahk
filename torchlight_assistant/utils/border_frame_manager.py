@@ -8,6 +8,7 @@ import numpy as np
 from pathlib import Path
 from PIL import Image
 import os
+import cv2
 from .debug_log import LOG, LOG_ERROR, LOG_INFO
 
 
@@ -51,6 +52,16 @@ class BorderFrameManager:
         self.debug_save_enabled = False
         self.debug_save_path = "D:\\gtemp"
         self.debug_save_count = 0
+
+        # 订阅配置更新事件，确保窗口配置总能同步
+        from ..core.event_bus import event_bus
+        event_bus.subscribe("engine:config_updated", self._on_config_updated)
+
+    def _on_config_updated(self, skills_config: Dict, global_config: Dict):
+        """响应配置更新，更新窗口激活配置"""
+        window_config = global_config.get("window_activation", {})
+        self.set_window_activation_config(window_config)
+        LOG_INFO(f"[BorderFrameManager] 窗口配置已更新: {window_config}")
 
     def _get_target_window_handle(self) -> Optional[int]:
         """获取目标窗口句柄 - 根据用户配置查找目标窗口"""
@@ -343,35 +354,119 @@ class BorderFrameManager:
             LOG_ERROR(f"从帧中获取像素颜色时异常: {e}")
             return None
 
-    def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> float:
-        """使用指定帧数据对比冷却区域图像，返回浮点型的匹配百分比（0.0-100.0）"""
+    def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0) -> float:
+        """使用半圆形蒙版检测资源状态，以避免UI干扰，返回匹配百分比（0.0-100.0）"""
         try:
-            if frame is None:
+            import cv2
+
+            template_name = f"{resource_type}_region"
+            with self._cache_lock:
+                cached_template = self._template_cache.get(template_name)
+            if cached_template is None:
+                LOG_ERROR(f"[圆形检测] 未找到资源模板: {template_name}")
                 return 0.0
 
-            # 检查是否是资源检测（通过skill_name判断）
-            if skill_name in ["hp_region", "mp_region"]:
-                return self._compare_resource_hsv(frame, x, y, size, skill_name, threshold)
+            template_hsv = cached_template.get("image")
+            if template_hsv is None:
+                LOG_ERROR(f"[圆形检测] 缓存的模板无效: {template_name}")
+                return 0.0
 
-            # 原有的技能冷却检测逻辑
+            x1, y1 = center_x - radius, center_y - radius
+            region = self.get_region_from_frame(frame, x1, y1, radius * 2, radius * 2)
+            if region is None: return 0.0
+
+            if region.shape[2] == 4:
+                region = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
+            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+
+            # --- 半圆蒙版逻辑 ---
+            circular_mask = np.zeros((radius * 2, radius * 2), dtype=np.uint8)
+            cv2.circle(circular_mask, (radius, radius), radius, (255,), -1)
+
+            half_mask = np.zeros_like(circular_mask)
+            width, height = radius * 2, radius * 2
+            if resource_type == 'hp':  # HP的右半边被干扰，只分析左半边
+                cv2.rectangle(half_mask, (0, 0), (width // 2, height), 255, -1)
+            elif resource_type == 'mp':  # MP的左半边被干扰，只分析右半边
+                cv2.rectangle(half_mask, (width // 2, 0), (width, height), 255, -1)
+
+            final_mask = cv2.bitwise_and(circular_mask, half_mask)
+            # --- 结束 ---
+
+            h_tolerance = cached_template.get("h_tolerance", 10)
+            s_tolerance = cached_template.get("s_tolerance", 20)
+            v_tolerance = cached_template.get("v_tolerance", 20)
+
+            h_diff = np.abs(hsv_region[:, :, 0].astype(np.int16) - template_hsv[:, :, 0].astype(np.int16))
+            h_diff = np.minimum(h_diff, 180 - h_diff)
+            s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
+            v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
+            pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
+
+            total_pixels = np.count_nonzero(final_mask)
+            if total_pixels == 0: return 0.0
+            
+            matching_pixels = np.count_nonzero(cv2.bitwise_and(pixel_match, pixel_match, mask=final_mask))
+            match_percentage = (matching_pixels / total_pixels) * 100.0
+            return match_percentage
+
+        except Exception as e:
+            LOG_ERROR(f"[圆形检测] {resource_type} 检测异常: {e}")
+            return 0.0
+
+    def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> float:
+        """使用HSV容差检测，统一处理技能冷却，返回匹配百分比（0.0-100.0）"""
+        try:
+            import cv2
+
+            # 资源检测由 compare_resource_circle 处理，这里只处理技能冷却
+            if skill_name.endswith('_region'):
+                LOG_ERROR(f"[冷却检测] 错误的调用: {skill_name} 应由资源检测方法处理")
+                return 0.0
+
+            template_name = f"{skill_name}_cooldown"
+
+            with self._cache_lock:
+                cached_template = self._template_cache.get(template_name)
+            
+            if cached_template is None:
+                return 100.0
+
+            template_hsv = cached_template.get("image")
+            if template_hsv is None:
+                return 100.0
+
             current_region = self.get_region_from_frame(frame, x, y, size, size)
             if current_region is None:
                 return 0.0
 
-            with self._cache_lock:
-                cached_template = self._template_cache.get(f"{skill_name}_cooldown")
-            if cached_template is None:
-                return 100.0 # 没有模板视为冷却完成
+            if current_region.shape[2] == 4:
+                current_region = cv2.cvtColor(current_region, cv2.COLOR_BGRA2BGR)
+            hsv_region = cv2.cvtColor(current_region, cv2.COLOR_BGR2HSV)
 
-            if current_region.shape != cached_template["image"].shape:
-                return 0.0
+            if hsv_region.shape != template_hsv.shape:
+                hsv_region = cv2.resize(hsv_region, (template_hsv.shape[1], template_hsv.shape[0]))
 
-            diff = np.abs(current_region.astype(np.float32) - cached_template["image"].astype(np.float32))
-            similarity = 1.0 - (np.mean(diff) / 255.0)
-            return similarity * 100.0 # 返回百分比
+            # 技能冷却使用非常严格的容差
+            h_tolerance = 2
+            s_tolerance = 5
+            v_tolerance = 10
+
+            h_diff = np.abs(hsv_region[:, :, 0].astype(np.int16) - template_hsv[:, :, 0].astype(np.int16))
+            h_diff = np.minimum(h_diff, 180 - h_diff)
+            s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
+            v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
+            pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
+
+            total_pixels = hsv_region.shape[0] * hsv_region.shape[1]
+            if total_pixels == 0: return 0.0
+            
+            matching_pixels = np.count_nonzero(pixel_match)
+            match_percentage = (matching_pixels / total_pixels) * 100.0
+            return match_percentage
 
         except Exception as e:
-            LOG_ERROR(f"使用帧对比冷却图像时异常: {e}")
+            LOG_ERROR(f"[HSV冷却检测] {skill_name} 检测异常: {e}")
             return 0.0
 
     def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, size: int, resource_name: str, threshold: float) -> float:
@@ -471,6 +566,68 @@ class BorderFrameManager:
         r1, g1, b1 = (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF
         r2, g2, b2 = (target_color >> 16) & 0xFF, (target_color >> 8) & 0xFF, target_color & 0xFF
         return abs(r1 - r2) <= tolerance and abs(g1 - g2) <= tolerance and abs(b1 - b2) <= tolerance
+
+    def capture_target_window_frame(self) -> Optional[np.ndarray]:
+        """使用MSS和win32gui一次性捕获目标窗口的完整帧，更稳定"""
+        try:
+            import win32gui
+            from mss import mss
+
+            target_hwnd = self._get_target_window_handle()
+            if not target_hwnd or not win32gui.IsWindow(target_hwnd):
+                LOG_ERROR("[帧捕获-MSS] 无法找到或窗口句柄无效")
+                return None
+
+            # 激活窗口到前台，确保截图正确
+            try:
+                import win32con
+                # 如果窗口最小化，先恢复
+                if win32gui.IsIconic(target_hwnd):
+                    win32gui.ShowWindow(target_hwnd, win32con.SW_RESTORE)
+                # 设置为前台窗口
+                win32gui.SetForegroundWindow(target_hwnd)
+                time.sleep(0.2)  # 等待窗口激活的短暂延迟
+            except Exception as e:
+                LOG_ERROR(f"[窗口激活] 激活目标窗口失败: {e}")
+                # 即使激活失败，也继续尝试截图，作为后备
+
+            # 获取窗口的矩形区域
+            rect = win32gui.GetWindowRect(target_hwnd)
+            x, y, width, height = rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1]
+
+            if width <= 0 or height <= 0:
+                LOG_ERROR(f"[帧捕获-MSS] 窗口尺寸无效: w={width}, h={height}")
+                return None
+
+            monitor = {"top": y, "left": x, "width": width, "height": height}
+
+            with mss() as sct:
+                # 从指定区域截图
+                sct_img = sct.grab(monitor)
+                # 转换为OpenCV格式 (BGRA -> BGR)
+                frame = np.array(sct_img)
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_BGRA2BGR)
+
+            # 保存截图用于调试
+            try:
+                save_path = "D:\\gtemp"
+                os.makedirs(save_path, exist_ok=True)
+                cv2.imwrite(os.path.join(save_path, "mss_capture.png"), frame_bgr)
+                LOG_INFO("[帧保存] MSS截图已保存到 D:\\gtemp\\mss_capture.png")
+            except Exception as save_e:
+                LOG_ERROR(f"[帧保存] 保存MSS截图失败: {save_e}")
+
+            LOG_INFO(f"[帧捕获-MSS] 成功捕获目标窗口帧，尺寸: {frame_bgr.shape}")
+            return frame_bgr
+
+        except ImportError:
+            LOG_ERROR("[帧捕获-MSS] mss或pywin32库未安装")
+            return None
+        except Exception as e:
+            LOG_ERROR(f"[帧捕获-MSS] 一次性捕获异常: {e}")
+            import traceback
+            LOG_ERROR(traceback.format_exc())
+            return None
 
     def capture_screen_for_reroll(self, region: Optional[Tuple[int, int, int, int]] = None) -> Optional[np.ndarray]:
         """

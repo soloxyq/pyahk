@@ -180,10 +180,10 @@
                 "key": "1",
                 "threshold": 60,
                 "cooldown": 1000,
-                "region_x1": 110,
-                "region_y1": 902,
-                "region_x2": 119,
-                "region_y2": 1053,
+                "detection_mode": "circle",
+                "center_x": 127,
+                "center_y": 973,
+                "radius": 91,
                 "colors": [
                     {
                         "name": "Color1",
@@ -201,10 +201,10 @@
                 "key": "2",
                 "threshold": 20,
                 "cooldown": 2000,
-                "region_x1": 1791,
-                "region_y1": 901,
-                "region_x2": 1802,
-                "region_y2": 1050,
+                "detection_mode": "circle",
+                "center_x": 1792,
+                "center_y": 968,
+                "radius": 90,
                 "colors": [
                     {
                         "name": "Color1",

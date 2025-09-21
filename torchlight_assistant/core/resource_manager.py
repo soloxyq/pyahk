@@ -110,35 +110,62 @@ class ResourceManager:
         # 获取检测参数
         threshold = config.get("threshold", 50)
 
-        # 检查是否配置了区域
-        region_x1 = config.get("region_x1", 0)
-        region_y1 = config.get("region_y1", 0)
-        region_x2 = config.get("region_x2", 0)
-        region_y2 = config.get("region_y2", 0)
+        # 根据检测模式选择检测方法
+        detection_mode = config.get("detection_mode", "rectangle")
 
-        if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
-            LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 未配置检测区域")
-            return False  # 未配置区域
+        if detection_mode == "circle":
+            # 使用圆形检测
+            center_x = config.get("center_x")
+            center_y = config.get("center_y")
+            radius = config.get("radius")
 
-        # 确保有帧数据
-        if cached_frame is None:
-            try:
-                cached_frame = self.border_frame_manager.get_current_frame()
-            except:
+            if center_x is None or center_y is None or radius is None:
+                LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 圆形检测配置不完整")
                 return False
 
-        if cached_frame is None:
-            return False
+            if cached_frame is None:
+                try:
+                    cached_frame = self.border_frame_manager.get_current_frame()
+                except:
+                    return False
 
-        # 使用统一的技能冷却检测接口，获取精确的百分比
-        region_name = f"{resource_type}_region"
-        region_width = region_x2 - region_x1
-        region_height = region_y2 - region_y1
+            if cached_frame is None:
+                return False
 
-        # 调用统一的检测接口，返回匹配百分比
-        match_percentage = self.border_frame_manager.compare_cooldown_image(
-            cached_frame, region_x1, region_y1, region_name, max(region_width, region_height), threshold
-        )
+            # 使用圆形检测接口
+            match_percentage = self.border_frame_manager.compare_resource_circle(
+                cached_frame, center_x, center_y, radius, resource_type, threshold
+            )
+        else:
+            # 使用矩形检测
+            region_x1 = config.get("region_x1", 0)
+            region_y1 = config.get("region_y1", 0)
+            region_x2 = config.get("region_x2", 0)
+            region_y2 = config.get("region_y2", 0)
+
+            if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
+                LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 未配置检测区域")
+                return False  # 未配置区域
+
+            # 确保有帧数据
+            if cached_frame is None:
+                try:
+                    cached_frame = self.border_frame_manager.get_current_frame()
+                except:
+                    return False
+
+            if cached_frame is None:
+                return False
+
+            # 使用统一的技能冷却检测接口，获取精确的百分比
+            region_name = f"{resource_type}_region"
+            region_width = region_x2 - region_x1
+            region_height = region_y2 - region_y1
+
+            # 调用统一的检测接口，返回匹配百分比
+            match_percentage = self.border_frame_manager.compare_cooldown_image(
+                cached_frame, region_x1, region_y1, region_name, max(region_width, region_height), threshold
+            )
 
         # 判断是否需要补充资源（百分比低于阈值）
         needs_resource = match_percentage < threshold
@@ -268,35 +295,62 @@ class ResourceManager:
         if not config.get("enabled", False):
             return 100.0
 
-        # 检查是否配置了区域
-        region_x1 = config.get("region_x1", 0)
-        region_y1 = config.get("region_y1", 0)
-        region_x2 = config.get("region_x2", 0)
-        region_y2 = config.get("region_y2", 0)
+        # 根据检测模式选择检测方法
+        detection_mode = config.get("detection_mode", "rectangle")
 
-        if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
-            return 100.0
+        if detection_mode == "circle":
+            # 使用圆形检测
+            center_x = config.get("center_x")
+            center_y = config.get("center_y")
+            radius = config.get("radius")
 
-        # 确保有帧数据
-        frame = cached_frame
-        if frame is None:
-            try:
-                frame = self.border_frame_manager.get_current_frame()
-            except:
+            if center_x is None or center_y is None or radius is None:
                 return 100.0
 
-        if frame is None:
-            return 100.0
+            frame = cached_frame
+            if frame is None:
+                try:
+                    frame = self.border_frame_manager.get_current_frame()
+                except:
+                    return 100.0
 
-        # 使用统一的检测接口获取精确百分比
-        region_name = f"{resource_type}_region"
-        region_width = region_x2 - region_x1
-        region_height = region_y2 - region_y1
+            if frame is None:
+                return 100.0
 
-        # 调用统一的检测接口，返回匹配百分比
-        match_percentage = self.border_frame_manager.compare_cooldown_image(
-            frame, region_x1, region_y1, region_name, max(region_width, region_height), 0.0
-        )
+            # 使用圆形检测接口
+            match_percentage = self.border_frame_manager.compare_resource_circle(
+                frame, center_x, center_y, radius, resource_type, 0.0
+            )
+        else:
+            # 使用矩形检测
+            region_x1 = config.get("region_x1", 0)
+            region_y1 = config.get("region_y1", 0)
+            region_x2 = config.get("region_x2", 0)
+            region_y2 = config.get("region_y2", 0)
+
+            if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
+                return 100.0
+
+            # 确保有帧数据
+            frame = cached_frame
+            if frame is None:
+                try:
+                    frame = self.border_frame_manager.get_current_frame()
+                except:
+                    return 100.0
+
+            if frame is None:
+                return 100.0
+
+            # 使用统一的检测接口获取精确百分比
+            region_name = f"{resource_type}_region"
+            region_width = region_x2 - region_x1
+            region_height = region_y2 - region_y1
+
+            # 调用统一的检测接口，返回匹配百分比
+            match_percentage = self.border_frame_manager.compare_cooldown_image(
+                frame, region_x1, region_y1, region_name, max(region_width, region_height), 0.0
+            )
 
         return match_percentage
 
@@ -347,6 +401,88 @@ class ResourceManager:
         if self._is_running and self._is_paused:
             self._is_paused = False
             LOG_INFO("[ResourceManager] 已恢复")
+
+    def auto_detect_orbs(self, orb_type: str) -> Dict[str, Dict[str, Any]]:
+        """
+        根据指定的球体类型（'hp'或'mp'），在屏幕的特定角落区域内自动检测球体。
+
+        Args:
+            orb_type (str): 要检测的球体类型，'hp' 或 'mp'。
+
+        Returns:
+            Dict[str, Dict[str, Any]]: 检测结果，只包含指定类型的球体信息。
+        """
+        try:
+            import cv2
+            import numpy as np
+
+            frame = self.border_frame_manager.capture_target_window_frame()
+            if frame is None:
+                LOG_ERROR("[ResourceManager] 无法截取图像用于圆形检测")
+                return {}
+
+            h, w = frame.shape[:2]
+            roi_size = 400  # 定义我们关心的角落区域大小
+
+            if orb_type == 'hp':
+                # 左下角区域
+                roi = frame[h - roi_size:h, 0:roi_size]
+                offset_x, offset_y = 0, h - roi_size
+            elif orb_type == 'mp':
+                # 右下角区域
+                roi = frame[h - roi_size:h, w - roi_size:w]
+                offset_x, offset_y = w - roi_size, h - roi_size
+            else:
+                LOG_ERROR(f"[ResourceManager] 无效的球体类型: {orb_type}")
+                return {}
+
+            gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
+            gray_blurred = cv2.GaussianBlur(gray, (9, 9), 2)
+
+            circles = cv2.HoughCircles(
+                gray_blurred,
+                cv2.HOUGH_GRADIENT,
+                dp=1,
+                minDist=500,
+                param1=50,
+                param2=40,
+                minRadius=75,
+                maxRadius=95
+            )
+
+            if circles is None:
+                LOG_ERROR(f"[ResourceManager] 在 {orb_type} 区域未检测到任何圆形")
+                return {}
+
+            detected_circles = circles[0]
+            LOG_INFO(f"[ResourceManager] 在 {orb_type} 区域检测到 {len(detected_circles)} 个圆形")
+
+            # 在小区域内，我们通常只需要找到最清晰的那个圆即可
+            # 这里我们假设第一个被找到的圆就是目标
+            target_circle = detected_circles[0]
+            
+            # 将ROI内的相对坐标转换回全屏绝对坐标
+            roi_cx, roi_cy, roi_r = target_circle
+            abs_cx = int(roi_cx + offset_x)
+            abs_cy = int(roi_cy + offset_y)
+            abs_r = int(roi_r)
+
+            result = {
+                orb_type: {
+                    "center_x": abs_cx,
+                    "center_y": abs_cy,
+                    "radius": abs_r
+                }
+            }
+            LOG_INFO(f"[ResourceManager] {orb_type.upper()} 球体检测完成: 绝对坐标(圆心({abs_cx}, {abs_cy}), 半径{abs_r})")
+            
+            return result
+
+        except Exception as e:
+            LOG_ERROR(f"[ResourceManager] 自动检测球体失败: {e}")
+            import traceback
+            LOG_ERROR(traceback.format_exc())
+            return {}
 
     def is_running(self) -> bool:
         """检查是否正在运行"""

@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QRect, Signal as QSignal
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 from .custom_widgets import (
     ConfigSpinBox,
@@ -39,6 +39,14 @@ class ResourceManagementWidget(QWidget):
         # 存储拾取的HSV值 - 使用游戏实际测量值
         self.hp_hsv_values = {"h": 314, "s": 75, "v": 29}  # 血药颜色
         self.mp_hsv_values = {"h": 208, "s": 80, "v": 58}  # 蓝药颜色
+
+        # 检测模式跟踪
+        self.hp_detection_mode = "rectangle"  # "rectangle" 或 "circle"
+        self.mp_detection_mode = "rectangle"  # "rectangle" 或 "circle"
+
+        # 圆形配置存储
+        self.hp_circle_config = {}
+        self.mp_circle_config = {}
 
         self._setup_ui()
 
@@ -185,6 +193,24 @@ class ResourceManagementWidget(QWidget):
 
         region_layout.addLayout(coords_layout)
 
+        # 当前检测模式显示
+        mode_label = QLabel()
+        mode_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #666;")
+        region_layout.addWidget(mode_label)
+
+        # 存储模式标签引用
+        if prefix == "hp":
+            self.hp_mode_label = mode_label
+        else:
+            self.mp_mode_label = mode_label
+
+        # 更新模式显示
+        self._update_detection_mode_display(prefix)
+
+        # 区域选择按钮和自动检测按钮的布局
+        buttons_layout = QHBoxLayout()
+        buttons_layout.setSpacing(8)
+
         # 区域选择按钮
         select_btn = QPushButton("📦 选择区域")
         select_btn.setStyleSheet(
@@ -203,7 +229,29 @@ class ResourceManagementWidget(QWidget):
         """
         )
         select_btn.clicked.connect(lambda: self._start_region_selection(prefix))
-        region_layout.addWidget(select_btn)
+        buttons_layout.addWidget(select_btn)
+
+        # 自动检测球体按钮
+        detect_btn = QPushButton("🔍 Detect Orbs")
+        detect_btn.setStyleSheet(
+            """
+            QPushButton {
+                font-size: 12px;
+                padding: 8px;
+                background-color: #28a745;
+                color: white;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #218838;
+            }
+        """
+        )
+        detect_btn.clicked.connect(lambda: self._start_auto_detect_orbs(prefix))
+        buttons_layout.addWidget(detect_btn)
+
+        region_layout.addLayout(buttons_layout)
 
         layout.addWidget(region_group)
 
@@ -273,6 +321,11 @@ class ResourceManagementWidget(QWidget):
         color_layout.addLayout(colors_layout)
         layout.addWidget(color_group)
 
+        # 添加一个状态标签用于反馈
+        status_label = QLabel("")
+        status_label.setStyleSheet("font-size: 10pt; font-weight: bold;")
+        layout.addWidget(status_label)
+
         # 保存控件引用
         widgets = {
             "enabled": enabled_checkbox,
@@ -284,6 +337,8 @@ class ResourceManagementWidget(QWidget):
             "x2": x2_edit,
             "y2": y2_edit,
             "select_region_btn": select_btn,
+            "detect_orbs_btn": detect_btn, # 新增
+            "status_label": status_label, # 新增
             "colors_edit": colors_edit,
             "colors_result": colors_result,
             "parse_btn": parse_btn,
@@ -440,24 +495,43 @@ class ResourceManagementWidget(QWidget):
                 result_label.setText(f"❌ 解析错误：{str(e)}")
 
     def _build_hp_config(self) -> Dict[str, Any]:
-        """构建HP配置，使用新的colors列表格式"""
+        """构建HP配置，支持矩形和圆形两种独立配置方式"""
         # 基础配置
         hp_config = {
             "enabled": self.hp_widgets["enabled"].isChecked(),
             "key": self.hp_widgets["key"].text().strip(),
             "threshold": self.hp_widgets["threshold"].value(),
             "cooldown": self.hp_widgets["cooldown"].value(),
-            "region_x1": self.hp_widgets["x1"].value(),
-            "region_y1": self.hp_widgets["y1"].value(),
-            "region_x2": self.hp_widgets["x2"].value(),
-            "region_y2": self.hp_widgets["y2"].value(),
         }
+
+        # 根据检测模式保存相应配置
+        if self.hp_detection_mode == "circle" and self.hp_circle_config:
+            # 使用圆形配置
+            hp_config.update({
+                "detection_mode": "circle",
+                "center_x": self.hp_circle_config.get("hp", {}).get("center_x"),
+                "center_y": self.hp_circle_config.get("hp", {}).get("center_y"),
+                "radius": self.hp_circle_config.get("hp", {}).get("radius"),
+            })
+            print(f"[配置构建] HP使用圆形配置: 圆心({hp_config['center_x']},{hp_config['center_y']}), 半径{hp_config['radius']}")
+        else:
+            # 使用矩形配置
+            x1 = self.hp_widgets["x1"].value()
+            y1 = self.hp_widgets["y1"].value()
+            x2 = self.hp_widgets["x2"].value()
+            y2 = self.hp_widgets["y2"].value()
+            hp_config.update({
+                "detection_mode": "rectangle",
+                "region_x1": x1,
+                "region_y1": y1,
+                "region_x2": x2,
+                "region_y2": y2,
+            })
+            print(f"[配置构建] HP使用矩形配置: ({x1},{y1}) -> ({x2},{y2})")
 
         # 从颜色配置输入框解析颜色列表
         colors = self._parse_colors_to_list(self.hp_widgets["colors_edit"].text())
         hp_config["colors"] = colors
-
-        # 注意：不再写入旧格式字段，只使用新的colors数组格式
 
         return hp_config
 
@@ -500,24 +574,43 @@ class ResourceManagementWidget(QWidget):
         return colors
 
     def _build_mp_config(self) -> Dict[str, Any]:
-        """构建MP配置，使用新的colors列表格式"""
+        """构建MP配置，支持矩形和圆形两种独立配置方式"""
         # 基础配置
         mp_config = {
             "enabled": self.mp_widgets["enabled"].isChecked(),
             "key": self.mp_widgets["key"].text().strip(),
             "threshold": self.mp_widgets["threshold"].value(),
             "cooldown": self.mp_widgets["cooldown"].value(),
-            "region_x1": self.mp_widgets["x1"].value(),
-            "region_y1": self.mp_widgets["y1"].value(),
-            "region_x2": self.mp_widgets["x2"].value(),
-            "region_y2": self.mp_widgets["y2"].value(),
         }
+
+        # 根据检测模式保存相应配置
+        if self.mp_detection_mode == "circle" and self.mp_circle_config:
+            # 使用圆形配置
+            mp_config.update({
+                "detection_mode": "circle",
+                "center_x": self.mp_circle_config.get("mp", {}).get("center_x"),
+                "center_y": self.mp_circle_config.get("mp", {}).get("center_y"),
+                "radius": self.mp_circle_config.get("mp", {}).get("radius"),
+            })
+            print(f"[配置构建] MP使用圆形配置: 圆心({mp_config['center_x']},{mp_config['center_y']}), 半径{mp_config['radius']}")
+        else:
+            # 使用矩形配置
+            x1 = self.mp_widgets["x1"].value()
+            y1 = self.mp_widgets["y1"].value()
+            x2 = self.mp_widgets["x2"].value()
+            y2 = self.mp_widgets["y2"].value()
+            mp_config.update({
+                "detection_mode": "rectangle",
+                "region_x1": x1,
+                "region_y1": y1,
+                "region_x2": x2,
+                "region_y2": y2,
+            })
+            print(f"[配置构建] MP使用矩形配置: ({x1},{y1}) -> ({x2},{y2})")
 
         # 从颜色配置输入框解析颜色列表
         colors = self._parse_colors_to_list(self.mp_widgets["colors_edit"].text())
         mp_config["colors"] = colors
-
-        # 注意：不再写入旧格式字段，只使用新的colors数组格式
 
         return mp_config
 
@@ -535,7 +628,7 @@ class ResourceManagementWidget(QWidget):
         """从配置更新UI"""
         res_config = config.get("resource_management", {})
 
-        # HP配置 - 使用1080P默认值
+        # HP配置 - 支持圆形和矩形配置
         hp_config = res_config.get("hp_config", {})
         if self.hp_widgets:
             self.hp_widgets["enabled"].setChecked(hp_config.get("enabled", True))
@@ -544,12 +637,42 @@ class ResourceManagementWidget(QWidget):
                 hp_config.get("threshold", 50)
             )  # 默认50%
             self.hp_widgets["cooldown"].setValue(hp_config.get("cooldown", 5000))
-            self.hp_widgets["x1"].setValue(
-                hp_config.get("region_x1", 136)
-            )  # 1080P血药区域
-            self.hp_widgets["y1"].setValue(hp_config.get("region_y1", 910))
-            self.hp_widgets["x2"].setValue(hp_config.get("region_x2", 213))
-            self.hp_widgets["y2"].setValue(hp_config.get("region_y2", 1004))
+
+            # 根据检测模式加载相应配置
+            detection_mode = hp_config.get("detection_mode", "rectangle")
+            self.hp_detection_mode = detection_mode
+
+            if detection_mode == "circle":
+                # 加载圆形配置
+                center_x = hp_config.get("center_x")
+                center_y = hp_config.get("center_y")
+                radius = hp_config.get("radius")
+                if center_x is not None and center_y is not None and radius is not None:
+                    circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
+                    self.hp_circle_config = {"hp": circle_data}
+                    self._update_detection_mode_display("hp", circle_data)
+                else:
+                    self._update_detection_mode_display("hp") # 无坐标，只更新模式
+
+                # UI显示为空或提示信息
+                self.hp_widgets["x1"].setValue(0)
+                self.hp_widgets["y1"].setValue(0)
+                self.hp_widgets["x2"].setValue(0)
+                self.hp_widgets["y2"].setValue(0)
+            else:
+                # 加载矩形配置
+                x1 = hp_config.get("region_x1", 136)  # 1080P血药区域
+                y1 = hp_config.get("region_y1", 910)
+                x2 = hp_config.get("region_x2", 213)
+                y2 = hp_config.get("region_y2", 1004)
+                self.hp_widgets["x1"].setValue(x1)
+                self.hp_widgets["y1"].setValue(y1)
+                self.hp_widgets["x2"].setValue(x2)
+                self.hp_widgets["y2"].setValue(y2)
+                print(f"[配置加载] HP矩形配置: ({x1},{y1}) -> ({x2},{y2})")
+
+            # 更新UI显示
+            self._update_detection_mode_display("hp")
 
             # 加载颜色配置
             colors_text = self._colors_list_to_text(hp_config.get("colors", []))
@@ -560,7 +683,7 @@ class ResourceManagementWidget(QWidget):
             self.hp_widgets["colors_edit"].setText(colors_text)
             self._parse_colors_input("hp", colors_text)
 
-        # MP配置 - 使用1080P默认值
+        # MP配置 - 支持圆形和矩形配置
         mp_config = res_config.get("mp_config", {})
         if self.mp_widgets:
             self.mp_widgets["enabled"].setChecked(mp_config.get("enabled", True))
@@ -569,12 +692,42 @@ class ResourceManagementWidget(QWidget):
                 mp_config.get("threshold", 50)
             )  # 默认50%
             self.mp_widgets["cooldown"].setValue(mp_config.get("cooldown", 8000))
-            self.mp_widgets["x1"].setValue(
-                mp_config.get("region_x1", 1552)
-            )  # 1080P蓝药区域
-            self.mp_widgets["y1"].setValue(mp_config.get("region_y1", 910))
-            self.mp_widgets["x2"].setValue(mp_config.get("region_x2", 1560))
-            self.mp_widgets["y2"].setValue(mp_config.get("region_y2", 1004))
+
+            # 根据检测模式加载相应配置
+            detection_mode = mp_config.get("detection_mode", "rectangle")
+            self.mp_detection_mode = detection_mode
+
+            if detection_mode == "circle":
+                # 加载圆形配置
+                center_x = mp_config.get("center_x")
+                center_y = mp_config.get("center_y")
+                radius = mp_config.get("radius")
+                if center_x is not None and center_y is not None and radius is not None:
+                    circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
+                    self.mp_circle_config = {"mp": circle_data}
+                    self._update_detection_mode_display("mp", circle_data)
+                else:
+                    self._update_detection_mode_display("mp") # 无坐标，只更新模式
+
+                # UI显示为空或提示信息
+                self.mp_widgets["x1"].setValue(0)
+                self.mp_widgets["y1"].setValue(0)
+                self.mp_widgets["x2"].setValue(0)
+                self.mp_widgets["y2"].setValue(0)
+            else:
+                # 加载矩形配置
+                x1 = mp_config.get("region_x1", 1552)  # 1080P蓝药区域
+                y1 = mp_config.get("region_y1", 910)
+                x2 = mp_config.get("region_x2", 1560)
+                y2 = mp_config.get("region_y2", 1004)
+                self.mp_widgets["x1"].setValue(x1)
+                self.mp_widgets["y1"].setValue(y1)
+                self.mp_widgets["x2"].setValue(x2)
+                self.mp_widgets["y2"].setValue(y2)
+                print(f"[配置加载] MP矩形配置: ({x1},{y1}) -> ({x2},{y2})")
+
+            # 更新UI显示
+            self._update_detection_mode_display("mp")
 
             # 加载颜色配置
             colors_text = self._colors_list_to_text(mp_config.get("colors", []))
@@ -682,6 +835,47 @@ class ResourceManagementWidget(QWidget):
         """设置主窗口引用，用于隐藏/显示界面"""
         self.main_window = main_window
 
+    def _start_auto_detect_orbs(self, prefix: str):
+        """开始自动检测球体，使用状态标签进行反馈"""
+        if not self.main_window:
+            return
+
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+        status_label = widgets.get("status_label")
+        if not status_label:
+            return
+
+        # 1. 立即更新UI显示“正在检测...”
+        status_label.setText("正在检测...")
+        status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #007BFF;")
+        QApplication.processEvents() # 强制UI刷新
+
+        try:
+            # 2. 调用后台检测逻辑
+            if hasattr(self.main_window, 'macro_engine') and hasattr(self.main_window.macro_engine, 'resource_manager'):
+                result = self.main_window.macro_engine.resource_manager.auto_detect_orbs(orb_type=prefix)
+
+                if result and (prefix in result):
+                    # 3. 检测成功
+                    self._on_orbs_detected(prefix, result)
+                    status_label.setText("✅ 检测成功！")
+                    status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #28a745;")
+                else:
+                    # 4. 检测失败
+                    status_label.setText("❌ 检测失败，请重试")
+                    status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #DC3545;")
+            else:
+                status_label.setText("❌ 错误: 无法访问资源管理器")
+                status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #DC3545;")
+
+        except Exception as e:
+            status_label.setText(f"❌ 检测出错: {str(e)[:30]}...")
+            status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #DC3545;")
+
+        # 5. 3秒后自动清除状态信息
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(3000, lambda: status_label.setText(""))
+
     def _start_region_selection(self, prefix: str):
         """开始区域选择"""
         if not self.main_window:
@@ -722,14 +916,67 @@ class ResourceManagementWidget(QWidget):
         # 延迟200ms执行对话框显示，确保主窗口完全隐藏
         QTimer.singleShot(200, show_dialog)
 
+    def _update_detection_mode_display(self, prefix: str, circle_config: Optional[Dict] = None):
+        """更新检测模式显示，并附带坐标信息"""
+        mode = self.hp_detection_mode if prefix == "hp" else self.mp_detection_mode
+        label = self.hp_mode_label if prefix == "hp" else self.mp_mode_label
+
+        if mode == "circle":
+            if circle_config:
+                cx = circle_config.get("center_x", "N/A")
+                cy = circle_config.get("center_y", "N/A")
+                r = circle_config.get("radius", "N/A")
+                label.setText(f"🔵 当前模式：圆形检测 (圆心: {cx},{cy} | 半径: {r})")
+            else:
+                label.setText("🔵 当前模式：圆形检测 (无具体坐标)")
+            label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #28a745;")
+        else:
+            label.setText("⬛ 当前模式：矩形检测（手动选择区域）")
+            label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #17a2b8;")
+
+    def _on_orbs_detected(self, prefix: str, detection_result: Dict[str, Dict[str, Any]]):
+        """球体检测完成回调 - 设置为圆形检测模式"""
+        orb_count = len(detection_result)
+        print(f"[球体检测] 检测完成，共找到 {orb_count} 个球体")
+
+        # 设置检测模式为圆形
+        if prefix == "hp":
+            self.hp_detection_mode = "circle"
+            self.hp_circle_config = detection_result.copy()
+        else:
+            self.mp_detection_mode = "circle"
+            self.mp_circle_config = detection_result.copy()
+
+        # 更新UI显示，并传入检测到的坐标
+        orb_data_for_prefix = detection_result.get(prefix)
+        self._update_detection_mode_display(prefix, orb_data_for_prefix)
+
+        for orb_key, orb_data in detection_result.items():
+            center_x = orb_data["center_x"]
+            center_y = orb_data["center_y"]
+            radius = orb_data["radius"]
+            print(f"[球体检测] {orb_key.upper()}球体: 圆心({center_x},{center_y}), 半径{radius}")
+
+        print(f"[球体检测] {prefix.upper()}已设置为圆形检测模式")
+
     def _on_region_selected(self, prefix: str, x1: int, y1: int, x2: int, y2: int):
         """区域选择完成回调"""
+        # 设置检测模式为矩形
+        if prefix == "hp":
+            self.hp_detection_mode = "rectangle"
+        else:
+            self.mp_detection_mode = "rectangle"
+
         widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
         widgets["x1"].setValue(x1)
         widgets["y1"].setValue(y1)
         widgets["x2"].setValue(x2)
         widgets["y2"].setValue(y2)
-        print(f"[区域更新] {prefix.upper()}检测区域已更新为: ({x1},{y1}) -> ({x2},{y2})")
+
+        # 更新UI显示
+        self._update_detection_mode_display(prefix)
+
+        print(f"[区域更新] {prefix.upper()}已设置为矩形检测模式: ({x1},{y1}) -> ({x2},{y2})")
 
     def _on_region_analyzed(
         self, prefix: str, x1: int, y1: int, x2: int, y2: int, analysis: dict
