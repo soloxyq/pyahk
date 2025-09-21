@@ -78,6 +78,7 @@ class OSDStatusWindow(QWidget):
             self.height = new_height
             self.resize(self.width, self.height)
 
+
     
 
     def show(self):

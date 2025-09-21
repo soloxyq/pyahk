@@ -28,6 +28,10 @@ class ResourceManager:
         self._is_running = False
         self._is_paused = False
 
+        # 模板HSV数据存储（每个像素的HSV值）
+        self.hp_template_hsv = None
+        self.mp_template_hsv = None
+
     def update_config(self, resource_config: Dict[str, Any]):
         """更新资源配置"""
         self.hp_config = resource_config.get("hp_config", {})
@@ -47,19 +51,17 @@ class ResourceManager:
         """
         if not self._is_running or self._is_paused:
             return False
-            
+
         executed = False
 
         # 检查HP
         if self.hp_config.get("enabled", False):
-            LOG_INFO(f"[ResourceManager] 检查HP资源 - 配置: {self.hp_config}")
             if self._should_use_hp_resource(cached_frame):
                 self._execute_resource("hp", self.hp_config)
                 executed = True
 
         # 检查MP
         if self.mp_config.get("enabled", False):
-            LOG_INFO(f"[ResourceManager] 检查MP资源 - 配置: {self.mp_config}")
             if self._should_use_mp_resource(cached_frame):
                 self._execute_resource("mp", self.mp_config)
                 executed = True
@@ -102,12 +104,12 @@ class ResourceManager:
         return current_time - last_press_time >= cooldown_seconds
 
     def _is_resource_low(self, resource_type: str, cached_frame: Optional[np.ndarray]) -> bool:
-        """检查资源是否低于阈值"""
+        """检查资源是否低于阈值（使用统一的百分比检测接口）"""
         config = self.hp_config if resource_type == "hp" else self.mp_config
 
         # 获取检测参数
         threshold = config.get("threshold", 50)
-        
+
         # 检查是否配置了区域
         region_x1 = config.get("region_x1", 0)
         region_y1 = config.get("region_y1", 0)
@@ -118,124 +120,98 @@ class ResourceManager:
             LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 未配置检测区域")
             return False  # 未配置区域
 
-        # 计算资源百分比
-        resource_percentage = self._calculate_region_resource_percentage(
-            cached_frame, region_x1, region_y1, region_x2, region_y2, config
+        # 确保有帧数据
+        if cached_frame is None:
+            try:
+                cached_frame = self.border_frame_manager.get_current_frame()
+            except:
+                return False
+
+        if cached_frame is None:
+            return False
+
+        # 使用统一的技能冷却检测接口，获取精确的百分比
+        region_name = f"{resource_type}_region"
+        region_width = region_x2 - region_x1
+        region_height = region_y2 - region_y1
+
+        # 调用统一的检测接口，返回匹配百分比
+        match_percentage = self.border_frame_manager.compare_cooldown_image(
+            cached_frame, region_x1, region_y1, region_name, max(region_width, region_height), threshold
         )
 
-        # 判断是否需要补充
-        needs_resource = resource_percentage < threshold
-
-        if needs_resource:
-            LOG_INFO(f"[ResourceManager] {resource_type.upper()} 资源不足 - 当前: {resource_percentage:.1f}%, 阈值: {threshold}%")
+        # 判断是否需要补充资源（百分比低于阈值）
+        needs_resource = match_percentage < threshold
 
         return needs_resource
 
 
 
-    def _calculate_region_resource_percentage(
-        self, frame: np.ndarray, x1: int, y1: int, x2: int, y2: int, config: Dict[str, Any]
-    ) -> float:
-        """计算区域内的资源百分比（支持多颜色检测）"""
+
+
+    def capture_template_hsv(self, frame: np.ndarray):
+        """在F8准备阶段截取并保存模板区域的HSV数据"""
         if frame is None:
-            return 100.0
+            LOG_ERROR("[ResourceManager] 无法获取帧数据用于模板截取")
+            return
 
         try:
-            # 确保坐标在图像范围内
-            height, width = frame.shape[:2]
-            x1, x2 = max(0, min(x1, x2)), min(width, max(x1, x2))
-            y1, y2 = max(0, min(y1, y2)), min(height, max(y1, y2))
-
-            if x2 <= x1 or y2 <= y1:
-                return 100.0
-
-            # 提取区域
-            region = frame[y1:y2, x1:x2]
-            total_pixels = region.shape[0] * region.shape[1]
-            if total_pixels == 0:
-                return 100.0
-
             import cv2
-            # Capture库返回BGRA格式，统一使用OpenCV转换
-            if region.shape[2] == 4:  # BGRA格式
-                region_bgr = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
-            else:  # 已经是BGR格式
-                region_bgr = region
-            hsv_region = cv2.cvtColor(region_bgr, cv2.COLOR_BGR2HSV)
 
-            # 获取颜色列表配置
-            colors_to_check = self._get_colors_config(config)
-            
-            if not colors_to_check:
-                LOG_ERROR(f"[ResourceManager] 没有配置任何检测颜色")
-                return 100.0
+            # 截取HP区域模板
+            if self.hp_config.get("enabled", False):
+                hp_region = self._get_region_from_config(self.hp_config)
+                if hp_region:
+                    x1, y1, x2, y2 = hp_region
+                    if (0 <= x1 < x2 <= frame.shape[1] and
+                        0 <= y1 < y2 <= frame.shape[0]):
+                        hp_region_img = frame[y1:y2, x1:x2]
+                        # 转换为HSV并保存
+                        if hp_region_img.shape[2] == 4:  # BGRA
+                            hp_region_img = cv2.cvtColor(hp_region_img, cv2.COLOR_BGRA2BGR)
+                        hp_hsv = cv2.cvtColor(hp_region_img, cv2.COLOR_BGR2HSV)
+                        self.hp_template_hsv = hp_hsv.copy()
+                        LOG_INFO(f"[ResourceManager] 已保存HP模板HSV数据，尺寸: {hp_hsv.shape}")
 
-            # 从全黑的mask开始
-            final_mask = np.zeros(hsv_region.shape[:2], dtype=np.uint8)
-            total_matching_pixels = 0
-
-            # 循环处理颜色列表
-            for i, color_profile in enumerate(colors_to_check):
-                current_mask = self._create_color_mask(hsv_region, color_profile)
-                current_pixels = cv2.countNonZero(current_mask)
-                
-                # 使用位或(OR)操作，将当前mask合并到最终mask中
-                final_mask = cv2.bitwise_or(final_mask, current_mask)
-                
-                LOG_INFO(f"[ResourceManager] 颜色{i+1}({color_profile.get('name', 'Unknown')}) - 匹配像素: {current_pixels}")
-
-            # 计算合并后mask的总匹配像素
-            matching_pixels = cv2.countNonZero(final_mask)
-            percentage = (matching_pixels / total_pixels) * 100.0
-            
-            LOG_INFO(f"[ResourceManager] 区域检测结果 - 总匹配像素: {matching_pixels}/{total_pixels}, 百分比: {percentage:.1f}%")
-            
-            return min(100.0, max(0.0, percentage))
+            # 截取MP区域模板
+            if self.mp_config.get("enabled", False):
+                mp_region = self._get_region_from_config(self.mp_config)
+                if mp_region:
+                    x1, y1, x2, y2 = mp_region
+                    if (0 <= x1 < x2 <= frame.shape[1] and
+                        0 <= y1 < y2 <= frame.shape[0]):
+                        mp_region_img = frame[y1:y2, x1:x2]
+                        # 转换为HSV并保存
+                        if mp_region_img.shape[2] == 4:  # BGRA
+                            mp_region_img = cv2.cvtColor(mp_region_img, cv2.COLOR_BGRA2BGR)
+                        mp_hsv = cv2.cvtColor(mp_region_img, cv2.COLOR_BGR2HSV)
+                        self.mp_template_hsv = mp_hsv.copy()
+                        LOG_INFO(f"[ResourceManager] 已保存MP模板HSV数据，尺寸: {mp_hsv.shape}")
 
         except Exception as e:
-            LOG_ERROR(f"[ResourceManager] 区域资源计算异常: {e}")
-            return 100.0
+            LOG_ERROR(f"[ResourceManager] 模板HSV数据截取失败: {e}")
 
-    def _get_colors_config(self, config: Dict[str, Any]) -> list:
-        """获取颜色配置列表，兼容新旧格式"""
-        # 新格式：直接使用colors列表
-        if "colors" in config:
-            return config["colors"]
-        
-        # 旧格式兼容：从单一颜色配置构建列表
-        colors = []
-        
-        # 主颜色（必须）
-        main_color = {
-            "name": "Normal",
-            "target_h": config.get("target_h", 0),
-            "target_s": config.get("target_s", 75),
-            "target_v": config.get("target_v", 29),
-            "tolerance_h": config.get("tolerance_h", 10),
-            "tolerance_s": config.get("tolerance_s", 20),
-            "tolerance_v": config.get("tolerance_v", 20)
-        }
-        colors.append(main_color)
-        
-        # 中毒状态颜色（可选）
-        if config.get("poison_enabled", False):
-            poison_color = {
-                "name": "Poison",
-                "target_h": config.get("poison_h", 80),
-                "target_s": config.get("poison_s", 84),
-                "target_v": config.get("poison_v", 48),
-                "tolerance_h": config.get("poison_tolerance_h", 20),
-                "tolerance_s": config.get("poison_tolerance_s", 27),
-                "tolerance_v": config.get("poison_tolerance_v", 27)
-            }
-            colors.append(poison_color)
-        
-        return colors
+    def _get_region_from_config(self, config: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
+        """从配置中获取区域坐标"""
+        try:
+            x1 = config.get("region_x1", 0)
+            y1 = config.get("region_y1", 0)
+            x2 = config.get("region_x2", 0)
+            y2 = config.get("region_y2", 0)
+
+            if x1 < x2 and y1 < y2:
+                return (x1, y1, x2, y2)
+            else:
+                LOG_ERROR(f"[ResourceManager] 无效的区域坐标: ({x1},{y1}) -> ({x2},{y2})")
+                return None
+        except Exception as e:
+            LOG_ERROR(f"[ResourceManager] 获取区域坐标失败: {e}")
+            return None
 
     def _create_color_mask(self, hsv_region: np.ndarray, color_profile: Dict[str, Any]) -> np.ndarray:
-        """为单个颜色配置创建mask"""
+        """为单个颜色配置创建mask (保留兼容性)"""
         import cv2
-        
+
         target_h = color_profile.get("target_h", 0)
         target_s = color_profile.get("target_s", 75)
         target_v = color_profile.get("target_v", 29)
@@ -260,9 +236,9 @@ class ResourceManager:
         ], dtype=np.uint8)
 
         mask = cv2.inRange(hsv_region, lower_bound, upper_bound)
-        
+
         LOG_INFO(f"[ResourceManager] {color_profile.get('name', 'Unknown')}颜色 - HSV: H={opencv_h}±{opencv_h_tolerance}, S={target_s}±{tolerance_s}, V={target_v}±{tolerance_v}")
-        
+
         return mask
 
     def _execute_resource(self, resource_type: str, config: Dict[str, Any]):
@@ -281,6 +257,48 @@ class ResourceManager:
         """清理所有冷却时间戳（用于重置）"""
         self._flask_cooldowns.clear()
         LOG_INFO("[ResourceManager] 冷却时间戳已清理")
+
+    def get_current_resource_percentage(self, resource_type: str, cached_frame: Optional[np.ndarray] = None) -> float:
+        """获取当前资源百分比，用于OSD显示（使用统一的检测接口）"""
+        if resource_type not in ["hp", "mp"]:
+            return 100.0
+
+        config = self.hp_config if resource_type == "hp" else self.mp_config
+
+        if not config.get("enabled", False):
+            return 100.0
+
+        # 检查是否配置了区域
+        region_x1 = config.get("region_x1", 0)
+        region_y1 = config.get("region_y1", 0)
+        region_x2 = config.get("region_x2", 0)
+        region_y2 = config.get("region_y2", 0)
+
+        if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
+            return 100.0
+
+        # 确保有帧数据
+        frame = cached_frame
+        if frame is None:
+            try:
+                frame = self.border_frame_manager.get_current_frame()
+            except:
+                return 100.0
+
+        if frame is None:
+            return 100.0
+
+        # 使用统一的检测接口获取精确百分比
+        region_name = f"{resource_type}_region"
+        region_width = region_x2 - region_x1
+        region_height = region_y2 - region_y1
+
+        # 调用统一的检测接口，返回匹配百分比
+        match_percentage = self.border_frame_manager.compare_cooldown_image(
+            frame, region_x1, region_y1, region_name, max(region_width, region_height), 0.0
+        )
+
+        return match_percentage
 
     def get_status(self) -> Dict[str, Any]:
         """获取状态信息"""

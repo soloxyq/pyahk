@@ -335,12 +335,24 @@ class SkillManager:
             return  # 如果无法获取帧数据，跳过本次检测
 
         with self._config_lock:
-            skills_to_check = list(self._skills_config.items())
+            # 按优先级排序：优先级高的技能先检查
+            skills_to_check = sorted(
+                self._skills_config.items(),
+                key=lambda x: (not x[1].get("Priority", False), x[0])  # Priority=True的排在前面
+            )
 
-        # 检查技能冷却
+        # 检查技能冷却（按优先级顺序）
+        priority_skills_executed = 0
         for skill_name, skill_config in skills_to_check:
             if skill_config.get("Enabled") and skill_config.get("TriggerMode") == 1:
+                is_priority = skill_config.get("Priority", False)
+                if is_priority:
+                    priority_skills_executed += 1
+                LOG_INFO(f"[冷却检查] 检查技能 {skill_name} (优先级: {'高' if is_priority else '普通'})")
                 self._try_execute_skill(skill_name, skill_config, cached_frame)
+
+        if priority_skills_executed > 0:
+            LOG_INFO(f"[冷却检查] 本轮执行了 {priority_skills_executed} 个高优先级技能")
 
         # 注意：资源管理现在有独立的调度任务，不在这里调用
 
@@ -414,7 +426,11 @@ class SkillManager:
             key_to_use = skill_config.get("Key", "")
 
         if key_to_use:
-            self.input_handler.execute_key(key_to_use)
+            # 检查是否为高优先级技能
+            is_priority_skill = skill_config.get("Priority", False)
+            if is_priority_skill:
+                LOG_INFO(f"[优先级执行] 高优先级技能 {skill_name} 按键 {key_to_use} 插入队列前端")
+            self.input_handler.execute_key(key_to_use, priority=is_priority_skill)
 
     def _check_cooldown_ready(
         self,
@@ -429,10 +445,34 @@ class SkillManager:
             skill_config.get("CooldownCoordY", 0),
             skill_config.get("CooldownSize", 12),
         )
+
+        # 添加调试日志
+        LOG_INFO(f"[冷却检测] 检查技能 {skill_name} - 坐标: ({x}, {y}), 大小: {size}")
+
+        # 确保帧数据不为None
+        if cached_frame is None:
+            LOG_ERROR(f"[冷却检测] {skill_name} - 帧数据为空")
+            return True
+
+        # 检查坐标是否有效
+        if x <= 0 or y <= 0:
+            LOG_ERROR(f"[冷却检测] {skill_name} - 无效坐标: ({x}, {y})")
+            return True
+
         # 使用统一的接口，支持缓存帧数据
-        is_ready = self.border_frame_manager.compare_cooldown_image(
+        match_percentage = self.border_frame_manager.compare_cooldown_image(
             cached_frame, x, y, skill_name, size, threshold=0.95
         )
+
+        # 添加调试日志
+        LOG_INFO(f"[冷却检测] {skill_name} - 匹配度: {match_percentage:.2f}%")
+
+        # 技能冷却检测：模板保存的是技能就绪状态
+        # 匹配度高表示当前状态与就绪状态相似，技能就绪
+        # 匹配度低表示当前状态与就绪状态不同，技能在冷却中
+        is_ready = match_percentage >= 95.0  # 95%以上匹配度表示冷却完成
+
+        LOG_INFO(f"[冷却检测] {skill_name} - 冷却状态: {'就绪' if is_ready else '未就绪'}")
         return is_ready
 
     def _check_execution_conditions(

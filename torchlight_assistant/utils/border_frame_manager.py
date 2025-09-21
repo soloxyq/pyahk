@@ -92,32 +92,60 @@ class BorderFrameManager:
         """设置窗口激活配置"""
         self.window_activation_config = config
 
-    def set_skill_coordinates(self, skills_config: Dict[str, Any]):
-        """设置技能坐标并计算边框"""
+    def set_skill_coordinates(self, skills_config: Dict[str, Any], resource_config: Optional[Dict[str, Any]] = None):
+        """设置技能坐标并计算边框（支持HP/MP区域）"""
         LOG(f"[技能坐标] 开始设置技能坐标，技能配置数量: {len(skills_config)}")
         self.skill_coords = []
-        
+
         for skill_name, skill_data in skills_config.items():
             if not skill_data.get("Enabled", False):
                 LOG(f"[技能坐标] 技能 '{skill_name}' 未启用，跳过")
                 continue
-                
+
             LOG(f"[技能坐标] 处理技能 '{skill_name}': TriggerMode={skill_data.get('TriggerMode', 0)}, ExecuteCondition={skill_data.get('ExecuteCondition', 0)}")
-            
+
             if skill_data.get("TriggerMode", 0) == 1 and skill_data.get("CooldownCoordX", 0) > 0:
                 coord_info = {
                     "name": f"{skill_name}_cooldown", "x": skill_data["CooldownCoordX"], "y": skill_data["CooldownCoordY"], "size": skill_data.get("CooldownSize", 12)
                 }
                 self.skill_coords.append(coord_info)
                 LOG(f"[技能坐标] 添加冷却坐标: {coord_info}")
-                
+
             if skill_data.get("ExecuteCondition", 0) in [1, 2] and skill_data.get("ConditionCoordX", 0) > 0:
                 coord_info = {
                     "name": f"{skill_name}_condition", "x": skill_data["ConditionCoordX"], "y": skill_data["ConditionCoordY"], "size": 1
                 }
                 self.skill_coords.append(coord_info)
                 LOG(f"[技能坐标] 添加条件坐标: {coord_info}")
-                
+
+        # 添加HP/MP区域到技能坐标中，确保即使没有冷却技能也能截取模板
+        if resource_config:
+            hp_config = resource_config.get("hp_config", {})
+            if hp_config.get("enabled", False):
+                hp_region = self._get_resource_region_from_config(hp_config)
+                if hp_region:
+                    x1, y1, x2, y2 = hp_region
+                    coord_info = {
+                        "name": "hp_region",
+                        "x": x1, "y": y1,
+                        "size": max(x2 - x1, y2 - y1)  # 使用区域大小作为size
+                    }
+                    self.skill_coords.append(coord_info)
+                    LOG(f"[技能坐标] 添加HP区域坐标: {coord_info}")
+
+            mp_config = resource_config.get("mp_config", {})
+            if mp_config.get("enabled", False):
+                mp_region = self._get_resource_region_from_config(mp_config)
+                if mp_region:
+                    x1, y1, x2, y2 = mp_region
+                    coord_info = {
+                        "name": "mp_region",
+                        "x": x1, "y": y1,
+                        "size": max(x2 - x1, y2 - y1)  # 使用区域大小作为size
+                    }
+                    self.skill_coords.append(coord_info)
+                    LOG(f"[技能坐标] 添加MP区域坐标: {coord_info}")
+
         LOG_INFO(f"[技能坐标] 技能坐标设置完成，有效坐标数量: {len(self.skill_coords)}")
         self._calculate_border()
 
@@ -143,8 +171,25 @@ class BorderFrameManager:
         
         LOG_INFO(f"[边框计算] 计算完成，边框区域: ({self.border_x}, {self.border_y}) 大小: {self.border_width}x{self.border_height}")
 
-    def prepare_border(self, skills_config: Dict[str, Any]):
-        self.set_skill_coordinates(skills_config)
+    def prepare_border(self, skills_config: Dict[str, Any], resource_config: Optional[Dict[str, Any]] = None):
+        self.set_skill_coordinates(skills_config, resource_config)
+
+    def _get_resource_region_from_config(self, config: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
+        """从资源配置中获取区域坐标"""
+        try:
+            x1 = config.get("region_x1", 0)
+            y1 = config.get("region_y1", 0)
+            x2 = config.get("region_x2", 0)
+            y2 = config.get("region_y2", 0)
+
+            if x1 < x2 and y1 < y2 and x1 > 0 and y1 > 0:
+                return (x1, y1, x2, y2)
+            else:
+                LOG(f"[资源区域] 无效的区域坐标: ({x1},{y1}) -> ({x2},{y2})")
+                return None
+        except Exception as e:
+            LOG_ERROR(f"[资源区域] 获取区域坐标失败: {e}")
+            return None
 
     def start_capture_loop(self, interval_ms: int = 40, capture_region: Optional[Tuple[int, int, int, int]] = None):
         """启动Native Graphics Capture捕获，支持全屏或指定区域"""
@@ -211,7 +256,7 @@ class BorderFrameManager:
             except Exception as e:
                 LOG_ERROR(f"[调试捕获] 异常: {e}")
 
-    def capture_once_for_debug_and_cache(self, interval_ms: int = 40):
+    def capture_once_for_debug_and_cache(self, interval_ms: int = 40, resource_regions: Optional[Dict[str, Tuple[int, int, int, int]]] = None):
         """进行一次全屏捕获，用于调试和缓存。"""
         with self._capture_lock:
             LOG(f"[调试捕获] 开始进行一次全屏捕获用于缓存")
@@ -230,7 +275,7 @@ class BorderFrameManager:
                     frame = temp_capture.get_latest_frame()
                     if frame is not None:
                         self._save_debug_frame(frame)  # 保存调试帧
-                        self._update_template_cache_from_frame(frame)
+                        self._update_template_cache_from_frame(frame, resource_regions)
                     temp_capture.cleanup()
             except Exception as e:
                 LOG_ERROR(f"[调试捕获和缓存] 异常: {e}")
@@ -298,31 +343,100 @@ class BorderFrameManager:
             LOG_ERROR(f"从帧中获取像素颜色时异常: {e}")
             return None
 
-    def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> bool:
-        """使用指定帧数据对比冷却区域图像判断技能是否冷却"""
+    def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> float:
+        """使用指定帧数据对比冷却区域图像，返回浮点型的匹配百分比（0.0-100.0）"""
         try:
             if frame is None:
-                return False
-                
+                return 0.0
+
+            # 检查是否是资源检测（通过skill_name判断）
+            if skill_name in ["hp_region", "mp_region"]:
+                return self._compare_resource_hsv(frame, x, y, size, skill_name, threshold)
+
+            # 原有的技能冷却检测逻辑
             current_region = self.get_region_from_frame(frame, x, y, size, size)
             if current_region is None:
-                return False
+                return 0.0
 
             with self._cache_lock:
                 cached_template = self._template_cache.get(f"{skill_name}_cooldown")
             if cached_template is None:
-                return False
+                return 100.0 # 没有模板视为冷却完成
 
             if current_region.shape != cached_template["image"].shape:
-                return False
+                return 0.0
 
             diff = np.abs(current_region.astype(np.float32) - cached_template["image"].astype(np.float32))
             similarity = 1.0 - (np.mean(diff) / 255.0)
-            return similarity >= threshold
+            return similarity * 100.0 # 返回百分比
 
         except Exception as e:
             LOG_ERROR(f"使用帧对比冷却图像时异常: {e}")
-            return False
+            return 0.0
+
+    def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, size: int, resource_name: str, threshold: float) -> float:
+        """使用HSV容差检测资源状态，返回匹配百分比（0.0-100.0）"""
+        try:
+            import cv2
+
+            # 从缓存获取HSV模板
+            with self._cache_lock:
+                cached_template = self._template_cache.get(resource_name)
+            if cached_template is None:
+                LOG_ERROR(f"[HSV检测] 未找到资源模板: {resource_name}")
+                return 0.0 # 没有模板，返回0%
+
+            template_hsv = cached_template.get("image")
+            if template_hsv is None:
+                LOG_ERROR(f"[HSV检测] 缓存的模板无效: {resource_name}")
+                return 0.0
+
+            # 获取区域图像
+            # 注意：这里的x,y,size可能与模板的width/height不完全对应，需要使用模板的尺寸
+            t_width = cached_template.get("width", size)
+            t_height = cached_template.get("height", size)
+            region = self.get_region_from_frame(frame, x, y, t_width, t_height)
+            if region is None:
+                return 0.0 # 区域无效
+
+            # 转换为HSV
+            if region.shape[2] == 4:  # BGRA
+                region = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
+            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+
+            # 确保模板和区域尺寸一致
+            if hsv_region.shape != template_hsv.shape:
+                # 如果尺寸不匹配，可能是一个配置错误，但尝试resize作为后备
+                hsv_region = cv2.resize(hsv_region, (template_hsv.shape[1], template_hsv.shape[0]))
+
+            # 获取容差设置（从缓存中获取）
+            h_tolerance = cached_template.get("h_tolerance", 10)
+            s_tolerance = cached_template.get("s_tolerance", 20)
+            v_tolerance = cached_template.get("v_tolerance", 20)
+
+            # 逐像素HSV比较
+            h_diff = np.abs(hsv_region[:, :, 0].astype(np.int16) - template_hsv[:, :, 0].astype(np.int16))
+            h_diff = np.minimum(h_diff, 180 - h_diff) # 处理H色相的环形特性
+
+            s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
+            v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
+
+            # 判断每个像素是否在容差范围内
+            pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
+
+            # 计算匹配像素的百分比
+            total_pixels = hsv_region.shape[0] * hsv_region.shape[1]
+            if total_pixels == 0:
+                return 0.0 # 避免除以零
+
+            matching_pixels = np.count_nonzero(pixel_match)
+            match_percentage = (matching_pixels / total_pixels) * 100.0
+
+            return match_percentage
+
+        except Exception as e:
+            LOG_ERROR(f"[HSV检测] {resource_name} 检测异常: {e}")
+            return 0.0 # 异常时返回0%，避免错误操作
 
     def is_resource_sufficient(self, frame: np.ndarray, x: int, y: int, color_range_threshold: int = 100) -> bool:
         """从指定帧数据中检测资源是否充足"""
@@ -408,16 +522,18 @@ class BorderFrameManager:
         except Exception as e:
             LOG_ERROR(f"[调试保存] 保存帧数据时发生错误: {e}", exc_info=True)
     
-    def _update_template_cache_from_frame(self, frame: np.ndarray):
-        """从帧数据中更新模板缓存（带内存管理优化）"""
+    def _update_template_cache_from_frame(self, frame: np.ndarray, resource_regions: Optional[Dict[str, Tuple[int, int, int, int]]] = None):
+        """从帧数据中更新模板缓存（支持技能冷却和资源检测）"""
         try:
             with self._cache_lock:
                 # 定期清理缓存以控制内存使用
                 current_time = time.time()
-                if current_time - self._last_cache_cleanup > 300:  # 敵5分钟清理一次
+                if current_time - self._last_cache_cleanup > 300:  # 每5分钟清理一次
                     self._cleanup_template_cache()
                     self._last_cache_cleanup = current_time
-                
+
+                # 更新技能冷却模板
+                skill_template_count = 0
                 for coord in self.skill_coords:
                     if coord["name"].endswith("_cooldown"):
                         x, y, size = coord["x"], coord["y"], coord["size"]
@@ -426,11 +542,43 @@ class BorderFrameManager:
                             self._template_cache[coord["name"]] = {
                                 "image": region.copy(),
                                 "timestamp": current_time,
-                                "x": x, "y": y, "size": size
+                                "x": x, "y": y, "size": size,
+                                "type": "skill_cooldown"
                             }
+                            skill_template_count += 1
                             LOG(f"[模板缓存] 更新技能模板: {coord['name']}")
-            
-            LOG(f"[模板缓存] 已更新 {len([c for c in self.skill_coords if c['name'].endswith('_cooldown')])} 个技能模板")
+
+                # 更新资源检测模板
+                resource_template_count = 0
+                if resource_regions:
+                    for region_name, (x1, y1, x2, y2) in resource_regions.items():
+                        width, height = x2 - x1, y2 - y1
+                        region = self.get_region_from_frame(frame, x1, y1, width, height)
+                        if region is not None:
+                            # 转换为HSV并保存
+                            import cv2
+                            if region.shape[2] == 4:  # BGRA
+                                region = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
+                            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+
+                            # 获取容差设置（使用默认值，稍后可以通过其他方式更新）
+                            h_tolerance = 10  # 默认值
+                            s_tolerance = 20
+                            v_tolerance = 20
+
+                            self._template_cache[region_name] = {
+                                "image": hsv_region.copy(),
+                                "timestamp": current_time,
+                                "x": x1, "y": y1, "width": width, "height": height,
+                                "type": "resource_region",
+                                "h_tolerance": h_tolerance,
+                                "s_tolerance": s_tolerance,
+                                "v_tolerance": v_tolerance
+                            }
+                            resource_template_count += 1
+                            LOG(f"[模板缓存] 更新资源HSV模板: {region_name} (容差: H±{h_tolerance}, S±{s_tolerance}, V±{v_tolerance})")
+
+                LOG(f"[模板缓存] 已更新 {skill_template_count} 个技能模板，{resource_template_count} 个资源模板")
         except Exception as e:
             LOG_ERROR(f"[模板缓存] 更新模板缓存失败: {e}")
     

@@ -231,8 +231,13 @@ class InputHandler:
         self._queued_keys_set.clear()
         LOG_INFO("[输入处理器] 按键队列处理线程已停止")
 
-    def execute_key(self, key: str):
-        """执行按键请求（通过队列异步处理）"""
+    def execute_key(self, key: str, priority: bool = False):
+        """执行按键请求（通过队列异步处理）
+
+        Args:
+            key: 要执行的按键
+            priority: 是否为高优先级按键（插入队列前端）
+        """
         if not key:
             return
 
@@ -246,8 +251,23 @@ class InputHandler:
                 return  # O(1) 复杂度去重
 
         try:
-            self._key_queue.put_nowait(key)
-            self._queued_keys_set.add(key)  # 同步添加到集合
+            if priority:
+                # 高优先级：插入到队列前端
+                with self._key_queue.mutex:
+                    if not self._key_queue.full():
+                        self._key_queue.queue.appendleft(key)
+                        self._queued_keys_set.add(key)
+                        self._key_queue.not_empty.notify()
+                    else:
+                        if not self._queue_full_warned:
+                            LOG_ERROR("[输入队列] 高优先级队列已满，按键被丢弃。")
+                            self._queue_full_warned = True
+                        return
+            else:
+                # 普通优先级：添加到队列末尾
+                self._key_queue.put_nowait(key)
+                self._queued_keys_set.add(key)
+
             self._queue_full_warned = False  # Reset warning on successful put
         except Full:
             if not self._queue_full_warned:

@@ -1,14 +1,14 @@
 {
     "skills": {
         "Skill1": {
-            "Enabled": false,
-            "Key": "C",
-            "Priority": false,
+            "Enabled": true,
+            "Key": "q",
+            "Priority": true,
             "Timer": 200,
-            "TriggerMode": 0,
-            "CooldownCoordX": 795,
-            "CooldownCoordY": 995,
-            "CooldownSize": 12,
+            "TriggerMode": 1,
+            "CooldownCoordX": 1446,
+            "CooldownCoordY": 1035,
+            "CooldownSize": 10,
             "ExecuteCondition": 0,
             "ConditionCoordX": 900,
             "ConditionCoordY": 600,
@@ -31,8 +31,8 @@
             "AltKey": "2"
         },
         "Skill3": {
-            "Enabled": true,
-            "Key": "Rbutton",
+            "Enabled": false,
+            "Key": "",
             "Priority": false,
             "Timer": 650,
             "TriggerMode": 0,
@@ -126,8 +126,8 @@
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
-        "cooldown_checker_interval": 110,
-        "sequence_timer_interval": 1000,
+        "cooldown_checker_interval": 125,
+        "sequence_timer_interval": 150,
         "capture_interval": 60,
         "sound_feedback_enabled": true,
         "window_activation": {
@@ -178,48 +178,48 @@
             "hp_config": {
                 "enabled": true,
                 "key": "1",
-                "threshold": 10,
+                "threshold": 60,
                 "cooldown": 1000,
-                "region_x1": 111,
-                "region_y1": 909,
-                "region_x2": 128,
-                "region_y2": 1047,
+                "region_x1": 110,
+                "region_y1": 902,
+                "region_x2": 119,
+                "region_y2": 1053,
                 "colors": [
                     {
                         "name": "Color1",
                         "target_h": 178,
-                        "target_s": 195,
-                        "target_v": 116,
+                        "target_s": 188,
+                        "target_v": 113,
                         "tolerance_h": 25,
-                        "tolerance_s": 18,
-                        "tolerance_v": 64
+                        "tolerance_s": 39,
+                        "tolerance_v": 67
                     }
                 ]
             },
             "mp_config": {
                 "enabled": true,
                 "key": "2",
-                "threshold": 10,
+                "threshold": 20,
                 "cooldown": 2000,
-                "region_x1": 1788,
-                "region_y1": 913,
-                "region_x2": 1808,
-                "region_y2": 1036,
+                "region_x1": 1791,
+                "region_y1": 901,
+                "region_x2": 1802,
+                "region_y2": 1050,
                 "colors": [
                     {
                         "name": "Color1",
                         "target_h": 106,
-                        "target_s": 208,
-                        "target_v": 134,
-                        "tolerance_h": 5,
-                        "tolerance_s": 15,
-                        "tolerance_v": 51
+                        "target_s": 202,
+                        "target_v": 125,
+                        "tolerance_h": 6,
+                        "tolerance_s": 33,
+                        "tolerance_v": 66
                     }
                 ]
             },
-            "check_interval": 150
+            "check_interval": 200
         },
-        "skill_sequence": "1,2,3,4,5,6,7,8",
+        "skill_sequence": "Rbutton,q,Lbutton,Lbutton,Lbutton,Lbutton,Lbutton,LbuttonLbutton,Lbutton,Lbutton",
         "process_history": {}
     }
 }

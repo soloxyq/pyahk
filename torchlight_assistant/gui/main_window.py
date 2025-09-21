@@ -216,6 +216,7 @@ class GameSkillConfigUI(QMainWindow):
     def _on_macro_status_updated(self, engine_state: Dict[str, Any]):
         QTimer.singleShot(0, lambda: self._perform_macro_status_updated_ui(engine_state))
 
+
     def _on_config_update(self, skills_config: Dict[str, Any], global_config: Dict[str, Any]):
         LOG_INFO(f"[UI] 接收到 engine:config_updated 事件。skills_config: {skills_config}")
         LOG_INFO(f"[UI] global_config: {global_config}")

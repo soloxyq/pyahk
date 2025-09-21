@@ -2,7 +2,7 @@
 
 import threading
 import time
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 
 from .config_manager import ConfigManager
 from .input_handler import InputHandler
@@ -101,25 +101,47 @@ class MacroEngine:
             LOG_ERROR("热键管理器启动失败！")
 
     def _set_state(self, new_state: MacroState) -> bool:
-        with self._state_lock:
-            if self._state == new_state:
-                LOG_INFO(f"[状态转换] 状态未改变: {self._state}")
-                return False
-            if new_state not in self.VALID_TRANSITIONS.get(self._state, []):
-                LOG_ERROR(f"[状态转换] 无效转换: {self._state} → {new_state}")
-                return False
+        try:
+            with self._state_lock:
+                if self._state == new_state:
+                    LOG_INFO(f"[状态转换] 状态未改变: {self._state}")
+                    return False
+                if new_state not in self.VALID_TRANSITIONS.get(self._state, []):
+                    LOG_ERROR(f"[状态转换] 无效转换: {self._state} → {new_state}")
+                    return False
 
-            old_state = self._state
-            self._state = new_state
-            LOG_INFO(f"[状态转换] 状态转换成功: {old_state} → {new_state}")
+                old_state = self._state
+                self._state = new_state
+                LOG_INFO(f"[状态转换] 状态转换成功: {old_state} → {new_state}")
 
-            # 音效播放由MainWindow统一处理，避免重复播放
+                # 音效播放由MainWindow统一处理，避免重复播放
 
-            self._on_state_enter(new_state, from_state=old_state)
-            event_bus.publish("engine:state_changed", new_state, old_state)
-            # 在状态转换时，总是包含当前的原地模式状态，确保状态同步
-            self._publish_status_update(stationary_mode=self._stationary_mode_active)
-            return True
+                try:
+                    self._on_state_enter(new_state, from_state=old_state)
+                except Exception as e:
+                    LOG_ERROR(f"[状态转换] _on_state_enter 异常: {e}")
+                    import traceback
+                    LOG_ERROR(f"[状态转换] _on_state_enter 异常详情:\n{traceback.format_exc()}")
+                    # 即使_on_state_enter失败，也要继续发布事件
+                    pass
+
+                try:
+                    event_bus.publish("engine:state_changed", new_state, old_state)
+                    # 在状态转换时，总是包含当前的原地模式状态，确保状态同步
+                    self._publish_status_update(stationary_mode=self._stationary_mode_active)
+                except Exception as e:
+                    LOG_ERROR(f"[状态转换] 事件发布异常: {e}")
+                    import traceback
+                    LOG_ERROR(f"[状态转换] 事件发布异常详情:\n{traceback.format_exc()}")
+                    # 即使事件发布失败，状态转换也算成功
+                    pass
+
+                return True
+        except Exception as e:
+            LOG_ERROR(f"[状态转换] _set_state 异常: {e}")
+            import traceback
+            LOG_ERROR(f"[状态转换] _set_state 异常详情:\n{traceback.format_exc()}")
+            return False
 
     def _on_state_enter(
         self, state: MacroState, from_state: Optional[MacroState] = None
@@ -139,9 +161,19 @@ class MacroEngine:
             self.input_handler.start()
             self.skill_manager.prepare_border_only()  # 预计算边框
             self.border_manager.enable_debug_save()
+
+            # 收集资源区域配置，用于模板截取
+            resource_regions = self._collect_resource_regions()
             self.border_manager.capture_once_for_debug_and_cache(
-                self._global_config.get("capture_interval", 40)
+                self._global_config.get("capture_interval", 40),
+                resource_regions
             )
+
+            # 通知ResourceManager截取HSV模板
+            if self.resource_manager and resource_regions:
+                current_frame = self.border_manager.get_current_frame()
+                if current_frame is not None:
+                    self.resource_manager.capture_template_hsv(current_frame)
 
         elif state == MacroState.RUNNING:
             # 如果是从暂停状态恢复，调用resume；否则启动子系统
@@ -207,24 +239,34 @@ class MacroEngine:
         event_bus.publish("engine:status_updated", status_info)
 
     def _handle_f8_press(self, full_config: Optional[Dict[str, Any]] = None):
-        with self._transition_lock:
-            if self._state == MacroState.STOPPED:
-                if full_config:
-                    self._skills_config = full_config.get("skills", {})
-                    self._global_config = full_config.get("global", {})
-                    self.sound_manager.update_config(self._global_config)
-                    event_bus.publish(
-                        "engine:config_updated",
-                        self._skills_config,
-                        self._global_config,
-                    )
-                self._prepared_mode = "combat"
-                # 检查状态转换是否成功
-                if not self.prepare_border_only():
-                    LOG_ERROR("[MacroEngine] 准备边框失败，无法启动技能模式")
-                    return
-            else:
-                self.stop_macro()
+        try:
+            LOG_INFO(f"[热键] F8按键处理开始，当前状态: {self._state}")
+            with self._transition_lock:
+                if self._state == MacroState.STOPPED:
+                    LOG_INFO("[热键] F8 - 从STOPPED状态启动")
+                    if full_config:
+                        self._skills_config = full_config.get("skills", {})
+                        self._global_config = full_config.get("global", {})
+                        self.sound_manager.update_config(self._global_config)
+                        event_bus.publish(
+                            "engine:config_updated",
+                            self._skills_config,
+                            self._global_config,
+                        )
+                    self._prepared_mode = "combat"
+                    # 检查状态转换是否成功
+                    if not self.prepare_border_only():
+                        LOG_ERROR("[MacroEngine] 准备边框失败，无法启动技能模式")
+                        return
+                    LOG_INFO("[热键] F8 - 成功转换为READY状态")
+                else:
+                    LOG_INFO(f"[热键] F8 - 从{self._state}状态停止")
+                    self.stop_macro()
+                    LOG_INFO("[热键] F8 - 成功转换为STOPPED状态")
+        except Exception as e:
+            LOG_ERROR(f"[热键] F8处理异常: {e}")
+            import traceback
+            LOG_ERROR(f"[热键] F8异常详情:\n{traceback.format_exc()}")
 
     def _on_f9_key_press(self):
         with self._transition_lock:
@@ -244,9 +286,14 @@ class MacroEngine:
         event_bus.publish("hotkey:affix_reroll_start")
 
     def _handle_z_press(self):
-        LOG_INFO("[热键] Z键被按下，调用toggle_pause_resume")
-        result = self.toggle_pause_resume()
-        LOG_INFO(f"[热键] toggle_pause_resume 返回结果: {result}")
+        try:
+            LOG_INFO(f"[热键] Z键被按下，当前状态: {self._state}")
+            result = self.toggle_pause_resume()
+            LOG_INFO(f"[热键] toggle_pause_resume 返回结果: {result}, 新状态: {self._state}")
+        except Exception as e:
+            LOG_ERROR(f"[热键] Z键处理异常: {e}")
+            import traceback
+            LOG_ERROR(f"[热键] Z键异常详情:\n{traceback.format_exc()}")
 
     def _on_z_key_press(self):
         event_bus.publish("hotkey:z_press")
@@ -255,6 +302,33 @@ class MacroEngine:
         if key_name.lower() in ["f7", "f9"]:
             return True
         return self._state != MacroState.STOPPED
+
+    def _collect_resource_regions(self) -> Dict[str, Tuple[int, int, int, int]]:
+        """收集资源检测区域配置"""
+        resource_regions = {}
+        resource_config = self._global_config.get("resource_management", {})
+
+        # HP区域
+        hp_config = resource_config.get("hp_config", {})
+        if hp_config.get("enabled", False):
+            x1 = hp_config.get("region_x1", 0)
+            y1 = hp_config.get("region_y1", 0)
+            x2 = hp_config.get("region_x2", 0)
+            y2 = hp_config.get("region_y2", 0)
+            if x1 < x2 and y1 < y2:
+                resource_regions["hp_region"] = (x1, y1, x2, y2)
+
+        # MP区域
+        mp_config = resource_config.get("mp_config", {})
+        if mp_config.get("enabled", False):
+            x1 = mp_config.get("region_x1", 0)
+            y1 = mp_config.get("region_y1", 0)
+            x2 = mp_config.get("region_x2", 0)
+            y2 = mp_config.get("region_y2", 0)
+            if x1 < x2 and y1 < y2:
+                resource_regions["mp_region"] = (x1, y1, x2, y2)
+
+        return resource_regions
 
     def _on_config_updated(
         self, skills_config: Dict[str, Any], global_config: Dict[str, Any]
@@ -428,18 +502,30 @@ class MacroEngine:
         return self._set_state(MacroState.STOPPED)
 
     def toggle_pause_resume(self) -> bool:
-        LOG_INFO(f"[状态转换] toggle_pause_resume 被调用，当前状态: {self._state}")
-        if self._state == MacroState.RUNNING:
-            LOG_INFO("[状态转换] RUNNING → PAUSED")
-            return self._set_state(MacroState.PAUSED)
-        if self._state == MacroState.PAUSED:
-            LOG_INFO("[状态转换] PAUSED → RUNNING")
-            return self._set_state(MacroState.RUNNING)
-        if self._state == MacroState.READY:
-            LOG_INFO("[状态转换] READY → RUNNING")
-            return self._set_state(MacroState.RUNNING)
-        LOG_INFO(f"[状态转换] 无效的状态转换请求，当前状态: {self._state}")
-        return False
+        try:
+            LOG_INFO(f"[状态转换] toggle_pause_resume 被调用，当前状态: {self._state}")
+            if self._state == MacroState.RUNNING:
+                LOG_INFO("[状态转换] RUNNING → PAUSED")
+                result = self._set_state(MacroState.PAUSED)
+                LOG_INFO(f"[状态转换] RUNNING → PAUSED 结果: {result}")
+                return result
+            if self._state == MacroState.PAUSED:
+                LOG_INFO("[状态转换] PAUSED → RUNNING")
+                result = self._set_state(MacroState.RUNNING)
+                LOG_INFO(f"[状态转换] PAUSED → RUNNING 结果: {result}")
+                return result
+            if self._state == MacroState.READY:
+                LOG_INFO("[状态转换] READY → RUNNING")
+                result = self._set_state(MacroState.RUNNING)
+                LOG_INFO(f"[状态转换] READY → RUNNING 结果: {result}")
+                return result
+            LOG_INFO(f"[状态转换] 无效的状态转换请求，当前状态: {self._state}")
+            return False
+        except Exception as e:
+            LOG_ERROR(f"[状态转换] toggle_pause_resume 异常: {e}")
+            import traceback
+            LOG_ERROR(f"[状态转换] toggle_pause_resume 异常详情:\n{traceback.format_exc()}")
+            return False
 
     def load_config(self, config_file: str):
         try:
