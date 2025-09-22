@@ -355,7 +355,7 @@ class BorderFrameManager:
             return None
 
     def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0) -> float:
-        """使用半圆形蒙版检测资源状态，以避免UI干扰，返回匹配百分比（0.0-100.0）"""
+        """使用半圆形蒙版和连续段检测算法，返回匹配百分比（0.0-100.0）"""
         try:
             import cv2
 
@@ -403,11 +403,33 @@ class BorderFrameManager:
             v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
             pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
 
-            total_pixels = np.count_nonzero(final_mask)
-            if total_pixels == 0: return 0.0
-            
-            matching_pixels = np.count_nonzero(cv2.bitwise_and(pixel_match, pixel_match, mask=final_mask))
-            match_percentage = (matching_pixels / total_pixels) * 100.0
+            # --- 学习别人的连续段检测算法 ---
+            # 计算每行在蒙版内的匹配像素数
+            masked_match = cv2.bitwise_and(pixel_match.astype(np.uint8), pixel_match.astype(np.uint8), mask=final_mask)
+            vertical_sum = np.sum(masked_match > 0, axis=1)
+
+            # 计算每行的有效像素阈值（蒙版内像素数的60%）
+            mask_vertical_sum = np.sum(final_mask > 0, axis=1)
+            row_threshold = mask_vertical_sum * 0.6
+            is_filled = vertical_sum > row_threshold
+
+            # 从底部向上找到最长的连续有效行段
+            max_len = 0
+            current_len = 0
+            for i in range(height-1, -1, -1):  # 从下往上扫描
+                if is_filled[i] and mask_vertical_sum[i] > 0:  # 该行有蒙版且有效
+                    current_len += 1
+                    if current_len > max_len:
+                        max_len = current_len
+                else:
+                    current_len = 0
+
+            # 计算百分比：最长连续段 / 总高度
+            if height > 0:
+                match_percentage = (max_len / height) * 100.0
+            else:
+                match_percentage = 0.0
+
             return match_percentage
 
         except Exception as e:
@@ -470,7 +492,7 @@ class BorderFrameManager:
             return 0.0
 
     def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, size: int, resource_name: str, threshold: float) -> float:
-        """使用HSV容差检测资源状态，返回匹配百分比（0.0-100.0）"""
+        """使用HSV容差和连续段检测算法，返回匹配百分比（0.0-100.0）"""
         try:
             import cv2
 
@@ -487,7 +509,6 @@ class BorderFrameManager:
                 return 0.0
 
             # 获取区域图像
-            # 注意：这里的x,y,size可能与模板的width/height不完全对应，需要使用模板的尺寸
             t_width = cached_template.get("width", size)
             t_height = cached_template.get("height", size)
             region = self.get_region_from_frame(frame, x, y, t_width, t_height)
@@ -501,10 +522,9 @@ class BorderFrameManager:
 
             # 确保模板和区域尺寸一致
             if hsv_region.shape != template_hsv.shape:
-                # 如果尺寸不匹配，可能是一个配置错误，但尝试resize作为后备
                 hsv_region = cv2.resize(hsv_region, (template_hsv.shape[1], template_hsv.shape[0]))
 
-            # 获取容差设置（从缓存中获取）
+            # 获取容差设置
             h_tolerance = cached_template.get("h_tolerance", 10)
             s_tolerance = cached_template.get("s_tolerance", 20)
             v_tolerance = cached_template.get("v_tolerance", 20)
@@ -516,16 +536,32 @@ class BorderFrameManager:
             s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
             v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
 
-            # 判断每个像素是否在容差范围内
             pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
 
-            # 计算匹配像素的百分比
-            total_pixels = hsv_region.shape[0] * hsv_region.shape[1]
-            if total_pixels == 0:
-                return 0.0 # 避免除以零
+            # --- 学习别人的连续段检测算法 ---
+            # 计算每行的匹配像素数
+            vertical_sum = np.sum(pixel_match > 0, axis=1)
 
-            matching_pixels = np.count_nonzero(pixel_match)
-            match_percentage = (matching_pixels / total_pixels) * 100.0
+            # 判断每行是否"有效"（60%以上的像素是目标颜色）
+            row_threshold = t_width * 0.6
+            is_filled = vertical_sum > row_threshold
+
+            # 从底部向上找到最长的连续有效行段
+            max_len = 0
+            current_len = 0
+            for i in range(t_height-1, -1, -1):  # 从下往上扫描
+                if is_filled[i]:
+                    current_len += 1
+                    if current_len > max_len:
+                        max_len = current_len
+                else:
+                    current_len = 0
+
+            # 计算百分比：最长连续段 / 总高度
+            if t_height > 0:
+                match_percentage = (max_len / t_height) * 100.0
+            else:
+                match_percentage = 0.0
 
             return match_percentage
 

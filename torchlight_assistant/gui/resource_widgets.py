@@ -640,26 +640,21 @@ class ResourceManagementWidget(QWidget):
 
             # 根据检测模式加载相应配置
             detection_mode = hp_config.get("detection_mode", "rectangle")
-            self.hp_detection_mode = detection_mode
+            center_x = hp_config.get("center_x")
+            center_y = hp_config.get("center_y")
+            radius = hp_config.get("radius")
 
-            if detection_mode == "circle":
+            if detection_mode == "circle" and center_x is not None and center_y is not None and radius is not None:
                 # 加载圆形配置
-                center_x = hp_config.get("center_x")
-                center_y = hp_config.get("center_y")
-                radius = hp_config.get("radius")
-                if center_x is not None and center_y is not None and radius is not None:
-                    circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
-                    self.hp_circle_config = {"hp": circle_data}
-                    self._update_detection_mode_display("hp", circle_data)
-                else:
-                    self._update_detection_mode_display("hp") # 无坐标，只更新模式
-
-                # UI显示为空或提示信息
-                self.hp_widgets["x1"].setValue(0)
-                self.hp_widgets["y1"].setValue(0)
-                self.hp_widgets["x2"].setValue(0)
-                self.hp_widgets["y2"].setValue(0)
+                self.hp_detection_mode = "circle"
+                circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
+                self.hp_circle_config = {"hp": circle_data}
+                self._update_detection_mode_display("hp", circle_data)
             else:
+                # 如果没有有效坐标或不是圆形模式，切换回矩形模式
+                self.hp_detection_mode = "rectangle"
+                self._update_detection_mode_display("hp")
+
                 # 加载矩形配置
                 x1 = hp_config.get("region_x1", 136)  # 1080P血药区域
                 y1 = hp_config.get("region_y1", 910)
@@ -670,9 +665,6 @@ class ResourceManagementWidget(QWidget):
                 self.hp_widgets["x2"].setValue(x2)
                 self.hp_widgets["y2"].setValue(y2)
                 print(f"[配置加载] HP矩形配置: ({x1},{y1}) -> ({x2},{y2})")
-
-            # 更新UI显示
-            self._update_detection_mode_display("hp")
 
             # 加载颜色配置
             colors_text = self._colors_list_to_text(hp_config.get("colors", []))
@@ -695,26 +687,21 @@ class ResourceManagementWidget(QWidget):
 
             # 根据检测模式加载相应配置
             detection_mode = mp_config.get("detection_mode", "rectangle")
-            self.mp_detection_mode = detection_mode
+            center_x = mp_config.get("center_x")
+            center_y = mp_config.get("center_y")
+            radius = mp_config.get("radius")
 
-            if detection_mode == "circle":
+            if detection_mode == "circle" and center_x is not None and center_y is not None and radius is not None:
                 # 加载圆形配置
-                center_x = mp_config.get("center_x")
-                center_y = mp_config.get("center_y")
-                radius = mp_config.get("radius")
-                if center_x is not None and center_y is not None and radius is not None:
-                    circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
-                    self.mp_circle_config = {"mp": circle_data}
-                    self._update_detection_mode_display("mp", circle_data)
-                else:
-                    self._update_detection_mode_display("mp") # 无坐标，只更新模式
-
-                # UI显示为空或提示信息
-                self.mp_widgets["x1"].setValue(0)
-                self.mp_widgets["y1"].setValue(0)
-                self.mp_widgets["x2"].setValue(0)
-                self.mp_widgets["y2"].setValue(0)
+                self.mp_detection_mode = "circle"
+                circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
+                self.mp_circle_config = {"mp": circle_data}
+                self._update_detection_mode_display("mp", circle_data)
             else:
+                # 如果没有有效坐标或不是圆形模式，切换回矩形模式
+                self.mp_detection_mode = "rectangle"
+                self._update_detection_mode_display("mp")
+
                 # 加载矩形配置
                 x1 = mp_config.get("region_x1", 1552)  # 1080P蓝药区域
                 y1 = mp_config.get("region_y1", 910)
@@ -725,9 +712,6 @@ class ResourceManagementWidget(QWidget):
                 self.mp_widgets["x2"].setValue(x2)
                 self.mp_widgets["y2"].setValue(y2)
                 print(f"[配置加载] MP矩形配置: ({x1},{y1}) -> ({x2},{y2})")
-
-            # 更新UI显示
-            self._update_detection_mode_display("mp")
 
             # 加载颜色配置
             colors_text = self._colors_list_to_text(mp_config.get("colors", []))

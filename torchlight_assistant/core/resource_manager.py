@@ -157,14 +157,14 @@ class ResourceManager:
             if cached_frame is None:
                 return False
 
-            # 使用统一的技能冷却检测接口，获取精确的百分比
+            # 使用矩形资源检测接口，获取精确的百分比
             region_name = f"{resource_type}_region"
             region_width = region_x2 - region_x1
             region_height = region_y2 - region_y1
 
-            # 调用统一的检测接口，返回匹配百分比
-            match_percentage = self.border_frame_manager.compare_cooldown_image(
-                cached_frame, region_x1, region_y1, region_name, max(region_width, region_height), threshold
+            # 调用矩形资源检测接口，返回匹配百分比
+            match_percentage = self.border_frame_manager._compare_resource_hsv(
+                cached_frame, region_x1, region_y1, max(region_width, region_height), region_name, threshold
             )
 
         # 判断是否需要补充资源（百分比低于阈值）
@@ -342,14 +342,14 @@ class ResourceManager:
             if frame is None:
                 return 100.0
 
-            # 使用统一的检测接口获取精确百分比
+            # 使用矩形资源检测接口获取精确百分比
             region_name = f"{resource_type}_region"
             region_width = region_x2 - region_x1
             region_height = region_y2 - region_y1
 
-            # 调用统一的检测接口，返回匹配百分比
-            match_percentage = self.border_frame_manager.compare_cooldown_image(
-                frame, region_x1, region_y1, region_name, max(region_width, region_height), 0.0
+            # 调用矩形资源检测接口，返回匹配百分比
+            match_percentage = self.border_frame_manager._compare_resource_hsv(
+                frame, region_x1, region_y1, max(region_width, region_height), region_name, 0.0
             )
 
         return match_percentage
