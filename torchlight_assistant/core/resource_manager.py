@@ -1,4 +1,14 @@
-"""资源管理器 - 被动式资源检测模块"""
+"""资源管理器 - 被动式资源检测模块
+
+资源百分比语义说明:
+本模块所有 HP/MP 百分比（match_percentage）来自对模板 HSV / 当前帧 HSV 的逐像素容差匹配后，
+通过“自底向上连续填充行段长度 / 总高度 (或半圆掩膜高度)”得到的近似填充度指标。
+它并非对真实血/魔球体积或像素面积的精确线性映射，可能与游戏内显示的精确数值存在偏差。
+因此:
+1. 该值适合作为阈值触发的相对判定（< threshold 触发补给），不适合作为精确读数展示。
+2. 不同分辨率 / UI 主题 / 光照会改变 HSV 分布，需重新截取模板。
+3. 若需要更精确表现，可在后续迭代中加入曲线校准或多点采样。
+"""
 
 import time
 from typing import Dict, Any, Optional, Tuple
@@ -6,7 +16,7 @@ import numpy as np
 
 from ..utils.border_frame_manager import BorderFrameManager
 from .input_handler import InputHandler
-from ..utils.debug_log import LOG_INFO, LOG_ERROR
+from ..utils.debug_log import LOG_INFO, LOG_ERROR, LOG
 
 
 class ResourceManager:
@@ -136,7 +146,7 @@ class ResourceManager:
                 )
             else:  # rectangle
                 x1, y1, x2, y2 = config.get("region_x1", 0), config.get("region_y1", 0), config.get("region_x2", 0), config.get("region_y2", 0)
-                LOG_INFO(f"[DEBUG] Rect coords: x1={x1}, y1={y1}, x2={x2}, y2={y2}, types: {type(x1)}, {type(y1)}, {type(x2)}, {type(y2)}")
+                LOG(f"[DEBUG] Rect coords: x1={x1}, y1={y1}, x2={x2}, y2={y2}, types: {type(x1)}, {type(y1)}, {type(x2)}, {type(y2)}")
                 if not (x1 < x2 and y1 < y2):
                     raise ValueError(f"{resource_type.upper()} 未配置有效检测区域")
 

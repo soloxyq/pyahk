@@ -441,15 +441,19 @@ class BorderFrameManager:
             LOG_ERROR(f"[圆形检测] {resource_type} 检测异常: {e}")
             return 0.0
 
-    def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> float:
-        """使用HSV容差检测，统一处理技能冷却，返回匹配百分比（0.0-100.0）"""
+    def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> Optional[float]:
+        """使用HSV容差检测，统一处理技能冷却。
+
+        返回:
+            匹配百分比(0.0-100.0)；若检测失败/数据缺失，返回 None 以便上层安全跳过。
+        """
         try:
             import cv2
 
             # 资源检测由 compare_resource_circle 处理，这里只处理技能冷却
             if skill_name.endswith('_region'):
                 LOG_ERROR(f"[冷却检测] 错误的调用: {skill_name} 应由资源检测方法处理")
-                return 0.0
+                return None
 
             template_name = f"{skill_name}_cooldown"
 
@@ -458,17 +462,17 @@ class BorderFrameManager:
             
             if cached_template is None:
                 LOG_ERROR(f"[冷却检测] 未找到技能模板: {template_name}")
-                return 100.0
+                return None
 
             template_hsv = cached_template.get("image")
             if template_hsv is None:
                 LOG_ERROR(f"[冷却检测] 缓存的模板无效: {template_name}")
-                return 100.0
+                return None
 
             current_region = self.get_region_from_frame(frame, x, y, size, size)
             if current_region is None:
                 LOG_ERROR(f"[冷却检测] 无法获取技能区域: {skill_name} 坐标({x}, {y}) 大小{size}")
-                return 0.0
+                return None
 
             if current_region.shape[2] == 4:
                 current_region = cv2.cvtColor(current_region, cv2.COLOR_BGRA2BGR)
@@ -496,22 +500,32 @@ class BorderFrameManager:
             total_pixels = hsv_region.shape[0] * hsv_region.shape[1]
             if total_pixels == 0: 
                 LOG_ERROR(f"[冷却检测] 技能区域像素数为0: {skill_name}")
-                return 0.0
+                return None
             
             matching_pixels = np.count_nonzero(pixel_match)
             match_percentage = (matching_pixels / total_pixels) * 100.0
             
-            LOG_INFO(f"[冷却检测] {skill_name} - 匹配详情: 总像素={total_pixels}, 匹配像素={matching_pixels}, 匹配度={match_percentage:.2f}%")
+            # 高频: 技能冷却逐帧匹配详情 -> 仅在 DEBUG=1 时输出
+            LOG(f"[冷却检测] {skill_name} - 匹配详情: 总像素={total_pixels}, 匹配像素={matching_pixels}, 匹配度={match_percentage:.2f}%")
             return match_percentage
 
         except Exception as e:
             LOG_ERROR(f"[HSV冷却检测] {skill_name} 检测异常: {e}")
             import traceback
             LOG_ERROR(f"[HSV冷却检测] 详细错误信息: {traceback.format_exc()}")
-            return 0.0
+            return None
 
-    def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, size: int, resource_name: str, threshold: float) -> float:
-        """使用HSV容差和连续段检测算法，返回匹配百分比（0.0-100.0）"""
+    def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, size: int, resource_name: str, threshold: float) -> Optional[float]:
+        """使用HSV容差和连续段检测算法。
+
+        计算方式说明:
+        1. 对模板 HSV 与当前区域 HSV 做逐像素容差匹配，得到布尔匹配矩阵。
+        2. 统计每一行匹配像素是否超过 60%（视为“有效填充”）。
+        3. 自底向上寻找最长连续有效行段长度 / 总高度 => 近似“当前剩余资源百分比”。
+
+        该结果是启发式“填充高度”估算，不保证与游戏真实值线性一致。
+        失败返回 None。
+        """
         try:
             import cv2
 
@@ -520,12 +534,12 @@ class BorderFrameManager:
                 cached_template = self._template_cache.get(resource_name)
             if cached_template is None:
                 LOG_ERROR(f"[HSV检测] 未找到资源模板: {resource_name}")
-                return 0.0 # 没有模板，返回0%
+                return None
 
             template_hsv = cached_template.get("image")
             if template_hsv is None:
                 LOG_ERROR(f"[HSV检测] 缓存的模板无效: {resource_name}")
-                return 0.0
+                return None
 
             # 获取区域图像
             t_width = cached_template.get("width", size)
@@ -533,7 +547,7 @@ class BorderFrameManager:
             region = self.get_region_from_frame(frame, x, y, t_width, t_height)
             if region is None:
                 LOG_ERROR(f"[HSV检测] 无法获取资源区域: {resource_name} 坐标({x}, {y}) 大小{t_width}x{t_height}")
-                return 0.0 # 区域无效
+                return None
 
             # 转换为HSV
             if region.shape[2] == 4:  # BGRA
@@ -587,14 +601,14 @@ class BorderFrameManager:
             else:
                 match_percentage = 0.0
 
-            LOG_INFO(f"[HSV检测] {resource_name} - 匹配详情: 区域大小={t_width}x{t_height}, 最长连续段={max_len}, 匹配度={match_percentage:.2f}%")
+            LOG(f"[HSV检测] {resource_name} - 匹配详情: 区域大小={t_width}x{t_height}, 最长连续段={max_len}, 匹配度={match_percentage:.2f}%")
             return match_percentage
 
         except Exception as e:
             LOG_ERROR(f"[HSV检测] {resource_name} 检测异常: {e}")
             import traceback
             LOG_ERROR(f"[HSV检测] 详细错误信息: {traceback.format_exc()}")
-            return 0.0 # 异常时返回0%，避免错误操作
+            return None
 
     def is_resource_sufficient(self, frame: np.ndarray, x: int, y: int, color_range_threshold: int = 100) -> bool:
         """从指定帧数据中检测资源是否充足"""
@@ -631,7 +645,7 @@ class BorderFrameManager:
         return abs(r1 - r2) <= tolerance and abs(g1 - g2) <= tolerance and abs(b1 - b2) <= tolerance
 
     def capture_target_window_frame(self) -> Optional[np.ndarray]:
-        """使用MSS和win32gui一次性捕获目标窗口的完整帧，更稳定"""
+        """一次性全屏捕获（模板截取 / 调试专用；禁止在实时检测循环中调用）。"""
         try:
             import win32gui
             from mss import mss
@@ -850,7 +864,13 @@ class BorderFrameManager:
         LOG(f"[调试保存] 调试保存已启用，保存路径: {self.debug_save_path}")
     
     def get_current_frame(self) -> Optional[np.ndarray]:
-        """获取当前帧数据 - 高性能版本"""
+        """获取当前帧数据 - 高性能版本。
+
+        帧来源策略:
+        1. 实时检测（技能冷却/条件/资源）仅使用此接口提供的 Graphics Capture 最新帧。
+        2. 模板或离线调试请使用一次性捕获接口，不与实时路径混用，以避免色域/延迟差异引入匹配抖动。
+        3. 若返回 None，上层逻辑应跳过本轮检测，不自动 fallback 到 MSS，以保持来源一致性。
+        """
         try:
             with self._capture_lock:
                 if not self.running or not self.graphics_capture:

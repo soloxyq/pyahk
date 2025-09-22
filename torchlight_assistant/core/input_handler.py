@@ -3,7 +3,8 @@
 import time
 from typing import Optional, Dict, Any
 import threading
-from queue import Queue, Empty, Full
+from queue import Empty, Full
+from ..utils.priority_deque import PriorityDeque
 from .event_bus import event_bus
 from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 
@@ -90,7 +91,8 @@ class InputHandler:
         self.mouse_click_duration = mouse_click_duration
 
         # --- 新增：队列和线程管理 ---
-        self._key_queue = Queue(maxsize=9)
+        # 使用自定义的 PriorityDeque 代替标准 Queue + 直接操作内部结构
+        self._key_queue = PriorityDeque(maxsize=9)
         self._queued_keys_set = set()
         self._processing_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -234,8 +236,7 @@ class InputHandler:
         self._stop_event.set()
         if self._processing_thread and self._processing_thread.is_alive():
             self._processing_thread.join(timeout=0.5)
-        with self._key_queue.mutex:
-            self._key_queue.queue.clear()
+        self._key_queue.clear()
         self._queued_keys_set.clear()
         LOG_INFO("[输入处理器] 按键队列处理线程已停止")
 
@@ -266,26 +267,18 @@ class InputHandler:
 
         try:
             if priority:
-                # 高优先级：插入到队列前端
-                with self._key_queue.mutex:
-                    if not self._key_queue.full():
-                        self._key_queue.queue.appendleft(key)
-                        self._queued_keys_set.add(key)
-                        self._key_queue.not_empty.notify()
-                    else:
-                        if not self._queue_full_warned:
-                            LOG_ERROR("[输入队列] 高优先级队列已满，按键被丢弃。")
-                            self._queue_full_warned = True
-                        return
+                self._key_queue.put(key, priority=True, block=False)
             else:
-                # 普通优先级：添加到队列末尾
-                self._key_queue.put_nowait(key)
-                self._queued_keys_set.add(key)
-
-            self._queue_full_warned = False  # Reset warning on successful put
+                self._key_queue.put(key, priority=False, block=False)
+            self._queued_keys_set.add(key)
+            self._queue_full_warned = False
         except Full:
+            # 区分日志文案
             if not self._queue_full_warned:
-                LOG_ERROR("[输入队列] 队列已满，按键被丢弃。")
+                if priority:
+                    LOG_ERROR("[输入队列] 高优先级队列已满，按键被丢弃。")
+                else:
+                    LOG_ERROR("[输入队列] 队列已满，按键被丢弃。")
                 self._queue_full_warned = True
 
     def get_queue_length(self) -> int:
@@ -294,8 +287,7 @@ class InputHandler:
 
     def clear_queue(self):
         """安全地清空按键队列和跟踪集合"""
-        with self._key_queue.mutex:
-            self._key_queue.queue.clear()
+        self._key_queue.clear()
         self._queued_keys_set.clear()
         LOG_INFO("[输入处理器] 按键队列已清空")
 
@@ -318,6 +310,7 @@ class InputHandler:
                 # 定期记录性能数据
                 current_time = time.time()
                 if current_time - self._last_performance_log_time >= self._performance_log_interval:
+                    # 高频性能日志：仍使用 LOG（受 DEBUG 环境变量控制），避免额外宏。
                     queue_size = self.get_queue_length()
                     keys_per_second = self._processed_keys_count / self._performance_log_interval
                     LOG(f"[输入性能] 队列长度: {queue_size}, 处理速度: {keys_per_second:.2f} keys/s")
@@ -373,7 +366,7 @@ class InputHandler:
             self.send_key_with_modifier(key_str, "shift")
 
     def set_window_activation(
-        self, enabled: bool = True, ahk_class: str = None, ahk_exe: str = None
+        self, enabled: bool = True, ahk_class: Optional[str] = None, ahk_exe: Optional[str] = None
     ) -> bool:
         """设置窗口激活配置
 

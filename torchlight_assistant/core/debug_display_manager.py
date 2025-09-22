@@ -47,11 +47,13 @@ class DebugDisplayManager:
 
     def update_health(self, hp_percent):
         self.state['hp'] = hp_percent
-        LOG_INFO(f"[DebugDisplayManager] HP更新: {hp_percent}%")
+        if self.is_active:  # 只有在调试模式激活时才打印
+            LOG_INFO(f"[DebugDisplayManager] HP更新: {hp_percent}%")
 
     def update_mana(self, mp_percent):
         self.state['mp'] = mp_percent
-        LOG_INFO(f"[DebugDisplayManager] MP更新: {mp_percent}%")
+        if self.is_active:  # 只有在调试模式激活时才打印
+            LOG_INFO(f"[DebugDisplayManager] MP更新: {mp_percent}%")
 
     def update_skill_status(self, skill_key, similarity, is_ready):
         if 'skills' not in self.state:
@@ -61,7 +63,8 @@ class DebugDisplayManager:
             'is_ready': is_ready,
             'timestamp': time.time()
         }
-        LOG_INFO(f"[DebugDisplayManager] 技能状态更新: {skill_key} - 相似度:{similarity:.1f}%, 就绪:{is_ready}")
+        if self.is_active:  # 只有在调试模式激活时才打印
+            LOG_INFO(f"[DebugDisplayManager] 技能状态更新: {skill_key} - 相似度:{similarity:.1f}%, 就绪:{is_ready}")
 
     def add_action(self, action_text):
         if 'actions' not in self.state:

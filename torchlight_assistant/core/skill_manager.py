@@ -350,11 +350,11 @@ class SkillManager:
                 is_priority = skill_config.get("Priority", False)
                 if is_priority:
                     priority_skills_executed += 1
-                LOG_INFO(f"[冷却检查] 检查技能 {skill_name} (优先级: {'高' if is_priority else '普通'})")
+                LOG(f"[冷却检查] 检查技能 {skill_name} (优先级: {'高' if is_priority else '普通'})")
                 self._try_execute_skill(skill_name, skill_config, cached_frame)
 
         if priority_skills_executed > 0:
-            LOG_INFO(f"[冷却检查] 本轮执行了 {priority_skills_executed} 个高优先级技能")
+            LOG(f"[冷却检查] 本轮执行了 {priority_skills_executed} 个高优先级技能")
 
         # 注意：资源管理现在有独立的调度任务，不在这里调用
 
@@ -448,8 +448,8 @@ class SkillManager:
             skill_config.get("CooldownSize", 12),
         )
 
-        # 添加调试日志
-        LOG_INFO(f"[冷却检测] 检查技能 {skill_name} - 坐标: ({x}, {y}), 大小: {size}")
+        # 添加调试日志 (高频: 使用 LOG 受 DEBUG 控制)
+        LOG(f"[冷却检测] 检查技能 {skill_name} - 坐标: ({x}, {y}), 大小: {size}")
 
         # 确保帧数据不为None
         if cached_frame is None:
@@ -465,9 +465,13 @@ class SkillManager:
         match_percentage = self.border_frame_manager.compare_cooldown_image(
             cached_frame, x, y, skill_name, size, threshold=0.95
         )
+        # 失败安全：若返回 None，跳过本轮（视为未知状态，不判定就绪）
+        if match_percentage is None:
+            LOG_ERROR(f"[冷却检测] {skill_name} - 本轮检测失败(模板/区域/异常)，跳过判定")
+            return False
 
-        # 添加调试日志
-        LOG_INFO(f"[冷却检测] {skill_name} - 匹配度: {match_percentage:.2f}%")
+        # 添加调试日志 (高频)
+        LOG(f"[冷却检测] {skill_name} - 匹配度: {match_percentage:.2f}%")
 
         # 技能冷却检测：模板保存的是技能就绪状态
         # 匹配度高表示当前状态与就绪状态相似，技能就绪
@@ -478,7 +482,8 @@ class SkillManager:
         if self.debug_display_manager:
             self.debug_display_manager.update_skill_status(skill_name, match_percentage, is_ready)
 
-        LOG_INFO(f"[冷却检测] {skill_name} - 冷却状态: {'就绪' if is_ready else '未就绪'}")
+        # 高频: 状态结论
+        LOG(f"[冷却检测] {skill_name} - 冷却状态: {'就绪' if is_ready else '未就绪'}")
         return is_ready
 
     def _check_execution_conditions(
@@ -521,6 +526,9 @@ class SkillManager:
         )
 
         if condition == 1:  # BUFF限制模式
+            if cached_frame is None:
+                LOG_ERROR(f"[条件检测] {skill_name} - 缓存帧缺失，跳过条件判断(返回True防止误触发替代逻辑)")
+                return True
             if color == 0:
                 result = self.border_frame_manager.is_resource_sufficient(
                     cached_frame, x, y, color_range_threshold=tolerance
@@ -536,6 +544,9 @@ class SkillManager:
 
         elif condition == 2:  # 资源条件模式
             try:
+                if cached_frame is None:
+                    LOG(f"[资源条件] {skill_name} - 缓存帧缺失，返回False以走AltKey")
+                    return False
                 if color == 0:
                     is_sufficient = self.border_frame_manager.is_resource_sufficient(
                         cached_frame, x, y, color_range_threshold=tolerance

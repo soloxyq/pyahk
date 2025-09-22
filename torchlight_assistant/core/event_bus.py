@@ -82,6 +82,7 @@ class EventBus:
         self._event_count += 1
         current_time = time.time()
         if current_time - self._last_performance_log >= self._performance_log_interval:
+            # 性能统计日志：保持用 LOG（DEBUG 控制）。
             events_per_second = self._event_count / self._performance_log_interval
             if events_per_second > 1.0:
                 LOG(f"[事件总线性能] 事件频率: {events_per_second:.2f} events/s")

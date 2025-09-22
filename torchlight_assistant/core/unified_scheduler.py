@@ -1,4 +1,9 @@
-"""统一调度器 - 替代多个Timer线程的高效调度系统"""
+"""统一调度器 - 替代多个Timer线程的高效调度系统
+
+改进: 使用 `time.monotonic()` 作为内部时间源，避免系统时钟回拨/同步导致的任务漂移。
+外部仅提供 interval（相对时间），不依赖绝对 wall clock，因此切换安全。
+`get_status` 额外提供一个估算的 wall clock 执行时间字段，方便 UI 显示。
+"""
 
 import time
 import threading
@@ -18,7 +23,7 @@ class ScheduledTask:
     interval: float
     callback: Callable
     args: tuple = ()
-    kwargs: dict = None
+    kwargs: Optional[dict] = None
     enabled: bool = True
 
     def __post_init__(self):
@@ -41,13 +46,17 @@ class UnifiedScheduler:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
 
+    def _now(self) -> float:
+        """内部时间源（单调递增，不受系统时间调整影响）。"""
+        return time.monotonic()
+
     def add_task(
         self,
         task_id: str,
         interval: float,
         callback: Callable,
         args: tuple = (),
-        kwargs: dict = None,
+    kwargs: Optional[dict] = None,
         start_immediately: bool = False,
     ) -> bool:
         """添加定时任务
@@ -70,7 +79,8 @@ class UnifiedScheduler:
 
                 # 移除高频调试输出以减少日志噪音
 
-                next_run = time.time() + (0.01 if start_immediately else interval)
+                # 基于 monotonic 计算下次执行时间
+                next_run = self._now() + (0.01 if start_immediately else interval)
                 task = ScheduledTask(
                     task_id=task_id,
                     next_run_time=next_run,
@@ -110,7 +120,7 @@ class UnifiedScheduler:
                 task.interval = new_interval
 
                 # 重新计算下次执行时间
-                task.next_run_time = time.time() + new_interval
+                task.next_run_time = self._now() + new_interval
                 # 重新构建堆（简单方式）
                 self._rebuild_heap()
                 self._condition.notify()
@@ -131,7 +141,7 @@ class UnifiedScheduler:
             if task_id in self._tasks:
                 task = self._tasks[task_id]
                 task.enabled = True
-                task.next_run_time = time.time() + task.interval
+                task.next_run_time = self._now() + task.interval
                 self._rebuild_heap()
                 self._condition.notify()
                 return True
@@ -175,7 +185,7 @@ class UnifiedScheduler:
             self._paused = not self._paused
             if not self._paused:
                 # 恢复时重新计算所有任务的执行时间
-                current_time = time.time()
+                current_time = self._now()
                 for task in self._tasks.values():
                     if task.enabled:
                         task.next_run_time = current_time + task.interval
@@ -192,7 +202,7 @@ class UnifiedScheduler:
 
             self._paused = False
             # 恢复时重新计算所有任务的执行时间
-            current_time = time.time()
+            current_time = self._now()
             for task in self._tasks.values():
                 if task.enabled:
                     task.next_run_time = current_time + task.interval
@@ -210,14 +220,23 @@ class UnifiedScheduler:
     def get_status(self) -> Dict[str, Any]:
         """获取调度器状态"""
         with self._condition:
+            monotonic_now = self._now()
+            next_run_monotonic = self._task_heap[0].next_run_time if self._task_heap else None
+            # 估算 wall clock: 当前 wall clock + (next_monotonic - monotonic_now)
+            if next_run_monotonic is not None:
+                wall_clock_estimate = time.time() + (next_run_monotonic - monotonic_now)
+            else:
+                wall_clock_estimate = None
+
             return {
                 "running": self._running,
                 "paused": self._paused,
                 "total_tasks": len(self._tasks),
                 "enabled_tasks": sum(1 for t in self._tasks.values() if t.enabled),
-                "next_execution": (
-                    self._task_heap[0].next_run_time if self._task_heap else None
-                ),
+                # 内部使用的 monotonic 时间戳（调试用）
+                "next_execution_monotonic": next_run_monotonic,
+                # 估算的 wall clock 时间（供 UI 显示）
+                "next_execution_wall_clock": wall_clock_estimate,
             }
 
     def _rebuild_heap(self):
@@ -260,7 +279,7 @@ class UnifiedScheduler:
 
                 # 获取下一个要执行的任务
                 next_task = self._task_heap[0]
-                current_time = time.time()
+                current_time = self._now()
 
                 # 如果还没到执行时间，等待
                 if next_task.next_run_time > current_time:
