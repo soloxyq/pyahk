@@ -21,6 +21,7 @@ from typing import Dict, Optional, Any
 from ..core.macro_engine import MacroState
 from ..core.event_bus import event_bus
 from .status_window import OSDStatusWindow
+from .debug_osd_window import DebugOsdWindow # Import DebugOsdWindow
 from .skill_config_widget import SimplifiedSkillWidget
 from .ui_components import (
     StatusStrings,
@@ -85,6 +86,8 @@ class GameSkillConfigUI(QMainWindow):
         self.top_controls.mode_combo.currentTextChanged.connect(self._on_mode_selection_changed)
         self.top_controls.save_btn.clicked.connect(self._save_config_file)
         self.top_controls.load_btn.clicked.connect(self._load_config_file)
+        # 连接DEBUG MODE复选框信号
+        self.top_controls.debug_mode_checkbox.stateChanged.connect(self._on_debug_mode_changed)
         self.main_layout.addWidget(self.top_controls)
 
         self._create_tab_widget()
@@ -92,6 +95,12 @@ class GameSkillConfigUI(QMainWindow):
         self._create_status_bar()       # 恢复状态栏
 
         self.osd_status_window = OSDStatusWindow(parent=self)
+        self.debug_osd_window = DebugOsdWindow() # 实例化DebugOsdWindow，不设父级，使其独立
+
+        # 现在DEBUG OSD窗口已经创建，可以连接事件订阅
+        if self.debug_osd_window:
+            event_bus.subscribe("debug_osd_show", self.debug_osd_window.show)
+            event_bus.subscribe("debug_osd_hide", self.debug_osd_window.hide)
 
     def _create_tab_widget(self):
         self.tab_widget = QTabWidget()
@@ -150,6 +159,7 @@ class GameSkillConfigUI(QMainWindow):
         event_bus.subscribe("affix_reroll:show_ui", self._on_affix_reroll_show_ui)
         event_bus.subscribe("ocr:init_success", self._on_ocr_init_success)
         event_bus.subscribe("ocr:init_failed", self._on_ocr_init_failed)
+        # DEBUG OSD窗口的事件订阅已移到_create_widgets方法中处理
 
     def _setup_hotkeys(self):
         event_bus.subscribe("hotkey:f8_system_toggle", self._toggle_visibility_and_macro)
@@ -170,7 +180,8 @@ class GameSkillConfigUI(QMainWindow):
         elif new_state == MacroState.PAUSED:
             self.sound_manager.play("pause")
 
-        # UI可见性逻辑
+
+        # UI可见性逻辑 (由MacroEngine控制OSD显示/隐藏)
         if new_state == MacroState.STOPPED:
             self.osd_status_window.hide()
             if not self.isVisible():
@@ -210,7 +221,7 @@ class GameSkillConfigUI(QMainWindow):
 
         self.status_label.setText(f"状态: {state_text} | 按键队列: {queue_len}")
         if self.osd_status_window:
-            color = {"STOPPED": "red", "READY": "yellow", "RUNNING": "lime", "PAUSED": "yellow"}.get(state.name, "white")
+            color = {"STOPPED": "red", "READY": "yellow", "RUNNING": "lime", "PAUSED": "yellow", "DEBUG": "cyan"}.get(state.name, "white")
             self.osd_status_window.update_status(state_text, color)
 
     def _on_macro_status_updated(self, engine_state: Dict[str, Any]):
@@ -224,6 +235,13 @@ class GameSkillConfigUI(QMainWindow):
         self._skills_config = skills_config
         self._global_config = global_config
         self.sound_manager.update_config(global_config)
+
+        # 更新DEBUG MODE复选框状态
+        debug_mode_enabled = global_config.get("debug_mode", {}).get("enabled", False)
+        if self.top_controls and hasattr(self.top_controls, 'debug_mode_checkbox'):
+            self.top_controls.debug_mode_checkbox.setChecked(debug_mode_enabled)
+            LOG_INFO(f"[UI] DEBUG MODE复选框状态已更新为: {debug_mode_enabled}")
+
         LOG_INFO("[UI] 调用 _refresh_all_widgets() 刷新UI。")
         self._refresh_all_widgets()
 
@@ -373,6 +391,15 @@ class GameSkillConfigUI(QMainWindow):
             self.skill_config.skill_frame.setVisible(not is_sequence_mode)
             self.skill_config.sequence_frame.setVisible(is_sequence_mode)
 
+    def _on_debug_mode_changed(self, state: int):
+        """处理DEBUG MODE复选框状态变化"""
+        enabled = state == 2  # Qt.CheckState.Checked == 2
+        try:
+            self.macro_engine.set_debug_mode(enabled)
+            LOG_INFO(f"[UI] DEBUG MODE设置为: {enabled}")
+        except Exception as e:
+            LOG_ERROR(f"[UI] 设置DEBUG MODE失败: {e}")
+
     def _gather_current_config_from_ui(self) -> Dict[str, Any]:
         global_config = {}
         if self.top_controls: global_config.update(self.top_controls.get_config())
@@ -470,6 +497,7 @@ class GameSkillConfigUI(QMainWindow):
                 status_label.setText("当前未设置窗口激活")
                 status_label.setStyleSheet("color: gray; font-size: 8pt;")
                 class_input.setText("")
+
 
     def closeEvent(self, event):
         self.macro_engine.cleanup()

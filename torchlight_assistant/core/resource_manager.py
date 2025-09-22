@@ -12,9 +12,10 @@ from ..utils.debug_log import LOG_INFO, LOG_ERROR
 class ResourceManager:
     """被动式资源管理器 - 只提供检测功能，不独立运行"""
 
-    def __init__(self, border_manager: BorderFrameManager, input_handler: InputHandler):
+    def __init__(self, border_manager: BorderFrameManager, input_handler: InputHandler, debug_display_manager=None):
         self.border_frame_manager = border_manager
         self.input_handler = input_handler
+        self.debug_display_manager = debug_display_manager
 
         # 资源配置
         self.hp_config: Dict[str, Any] = {}
@@ -109,72 +110,68 @@ class ResourceManager:
 
         # 获取检测参数
         threshold = config.get("threshold", 50)
+        match_percentage = 100.0
 
-        # 根据检测模式选择检测方法
-        detection_mode = config.get("detection_mode", "rectangle")
+        try:
+            # 根据检测模式选择检测方法
+            detection_mode = config.get("detection_mode", "rectangle")
 
-        if detection_mode == "circle":
-            # 使用圆形检测
-            center_x = config.get("center_x")
-            center_y = config.get("center_y")
-            radius = config.get("radius")
+            if detection_mode == "circle":
+                center_x, center_y, radius = config.get("center_x"), config.get("center_y"), config.get("radius")
+                LOG_INFO(f"[DEBUG] Circle coords: x={center_x}, y={center_y}, r={radius}, types: {type(center_x)}, {type(center_y)}, {type(radius)}")
+                if center_x is None or center_y is None or radius is None:
+                    raise ValueError(f"{resource_type.upper()} 圆形检测配置不完整")
+                
+                # 修复数组比较问题：明确检查帧数据
+                if cached_frame is None:
+                    frame = self.border_frame_manager.get_current_frame()
+                else:
+                    frame = cached_frame
+                    
+                if frame is None: 
+                    raise ValueError("无法获取帧数据")
 
-            if center_x is None or center_y is None or radius is None:
-                LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 圆形检测配置不完整")
-                return False
+                match_percentage = self.border_frame_manager.compare_resource_circle(
+                    frame, center_x, center_y, radius, resource_type, threshold
+                )
+            else:  # rectangle
+                x1, y1, x2, y2 = config.get("region_x1", 0), config.get("region_y1", 0), config.get("region_x2", 0), config.get("region_y2", 0)
+                LOG_INFO(f"[DEBUG] Rect coords: x1={x1}, y1={y1}, x2={x2}, y2={y2}, types: {type(x1)}, {type(y1)}, {type(x2)}, {type(y2)}")
+                if not (x1 < x2 and y1 < y2):
+                    raise ValueError(f"{resource_type.upper()} 未配置有效检测区域")
 
-            if cached_frame is None:
-                try:
-                    cached_frame = self.border_frame_manager.get_current_frame()
-                except:
-                    return False
+                # 修复数组比较问题：明确检查帧数据
+                if cached_frame is None:
+                    frame = self.border_frame_manager.get_current_frame()
+                else:
+                    frame = cached_frame
+                    
+                if frame is None: 
+                    raise ValueError("无法获取帧数据")
 
-            if cached_frame is None:
-                return False
+                region_name = f"{resource_type}_region"
+                width, height = x2 - x1, y2 - y1
+                match_percentage = self.border_frame_manager._compare_resource_hsv(
+                    frame, x1, y1, max(width, height), region_name, threshold
+                )
+        except Exception as e:
+            LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 检测失败: {e}")
+            import traceback
+            LOG_ERROR(f"[ResourceManager] 详细错误信息: {traceback.format_exc()}")
+            # 发生错误时，不触发资源补充，并报告100%以避免误触发
+            match_percentage = 100.0
 
-            # 使用圆形检测接口
-            match_percentage = self.border_frame_manager.compare_resource_circle(
-                cached_frame, center_x, center_y, radius, resource_type, threshold
-            )
-        else:
-            # 使用矩形检测
-            region_x1 = config.get("region_x1", 0)
-            region_y1 = config.get("region_y1", 0)
-            region_x2 = config.get("region_x2", 0)
-            region_y2 = config.get("region_y2", 0)
-
-            if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
-                LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 未配置检测区域")
-                return False  # 未配置区域
-
-            # 确保有帧数据
-            if cached_frame is None:
-                try:
-                    cached_frame = self.border_frame_manager.get_current_frame()
-                except:
-                    return False
-
-            if cached_frame is None:
-                return False
-
-            # 使用矩形资源检测接口，获取精确的百分比
-            region_name = f"{resource_type}_region"
-            region_width = region_x2 - region_x1
-            region_height = region_y2 - region_y1
-
-            # 调用矩形资源检测接口，返回匹配百分比
-            match_percentage = self.border_frame_manager._compare_resource_hsv(
-                cached_frame, region_x1, region_y1, max(region_width, region_height), region_name, threshold
-            )
+        # 无论成功与否，都向Debug Manager报告最新状态
+        if self.debug_display_manager:
+            if resource_type == 'hp':
+                self.debug_display_manager.update_health(match_percentage)
+            elif resource_type == 'mp':
+                self.debug_display_manager.update_mana(match_percentage)
 
         # 判断是否需要补充资源（百分比低于阈值）
-        needs_resource = match_percentage < threshold
-
+        # 使用明确的比较避免数组比较错误
+        needs_resource = bool(match_percentage < threshold) if isinstance(match_percentage, (int, float)) else False
         return needs_resource
-
-
-
-
 
     def capture_template_hsv(self, frame: np.ndarray):
         """在F8准备阶段截取并保存模板区域的HSV数据"""
@@ -352,7 +349,11 @@ class ResourceManager:
                 frame, region_x1, region_y1, max(region_width, region_height), region_name, 0.0
             )
 
-        return match_percentage
+        # 确保返回值是数值类型
+        if isinstance(match_percentage, (int, float)):
+            return float(match_percentage)
+        else:
+            return 100.0
 
     def get_status(self) -> Dict[str, Any]:
         """获取状态信息"""

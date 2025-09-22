@@ -79,6 +79,12 @@ class TopControlsWidget(QWidget):
         self.mode_combo.addItems(["技能", "序列"])
         layout.addWidget(self.mode_combo)
 
+        # DEBUG MODE选择
+        layout.addWidget(QLabel("调试模式:"))
+        self.debug_mode_checkbox = ConfigCheckBox("启用")
+        self.debug_mode_checkbox.setMaximumHeight(28)
+        layout.addWidget(self.debug_mode_checkbox)
+
         layout.addStretch()
 
     def set_current_config(self, filename: str):
@@ -87,7 +93,10 @@ class TopControlsWidget(QWidget):
 
     def get_config(self) -> Dict[str, Any]:
         """获取配置"""
-        return {"sequence_enabled": self.mode_combo.currentText() == "序列"}
+        return {
+            "sequence_enabled": self.mode_combo.currentText() == "序列",
+            "debug_mode": {"enabled": self.debug_mode_checkbox.isChecked()}
+        }
 
     def update_from_config(self, config: Dict[str, Any]):
         """从配置更新UI"""
@@ -95,6 +104,10 @@ class TopControlsWidget(QWidget):
         self.mode_combo.blockSignals(True)
         self.mode_combo.setCurrentText("序列" if is_sequence else "技能")
         self.mode_combo.blockSignals(False)
+
+        # DEBUG MODE
+        debug_config = config.get("debug_mode", {})
+        self.debug_mode_checkbox.setChecked(debug_config.get("enabled", False))
 
 
 class TimingSettingsWidget(QWidget):

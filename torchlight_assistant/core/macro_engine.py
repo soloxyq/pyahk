@@ -36,6 +36,7 @@ class MacroEngine:
         self._skills_config: Dict[str, Any] = {}
         self._global_config: Dict[str, Any] = {}
         self.current_config_file = config_file
+        self._is_debug_mode_active = False # 跟踪当前是否处于调试模式（由配置和状态决定）
 
         # 用于追踪当前注册的热键
         self._registered_stationary_hotkey = None
@@ -46,17 +47,27 @@ class MacroEngine:
         self._stationary_mode_active = False
 
         self.config_manager = ConfigManager()
-        self.input_handler = InputHandler(hotkey_manager=hotkey_manager)
+        
+        # Initialize DebugDisplayManager first, as others depend on it
+        from .debug_display_manager import DebugDisplayManager
+        from .unified_scheduler import UnifiedScheduler as DebugScheduler # Alias to avoid conflict
+        debug_scheduler = DebugScheduler()
+        self.debug_display_manager = DebugDisplayManager(event_bus, debug_scheduler)
+        # 不自动启动DebugScheduler，只在需要时启动
+        self.debug_scheduler = debug_scheduler
+
+        self.input_handler = InputHandler(hotkey_manager=hotkey_manager, debug_display_manager=self.debug_display_manager)
         self.border_manager = BorderFrameManager()
         self.sound_manager = sound_manager or SoundManager()
 
         # 初始化ResourceManager
         from .resource_manager import ResourceManager
         self.resource_manager = ResourceManager(
-            self.border_manager, self.input_handler
+            self.border_manager, self.input_handler, debug_display_manager=self.debug_display_manager
         )
 
-        self.skill_manager = SkillManager(self.input_handler, self, self.border_manager, self.resource_manager)
+        # Pass debug_display_manager to SkillManager
+        self.skill_manager = SkillManager(self.input_handler, self, self.border_manager, self.resource_manager, debug_display_manager=self.debug_display_manager)
 
         from .simple_affix_reroll_manager import SimpleAffixRerollManager
         self.affix_reroll_manager = SimpleAffixRerollManager(
@@ -136,6 +147,9 @@ class MacroEngine:
                     # 即使事件发布失败，状态转换也算成功
                     pass
 
+                # 更新OSD可见性
+                self._update_osd_visibility()
+
                 return True
         except Exception as e:
             LOG_ERROR(f"[状态转换] _set_state 异常: {e}")
@@ -191,6 +205,7 @@ class MacroEngine:
 
 
         elif state == MacroState.PAUSED:
+            self.input_handler.clear_queue()  # 清空按键队列
             if self._prepared_mode == "combat":
                 self.skill_manager.pause()
             elif self._prepared_mode == "pathfinding":
@@ -238,6 +253,37 @@ class MacroEngine:
             status_info["force_move_active"] = force_move_active
         event_bus.publish("engine:status_updated", status_info)
 
+    def _update_osd_visibility(self):
+        """根据当前宏状态和调试模式配置，控制DEBUG OSD的显示/隐藏"""
+        # Debug模式启用且程序在READY/RUNNING/PAUSED状态时才显示OSD
+        should_show_debug_osd = (
+            self._is_debug_mode_active and 
+            self._state in [MacroState.READY, MacroState.RUNNING, MacroState.PAUSED]
+        )
+        
+        if should_show_debug_osd:
+            if self._state == MacroState.READY:
+                # READY状态：显示OSD但不启动数据发布
+                self.debug_display_manager.stop()  # 确保停止数据发布
+                event_bus.publish("debug_osd_show")
+                event_bus.publish("debug_osd_ready_state")  # 发送准备状态事件
+                LOG_INFO("[DEBUG MODE] OSD已显示 - READY状态")
+            elif self._state == MacroState.RUNNING:
+                # RUNNING状态：显示OSD并启动数据发布
+                self.debug_display_manager.start()
+                event_bus.publish("debug_osd_show")
+                LOG_INFO("[DEBUG MODE] OSD已显示，数据发布已启动 - RUNNING状态")
+            elif self._state == MacroState.PAUSED:
+                # PAUSED状态：显示OSD但停止数据发布
+                self.debug_display_manager.stop()
+                event_bus.publish("debug_osd_show")
+                LOG_INFO("[DEBUG MODE] OSD已显示，数据发布已停止 - PAUSED状态")
+        else:
+            # 任何其他状态（包括STOPPED）都隐藏Debug OSD
+            self.debug_display_manager.stop()
+            event_bus.publish("debug_osd_hide")
+            LOG_INFO(f"[DEBUG MODE] OSD已隐藏，当前状态: {self._state}")
+
     def _handle_f8_press(self, full_config: Optional[Dict[str, Any]] = None):
         try:
             LOG_INFO(f"[热键] F8按键处理开始，当前状态: {self._state}")
@@ -259,10 +305,12 @@ class MacroEngine:
                         LOG_ERROR("[MacroEngine] 准备边框失败，无法启动技能模式")
                         return
                     LOG_INFO("[热键] F8 - 成功转换为READY状态")
+
                 else:
                     LOG_INFO(f"[热键] F8 - 从{self._state}状态停止")
                     self.stop_macro()
-                    LOG_INFO("[热键] F8 - 成功转换为STOPPED状态")
+                    LOG_INFO(f"[热键] F8 - 成功转换为STOPPED状态")
+
         except Exception as e:
             LOG_ERROR(f"[热键] F8处理异常: {e}")
             import traceback
@@ -301,7 +349,7 @@ class MacroEngine:
     def _should_suppress_hotkey(self, key_name: str) -> bool:
         if key_name.lower() in ["f7", "f9"]:
             return True
-        return self._state != MacroState.STOPPED
+        return self._state not in [MacroState.STOPPED]
 
     def _collect_resource_regions(self) -> Dict[str, Tuple[int, int, int, int]]:
         """收集资源检测区域配置"""
@@ -339,6 +387,12 @@ class MacroEngine:
         if resource_config:
             self.resource_manager.update_config(resource_config)
 
+        # 更新调试模式状态
+        debug_mode_enabled = global_config.get("debug_mode", {}).get("enabled", False)
+        self._is_debug_mode_active = debug_mode_enabled
+        self.input_handler.set_dry_run_mode(debug_mode_enabled)
+        LOG_INFO(f"[DEBUG MODE] _on_config_updated: 干跑模式已设置为 {debug_mode_enabled}")
+
         # 提取新的热键配置
         stationary_config = global_config.get("stationary_mode_config", {})
         pathfinding_config = global_config.get("pathfinding_config", {})
@@ -356,6 +410,9 @@ class MacroEngine:
             if not self._update_hotkey_safely(hotkey_type, new_key):
                 # 如果更新失败，向UI发送通知
                 event_bus.publish("ui:hotkey_update_failed", hotkey_type, new_key)
+
+        # 更新OSD可见性
+        self._update_osd_visibility()
 
     def _update_hotkey_safely(self, hotkey_type: str, new_key: str) -> bool:
         """安全地更新单个热键，实现原子化操作（先注册，后取消）。"""
@@ -501,6 +558,7 @@ class MacroEngine:
     def stop_macro(self) -> bool:
         return self._set_state(MacroState.STOPPED)
 
+
     def toggle_pause_resume(self) -> bool:
         try:
             LOG_INFO(f"[状态转换] toggle_pause_resume 被调用，当前状态: {self._state}")
@@ -526,6 +584,26 @@ class MacroEngine:
             import traceback
             LOG_ERROR(f"[状态转换] toggle_pause_resume 异常详情:\n{traceback.format_exc()}")
             return False
+
+    def set_debug_mode(self, enabled: bool):
+        """设置DEBUG MODE配置标志，并触发配置更新"""
+        try:
+            LOG_INFO(f"[DEBUG MODE] 收到设置DEBUG MODE请求: {enabled}")
+
+            # 更新配置
+            if "debug_mode" not in self._global_config:
+                self._global_config["debug_mode"] = {}
+            self._global_config["debug_mode"]["enabled"] = enabled
+
+            # 发布配置更新事件，让所有订阅者（包括自身）响应
+            event_bus.publish(
+                "engine:config_updated", self._skills_config, self._global_config
+            )
+            LOG_INFO(f"[DEBUG MODE] DEBUG MODE配置已更新并发布事件: {enabled}")
+        except Exception as e:
+            LOG_ERROR(f"[DEBUG MODE] 设置DEBUG MODE异常: {e}")
+            import traceback
+            LOG_ERROR(f"[DEBUG MODE] 设置DEBUG MODE异常详情:\n{traceback.format_exc()}")
 
     def load_config(self, config_file: str):
         try:

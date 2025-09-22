@@ -401,12 +401,17 @@ class BorderFrameManager:
             h_diff = np.minimum(h_diff, 180 - h_diff)
             s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
             v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
-            pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
+
+            # 修复：明确分解布尔比较操作
+            h_match = h_diff <= h_tolerance
+            s_match = s_diff <= s_tolerance
+            v_match = v_diff <= v_tolerance
+            pixel_match = h_match & s_match & v_match
 
             # --- 学习别人的连续段检测算法 ---
             # 计算每行在蒙版内的匹配像素数
             masked_match = cv2.bitwise_and(pixel_match.astype(np.uint8), pixel_match.astype(np.uint8), mask=final_mask)
-            vertical_sum = np.sum(masked_match > 0, axis=1)
+            vertical_sum = np.sum(masked_match, axis=1)  # 修复：明确指定axis参数
 
             # 计算每行的有效像素阈值（蒙版内像素数的60%）
             mask_vertical_sum = np.sum(final_mask > 0, axis=1)
@@ -452,14 +457,17 @@ class BorderFrameManager:
                 cached_template = self._template_cache.get(template_name)
             
             if cached_template is None:
+                LOG_ERROR(f"[冷却检测] 未找到技能模板: {template_name}")
                 return 100.0
 
             template_hsv = cached_template.get("image")
             if template_hsv is None:
+                LOG_ERROR(f"[冷却检测] 缓存的模板无效: {template_name}")
                 return 100.0
 
             current_region = self.get_region_from_frame(frame, x, y, size, size)
             if current_region is None:
+                LOG_ERROR(f"[冷却检测] 无法获取技能区域: {skill_name} 坐标({x}, {y}) 大小{size}")
                 return 0.0
 
             if current_region.shape[2] == 4:
@@ -469,26 +477,37 @@ class BorderFrameManager:
             if hsv_region.shape != template_hsv.shape:
                 hsv_region = cv2.resize(hsv_region, (template_hsv.shape[1], template_hsv.shape[0]))
 
-            # 技能冷却使用非常严格的容差
-            h_tolerance = 2
-            s_tolerance = 5
-            v_tolerance = 10
+            # 技能冷却使用适中的容差，避免过于严格
+            h_tolerance = 10  # 从5增加到10
+            s_tolerance = 20  # 从15增加到20
+            v_tolerance = 25  # 从20增加到25
 
             h_diff = np.abs(hsv_region[:, :, 0].astype(np.int16) - template_hsv[:, :, 0].astype(np.int16))
             h_diff = np.minimum(h_diff, 180 - h_diff)
             s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
             v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
-            pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
+            
+            # 分解布尔比较操作以避免数组比较错误
+            h_match = h_diff <= h_tolerance
+            s_match = s_diff <= s_tolerance
+            v_match = v_diff <= v_tolerance
+            pixel_match = h_match & s_match & v_match
 
             total_pixels = hsv_region.shape[0] * hsv_region.shape[1]
-            if total_pixels == 0: return 0.0
+            if total_pixels == 0: 
+                LOG_ERROR(f"[冷却检测] 技能区域像素数为0: {skill_name}")
+                return 0.0
             
             matching_pixels = np.count_nonzero(pixel_match)
             match_percentage = (matching_pixels / total_pixels) * 100.0
+            
+            LOG_INFO(f"[冷却检测] {skill_name} - 匹配详情: 总像素={total_pixels}, 匹配像素={matching_pixels}, 匹配度={match_percentage:.2f}%")
             return match_percentage
 
         except Exception as e:
             LOG_ERROR(f"[HSV冷却检测] {skill_name} 检测异常: {e}")
+            import traceback
+            LOG_ERROR(f"[HSV冷却检测] 详细错误信息: {traceback.format_exc()}")
             return 0.0
 
     def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, size: int, resource_name: str, threshold: float) -> float:
@@ -513,6 +532,7 @@ class BorderFrameManager:
             t_height = cached_template.get("height", size)
             region = self.get_region_from_frame(frame, x, y, t_width, t_height)
             if region is None:
+                LOG_ERROR(f"[HSV检测] 无法获取资源区域: {resource_name} 坐标({x}, {y}) 大小{t_width}x{t_height}")
                 return 0.0 # 区域无效
 
             # 转换为HSV
@@ -536,11 +556,15 @@ class BorderFrameManager:
             s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
             v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
 
-            pixel_match = (h_diff <= h_tolerance) & (s_diff <= s_tolerance) & (v_diff <= v_tolerance)
+            # 分解布尔比较操作以避免数组比较错误
+            h_match = h_diff <= h_tolerance
+            s_match = s_diff <= s_tolerance
+            v_match = v_diff <= v_tolerance
+            pixel_match = h_match & s_match & v_match
 
             # --- 学习别人的连续段检测算法 ---
             # 计算每行的匹配像素数
-            vertical_sum = np.sum(pixel_match > 0, axis=1)
+            vertical_sum = np.sum(pixel_match, axis=1)  # 明确指定axis参数
 
             # 判断每行是否"有效"（60%以上的像素是目标颜色）
             row_threshold = t_width * 0.6
@@ -563,10 +587,13 @@ class BorderFrameManager:
             else:
                 match_percentage = 0.0
 
+            LOG_INFO(f"[HSV检测] {resource_name} - 匹配详情: 区域大小={t_width}x{t_height}, 最长连续段={max_len}, 匹配度={match_percentage:.2f}%")
             return match_percentage
 
         except Exception as e:
             LOG_ERROR(f"[HSV检测] {resource_name} 检测异常: {e}")
+            import traceback
+            LOG_ERROR(f"[HSV检测] 详细错误信息: {traceback.format_exc()}")
             return 0.0 # 异常时返回0%，避免错误操作
 
     def is_resource_sufficient(self, frame: np.ndarray, x: int, y: int, color_range_threshold: int = 100) -> bool:
@@ -728,12 +755,19 @@ class BorderFrameManager:
                 # 更新技能冷却模板
                 skill_template_count = 0
                 for coord in self.skill_coords:
+                    # 只处理技能冷却坐标，不处理条件坐标
                     if coord["name"].endswith("_cooldown"):
                         x, y, size = coord["x"], coord["y"], coord["size"]
                         region = self.get_region_from_frame(frame, x, y, size, size)
                         if region is not None:
+                            # 转换为HSV并保存
+                            import cv2
+                            if region.shape[2] == 4:  # BGRA
+                                region = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
+                            hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+                            
                             self._template_cache[coord["name"]] = {
-                                "image": region.copy(),
+                                "image": hsv_region.copy(),
                                 "timestamp": current_time,
                                 "x": x, "y": y, "size": size,
                                 "type": "skill_cooldown"

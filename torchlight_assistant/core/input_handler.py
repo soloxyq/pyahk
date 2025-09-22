@@ -72,6 +72,7 @@ class InputHandler:
         hotkey_manager,
         key_press_duration: float = 0.01,
         mouse_click_duration: float = 0.005,
+        debug_display_manager=None,  # 添加Debug Manager
     ):
         if not PYNPUT_AVAILABLE:
             raise RuntimeError("Pynput is required for InputHandler")
@@ -81,6 +82,8 @@ class InputHandler:
         self.mouse = MouseController()
         self.hotkey_manager = hotkey_manager
         self.config_manager = None  # Defer initialization
+        self.debug_display_manager = debug_display_manager  # 保存引用
+        self.dry_run_mode = False  # 添加干跑模式开关
 
         # 可配置的时间间隔
         self.key_press_duration = key_press_duration
@@ -177,6 +180,11 @@ class InputHandler:
 
         self._setup_event_subscriptions()
 
+    def set_dry_run_mode(self, enabled: bool):
+        """开启或关闭干跑模式"""
+        self.dry_run_mode = enabled
+        LOG_INFO(f"[输入处理器] 干跑模式已 {'开启' if enabled else '关闭'}")
+
     def _setup_event_subscriptions(self):
         """订阅事件以接收状态更新"""
         event_bus.subscribe("engine:status_updated", self._on_status_updated)
@@ -238,6 +246,12 @@ class InputHandler:
             key: 要执行的按键
             priority: 是否为高优先级按键（插入队列前端）
         """
+        # 干跑模式拦截
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                self.debug_display_manager.add_action(key)
+            return
+
         if not key:
             return
 
@@ -277,6 +291,13 @@ class InputHandler:
     def get_queue_length(self) -> int:
         """获取当前队列长度"""
         return self._key_queue.qsize()
+
+    def clear_queue(self):
+        """安全地清空按键队列和跟踪集合"""
+        with self._key_queue.mutex:
+            self._key_queue.queue.clear()
+        self._queued_keys_set.clear()
+        LOG_INFO("[输入处理器] 按键队列已清空")
 
     def _queue_processor_loop(self):
         """队列处理器循环"""
@@ -660,6 +681,12 @@ class InputHandler:
 
     def hold_key(self, key: str) -> bool:
         """通过 AHK 发送按住指令（仅处理按住/释放，不影响其他输入路径）"""
+        # 干跑模式拦截
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                self.debug_display_manager.add_action(f"Hold:{key}")
+            return True  # 在干跑模式中，我们认为操作是"成功"的
+
         if not key or not self._ahk_enabled:
             return False
         try:
@@ -671,6 +698,12 @@ class InputHandler:
 
     def release_key(self, key: str) -> bool:
         """通过 AHK 发送释放指令"""
+        # 干跑模式拦截
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                self.debug_display_manager.add_action(f"Release:{key}")
+            return True  # 在干跑模式中，我们认为操作是"成功"的
+
         if not key or not self._ahk_enabled:
             return False
         try:

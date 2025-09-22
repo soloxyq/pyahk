@@ -31,7 +31,7 @@
             "AltKey": ""
         },
         "Skill3": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "6",
             "Priority": false,
             "Timer": 1000,
@@ -46,7 +46,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "5",
             "Priority": false,
             "Timer": 1000,
@@ -123,6 +123,9 @@
     },
     "global": {
         "sequence_enabled": false,
+        "debug_mode": {
+            "enabled": true
+        },
         "queue_processor_interval": 50,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
@@ -165,32 +168,44 @@
                 "key": "1",
                 "threshold": 50,
                 "cooldown": 1000,
-                "region_x1": 81,
-                "region_y1": 125,
-                "region_x2": 126,
-                "region_y2": 274,
-                "target_h": 0,
-                "target_s": 0,
-                "target_v": 255,
-                "tolerance_h": 10,
-                "tolerance_s": 20,
-                "tolerance_v": 20
+                "detection_mode": "rectangle",
+                "region_x1": 899,
+                "region_y1": 129,
+                "region_x2": 927,
+                "region_y2": 197,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 0,
+                        "target_s": 0,
+                        "target_v": 255,
+                        "tolerance_h": 5,
+                        "tolerance_s": 15,
+                        "tolerance_v": 15
+                    }
+                ]
             },
             "mp_config": {
                 "enabled": true,
                 "key": "2",
                 "threshold": 50,
                 "cooldown": 2000,
-                "region_x1": 1221,
-                "region_y1": 133,
-                "region_x2": 1265,
-                "region_y2": 221,
-                "target_h": 0,
-                "target_s": 0,
-                "target_v": 255,
-                "tolerance_h": 7,
-                "tolerance_s": 5,
-                "tolerance_v": 5
+                "detection_mode": "rectangle",
+                "region_x1": 242,
+                "region_y1": 179,
+                "region_x2": 263,
+                "region_y2": 275,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 0,
+                        "target_s": 0,
+                        "target_v": 255,
+                        "tolerance_h": 5,
+                        "tolerance_s": 15,
+                        "tolerance_v": 15
+                    }
+                ]
             },
             "check_interval": 200
         },

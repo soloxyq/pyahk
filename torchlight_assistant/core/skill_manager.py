@@ -23,11 +23,13 @@ class SkillManager:
         macro_engine_ref,
         border_manager: BorderFrameManager,
         resource_manager=None,
+        debug_display_manager=None,
     ):
         self.input_handler = input_handler
         self.border_frame_manager = border_manager
         self._macro_engine = macro_engine_ref
         self.resource_manager = resource_manager
+        self.debug_display_manager = debug_display_manager
 
         self._skills_config: Dict[str, Dict[str, Any]] = {}
 
@@ -471,6 +473,10 @@ class SkillManager:
         # 匹配度高表示当前状态与就绪状态相似，技能就绪
         # 匹配度低表示当前状态与就绪状态不同，技能在冷却中
         is_ready = match_percentage >= 95.0  # 95%以上匹配度表示冷却完成
+
+        # 将状态报告给DebugDisplayManager
+        if self.debug_display_manager:
+            self.debug_display_manager.update_skill_status(skill_name, match_percentage, is_ready)
 
         LOG_INFO(f"[冷却检测] {skill_name} - 冷却状态: {'就绪' if is_ready else '未就绪'}")
         return is_ready
