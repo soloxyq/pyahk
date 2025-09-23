@@ -13,6 +13,7 @@
 | [07-部署与运维](wiki/07-部署与运维.md) | 环境部署、监控告警、故障恢复 | 运维人员 |
 | [08-故障排查手册](wiki/08-故障排查手册.md) | 常见问题、诊断工具、解决方案 | 支持人员 |
 | [09-API参考与扩展](wiki/09-API参考与扩展.md) | API接口、插件开发、扩展指南 | 扩展开发者 |
+| [10-多级优先级系统](wiki/10-多级优先级系统.md) | 四级优先队列、按键监控、技能过滤 | 高级用户 |
 
 
 ## 项目入口
@@ -27,7 +28,7 @@ pyahk提供两种使用方式：
 - **零拷贝屏幕捕获技术**: 基于DXGI Desktop Duplication API的C++实现，使用双缓冲区和原子指针技术实现真正的零拷贝，确保毫秒级响应速度。
 - **事件驱动架构**: 核心组件通过中央事件总线(EventBus)通信，支持异步发布/订阅模式，实现完全解耦和递归事件检测。
 - **统一调度器**: 基于heapq和monotonic时间源的单线程调度器，避免系统时钟调整影响，提供亚毫秒级定时精度。
-- **优先级输入系统**: 使用PriorityDeque实现线程安全的高/普通优先级输入队列，支持紧急操作插队执行。
+- **多级优先级系统**: 四级优先队列(emergency/high/normal/low)和实时按键状态监控，实现精细化的技能执行控制和前后摇冲突智能避免。
 - **智能药剂管理**: 采用HSV双色检测算法，支持正常/中毒状态智能识别和Optional-based失败安全处理。
 - **装备词缀洗练**: 基于SimpleAffixRerollManager的配置驱动洗练，集成PaddleOCR词缀识别和实时OSD反馈。
 - **自动寻路与探索**: 采用相位相关位移跟踪和A*算法，实现随机地图的自主探索和精确路径规划。
@@ -109,7 +110,8 @@ torchlight_assistant/
 │   ├── debug_osd_window.py        # 调试覆盖窗口
 │   └── ...
 ├── utils/                         # 工具类
-│   ├── priority_deque.py          # 优先级队列
+│   ├── multi_priority_queue.py    # 多级优先队列
+│   ├── priority_deque.py          # 优先级队列(兼容)
 │   ├── native_graphics_capture_manager.py # 图形捕获
 │   ├── border_frame_manager.py    # 边框管理
 │   ├── hotkey_manager.py          # 热键管理

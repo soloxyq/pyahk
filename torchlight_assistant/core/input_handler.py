@@ -190,16 +190,18 @@ class InputHandler:
             return
             
         try:
-            # 启动键盘监听器
+            # 启动键盘监听器 - 截获优先级按键
             self._keyboard_listener = KeyboardListener(
                 on_press=self._on_key_press,
-                on_release=self._on_key_release
+                on_release=self._on_key_release,
+                suppress=False  # 先不抑制，测试效果
             )
             self._keyboard_listener.start()
             
-            # 启动鼠标监听器
+            # 启动鼠标监听器 - 截获优先级鼠标按键
             self._mouse_listener = MouseListener(
-                on_click=self._on_mouse_click
+                on_click=self._on_mouse_click,
+                suppress=False  # 先不抑制，测试效果
             )
             self._mouse_listener.start()
             
@@ -213,7 +215,11 @@ class InputHandler:
             key_name = self._get_key_name(key)
             if key_name in self._priority_keys_config:
                 self._priority_keys_pressed.add(key_name)
-                LOG_INFO(f"[优先级模式] {key_name} 按下 - 技能暂停")
+                LOG_INFO(f"[优先级模式] {key_name} 按下 - 技能暂停，重新注入高优先级")
+                
+                # 将优先级按键重新注入到高优先级队列
+                self._inject_priority_key_to_queue(key_name, True)
+                
         except Exception:
             pass  # 忽略特殊按键错误
 
@@ -224,6 +230,10 @@ class InputHandler:
             if key_name in self._priority_keys_config:
                 self._priority_keys_pressed.discard(key_name)
                 LOG_INFO(f"[优先级模式] {key_name} 释放 - 技能恢复")
+                
+                # 注入按键释放事件到高优先级队列
+                self._inject_priority_key_to_queue(key_name, False)
+                
         except Exception:
             pass  # 忽略特殊按键错误
 
@@ -234,10 +244,16 @@ class InputHandler:
             if button_name in self._priority_keys_config:
                 if pressed:
                     self._priority_keys_pressed.add(button_name)
-                    LOG_INFO(f"[优先级模式] {button_name} 按下 - 技能暂停")
+                    LOG_INFO(f"[优先级模式] {button_name} 按下 - 技能暂停，重新注入高优先级")
+                    
+                    # 将优先级鼠标按键重新注入到高优先级队列
+                    self._inject_priority_key_to_queue(button_name, True)
                 else:
                     self._priority_keys_pressed.discard(button_name)
                     LOG_INFO(f"[优先级模式] {button_name} 释放 - 技能恢复")
+                    
+                    # 注入按键释放事件到高优先级队列
+                    self._inject_priority_key_to_queue(button_name, False)
         except Exception:
             pass  # 忽略鼠标按键错误
 
@@ -305,6 +321,34 @@ class InputHandler:
             return 'middle_mouse'
         else:
             return self._normalize_key_name(str(button))
+
+    def _inject_priority_key_to_queue(self, key_name: str, is_press: bool):
+        """将优先级按键注入到高优先级队列中立即执行
+        
+        Args:
+            key_name: 按键名称
+            is_press: True为按下，False为释放
+        """
+        try:
+            # 构造按键事件字符串
+            if is_press:
+                # 按下事件：直接发送按键
+                key_event = key_name
+                LOG_INFO(f"[优先级注入] 按键按下: {key_name}")
+            else:
+                # 释放事件：发送按键释放（某些游戏需要明确的释放事件）
+                key_event = f"up_{key_name}"
+                LOG_INFO(f"[优先级注入] 按键释放: {key_name}")
+            
+            # 注入到高优先级队列（仅次于emergency的最高优先级）
+            self._key_queue.put(key_event, 'high')
+            
+            # 在干跑模式下，也要显示这个动作
+            if self.dry_run_mode and self.debug_display_manager:
+                self.debug_display_manager.add_action(f"PRIORITY: {key_event}")
+                
+        except Exception as e:
+            LOG_ERROR(f"[优先级注入] 注入按键失败 {key_name}: {e}")
 
     def set_dry_run_mode(self, enabled: bool):
         """开启或关闭干跑模式"""
@@ -622,12 +666,53 @@ class InputHandler:
     def _execute_key(self, key_str: str):
         """根据按键类型执行具体输入操作"""
         key_lower = key_str.lower()
+        
+        # 处理优先级按键的释放事件
+        if key_lower.startswith("up_"):
+            release_key = key_lower[3:]  # 去掉 "up_" 前缀
+            LOG_INFO(f"[按键执行] 处理按键释放: {release_key}")
+            self._execute_key_release(release_key)
+            return
+        
+        # 处理正常按键
         if key_lower in ["lbutton", "leftclick"]:
             self.click_mouse("left")
         elif key_lower in ["rbutton", "rightclick"]:
             self.click_mouse("right")
         else:
             self.send_key(key_str)
+
+    def _execute_key_release(self, key_str: str):
+        """执行按键释放操作"""
+        try:
+            key_lower = key_str.lower()
+            
+            # 处理鼠标按键释放
+            if key_lower in ["left_mouse", "leftmouse", "lbutton"]:
+                self.mouse.release(Button.left)
+                LOG_INFO(f"[按键释放] 鼠标左键释放")
+            elif key_lower in ["right_mouse", "rightmouse", "rbutton"]:
+                self.mouse.release(Button.right)
+                LOG_INFO(f"[按键释放] 鼠标右键释放")
+            elif key_lower in ["middle_mouse", "middlemouse", "mbutton"]:
+                self.mouse.release(Button.middle)
+                LOG_INFO(f"[按键释放] 鼠标中键释放")
+            else:
+                # 处理键盘按键释放
+                key_obj = self.key_mapping.get(key_lower)
+                if key_obj:
+                    self.keyboard.release(key_obj)
+                    LOG_INFO(f"[按键释放] 键盘按键释放: {key_str}")
+                else:
+                    # 尝试直接使用字符
+                    try:
+                        self.keyboard.release(key_str)
+                        LOG_INFO(f"[按键释放] 直接释放按键: {key_str}")
+                    except Exception as e2:
+                        LOG_ERROR(f"[按键释放] 无法释放未知按键 '{key_str}': {e2}")
+                    
+        except Exception as e:
+            LOG_ERROR(f"[按键释放] 释放按键 '{key_str}' 失败: {e}")
 
     def _execute_key_with_shift(self, key_str: str):
         """执行带Shift修饰符的按键"""
