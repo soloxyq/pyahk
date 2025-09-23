@@ -2,8 +2,9 @@
 
 资源百分比语义说明:
 本模块所有 HP/MP 百分比（match_percentage）来自对模板 HSV / 当前帧 HSV 的逐像素容差匹配后，
-通过“自底向上连续填充行段长度 / 总高度 (或半圆掩膜高度)”得到的近似填充度指标。
-它并非对真实血/魔球体积或像素面积的精确线性映射，可能与游戏内显示的精确数值存在偏差。
+通过“自底向上连续填充行段长度 / 总高度 (或半圆掩膜高度)”得到的近似填充度指标                match_percentage = self.border_frame_manager.compare_resource_circle(
+                    frame, center_x, center_y, radius, resource_type, 0.0, config
+                )它并非对真实血/魔球体积或像素面积的精确线性映射，可能与游戏内显示的精确数值存在偏差。
 因此:
 1. 该值适合作为阈值触发的相对判定（< threshold 触发补给），不适合作为精确读数展示。
 2. 不同分辨率 / UI 主题 / 光照会改变 HSV 分布，需重新截取模板。
@@ -141,8 +142,22 @@ class ResourceManager:
                 if frame is None: 
                     raise ValueError("无法获取帧数据")
 
+                # 向调试管理器上报检测区域
+                if self.debug_display_manager:
+                    self.debug_display_manager.update_detection_region(
+                        f"{resource_type}_circle",
+                        {
+                            "type": "circle",
+                            "center_x": center_x,
+                            "center_y": center_y,
+                            "radius": radius,
+                            "color": "green" if resource_type == "hp" else "cyan",
+                            "threshold": threshold
+                        }
+                    )
+
                 match_percentage = self.border_frame_manager.compare_resource_circle(
-                    frame, center_x, center_y, radius, resource_type, threshold
+                    frame, center_x, center_y, radius, resource_type, threshold, config
                 )
             else:  # rectangle
                 x1, y1, x2, y2 = config.get("region_x1", 0), config.get("region_y1", 0), config.get("region_x2", 0), config.get("region_y2", 0)
@@ -158,6 +173,21 @@ class ResourceManager:
                     
                 if frame is None: 
                     raise ValueError("无法获取帧数据")
+
+                # 向调试管理器上报检测区域
+                if self.debug_display_manager:
+                    self.debug_display_manager.update_detection_region(
+                        f"{resource_type}_rectangle",
+                        {
+                            "type": "rectangle",
+                            "x1": x1,
+                            "y1": y1,
+                            "x2": x2,
+                            "y2": y2,
+                            "color": "blue" if resource_type == "hp" else "red",
+                            "threshold": threshold
+                        }
+                    )
 
                 region_name = f"{resource_type}_region"
                 width, height = x2 - x1, y2 - y1
@@ -326,7 +356,7 @@ class ResourceManager:
 
             # 使用圆形检测接口
             match_percentage = self.border_frame_manager.compare_resource_circle(
-                frame, center_x, center_y, radius, resource_type, 0.0
+                frame, center_x, center_y, radius, resource_type, 0.0, config
             )
         else:
             # 使用矩形检测

@@ -233,12 +233,18 @@ class SkillConfigWidget(QWidget):
         return skills_config
 
     def update_from_config(
-        self, skills_config: Dict[str, Any], global_config: Dict[str, Any] = None
+        self, skills_config: Dict[str, Any], global_config: Optional[Dict[str, Any]] = None
     ):
         LOG_INFO(f"[SkillConfigWidget] 接收到 skills_config: {skills_config}")
         self._skills_config = skills_config
         LOG_INFO("[SkillConfigWidget] 调用 _create_skill_widgets() 创建技能UI。")
-        self._create_skill_widgets()
+        try:
+            self._create_skill_widgets()
+            LOG_INFO("[SkillConfigWidget] _create_skill_widgets() 执行完成")
+        except Exception as e:
+            LOG_INFO(f"[SkillConfigWidget] _create_skill_widgets() 执行失败: {e}")
+            import traceback
+            traceback.print_exc()
 
         # 更新序列配置
         if global_config and hasattr(self, "sequence_entry"):
@@ -280,32 +286,23 @@ class SkillConfigWidget(QWidget):
         self, skill_name: str, skill_config: Dict[str, Any]
     ):
         """创建单个技能配置控件"""
-        from ..core.event_bus import event_bus
-        from .skill_config_widget import SimplifiedSkillWidget
+        try:
+            from ..core.event_bus import event_bus
+            from .skill_config_widget import SimplifiedSkillWidget
 
-        skill_container = QFrame()
-        skill_container.setFrameStyle(QFrame.Box)
-        skill_container.setLineWidth(1)
-        container_layout = QVBoxLayout(skill_container)
-        container_layout.setContentsMargins(2, 2, 2, 2)
-        container_layout.setSpacing(1)
-
-        title_layout = QHBoxLayout()
-        title_layout.setContentsMargins(0, 0, 0, 0)
-        title_layout.setSpacing(4)
-
-        title_label = QLabel(f"技能: {skill_name}")
-        title_label.setStyleSheet("font-weight: bold; color: #2E86AB;")
-        title_layout.addWidget(title_label)
-        title_layout.addStretch()
-
-        container_layout.addLayout(title_layout)
-
-        skill_widget = SimplifiedSkillWidget(
-            skill_container, skill_name, skill_config, event_bus
-        )
-        container_layout.addWidget(skill_widget.get_frame())
-
-        self.skill_layout.addWidget(skill_container)
-        self.skill_widgets[skill_name] = skill_widget
+            # 直接创建SimplifiedSkillWidget，不需要额外的容器
+            skill_widget = SimplifiedSkillWidget(
+                self, skill_name, skill_config, event_bus
+            )
+            
+            # 添加到布局中
+            self.skill_layout.addWidget(skill_widget)
+            self.skill_widgets[skill_name] = skill_widget
+            
+            LOG_INFO(f"[SkillConfigWidget] 成功创建技能控件: {skill_name}")
+            
+        except Exception as e:
+            LOG_INFO(f"[SkillConfigWidget] 创建技能控件失败 {skill_name}: {e}")
+            import traceback
+            traceback.print_exc()
         skill_widget.refresh(skill_config)

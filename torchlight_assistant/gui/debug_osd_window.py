@@ -12,7 +12,7 @@ class DebugOsdWindow(QWidget):
         self.setStyleSheet("background:transparent;")
 
         # 设置固定位置（右上角）
-        self.setGeometry(1400, 50, 400, 200)
+        self.setGeometry(1200, 50, 500, 300)  # 增加宽度和高度
 
         self._setup_ui()
         self.current_state = {}
@@ -61,6 +61,9 @@ class DebugOsdWindow(QWidget):
         # 技能状态区域  
         self._create_skills_section(container_layout)
         
+        # 检测区域显示区域
+        self._create_detection_regions_section(container_layout)
+        
         # 按键队列区域
         self._create_actions_section(container_layout)
 
@@ -95,6 +98,22 @@ class DebugOsdWindow(QWidget):
         self.skills_container.setWordWrap(True)
         self.skills_container.setTextFormat(Qt.TextFormat.RichText)  # 支持HTML格式
         parent_layout.addWidget(self.skills_container)
+
+    def _create_detection_regions_section(self, parent_layout):
+        """创建检测区域显示区域"""
+        # 检测区域标题
+        regions_title = QLabel("📋 检测区域")
+        regions_title.setFont(self.title_font)
+        regions_title.setStyleSheet("color: yellow; background: transparent; padding: 3px 0; border-bottom: 1px solid #444; margin-top: 5px;")
+        parent_layout.addWidget(regions_title)
+        
+        # 检测区域容器
+        self.regions_container = QLabel("等待检测区域数据...")
+        self.regions_container.setFont(self.label_font)
+        self.regions_container.setStyleSheet("color: white; background: transparent; padding: 2px;")
+        self.regions_container.setWordWrap(True)
+        self.regions_container.setTextFormat(Qt.TextFormat.RichText)
+        parent_layout.addWidget(self.regions_container)
 
     def _create_actions_section(self, parent_layout):
         """创建按键队列区域"""
@@ -196,6 +215,41 @@ class DebugOsdWindow(QWidget):
             self.skills_container.setText(skills_text or "无技能数据")
         else:
             self.skills_container.setText("等待技能数据...")
+
+        # 检测区域状态
+        detection_regions = self.current_state.get('detection_regions', {})
+        show_regions = self.current_state.get('show_detection_regions', True)
+        if detection_regions and show_regions:
+            regions_lines = []
+            for region_key, data in detection_regions.items():
+                region_type = data.get('type', 'unknown')
+                if region_type == 'circle':
+                    center_x = data.get('center_x', 0)
+                    center_y = data.get('center_y', 0)
+                    radius = data.get('radius', 0)
+                    color = data.get('color', 'white')
+                    regions_lines.append(f'<span style="color:{color};">🔵 {region_key}: ({center_x},{center_y}) r={radius}</span>')
+                elif region_type == 'rectangle':
+                    x1 = data.get('x1', 0)
+                    y1 = data.get('y1', 0)
+                    x2 = data.get('x2', 0)
+                    y2 = data.get('y2', 0)
+                    color = data.get('color', 'white')
+                    width = x2 - x1
+                    height = y2 - y1
+                    regions_lines.append(f'<span style="color:{color};">⬜ {region_key}: {width}×{height} @({x1},{y1})</span>')
+                
+                # 添加匹配度信息（如果有）
+                match_pct = data.get('match_percentage')
+                if match_pct is not None:
+                    regions_lines[-1] = regions_lines[-1].replace('</span>', f' [{match_pct:.1f}%]</span>')
+            
+            regions_text = '<br>'.join(regions_lines)
+            self.regions_container.setText(regions_text or "无检测区域")
+        elif not show_regions:
+            self.regions_container.setText("🔒 检测区域显示已关闭")
+        else:
+            self.regions_container.setText("等待检测区域数据...")
 
         # 按键队列（从右往左水平滚动）
         actions = self.current_state.get('actions', [])

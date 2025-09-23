@@ -354,7 +354,7 @@ class BorderFrameManager:
             LOG_ERROR(f"从帧中获取像素颜色时异常: {e}")
             return None
 
-    def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0) -> float:
+    def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0, color_config: dict = None) -> float:
         """使用半圆形蒙版和连续段检测算法，返回匹配百分比（0.0-100.0）"""
         try:
             import cv2
@@ -362,9 +362,33 @@ class BorderFrameManager:
             template_name = f"{resource_type}_region"
             with self._cache_lock:
                 cached_template = self._template_cache.get(template_name)
+            
+            # 如果缓存中没有模板，尝试从当前区域创建模板
             if cached_template is None:
-                LOG_ERROR(f"[圆形检测] 未找到资源模板: {template_name}")
-                return 0.0
+                LOG_INFO(f"[圆形检测] 未找到资源模板 {template_name}，尝试从当前区域创建模板")
+                x1, y1 = center_x - radius, center_y - radius
+                region = self.get_region_from_frame(frame, x1, y1, radius * 2, radius * 2)
+                if region is not None:
+                    if region.shape[2] == 4:
+                        region = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
+                    hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
+                    
+                    # 创建临时模板缓存
+                    cached_template = {
+                        "image": hsv_region.copy(),
+                        "timestamp": time.time(),
+                        "type": "resource_region",
+                        "h_tolerance": 10,
+                        "s_tolerance": 20, 
+                        "v_tolerance": 20
+                    }
+                    # 保存到缓存
+                    with self._cache_lock:
+                        self._template_cache[template_name] = cached_template
+                    LOG_INFO(f"[圆形检测] 已创建资源模板: {template_name}")
+                else:
+                    LOG_ERROR(f"[圆形检测] 无法从区域创建模板: {template_name}")
+                    return 0.0
 
             template_hsv = cached_template.get("image")
             if template_hsv is None:
@@ -435,6 +459,7 @@ class BorderFrameManager:
             else:
                 match_percentage = 0.0
 
+            LOG_INFO(f"[圆形检测] {resource_type.upper()} 检测结果: {match_percentage:.1f}% (连续段长度: {max_len}/{height})")
             return match_percentage
 
         except Exception as e:

@@ -465,6 +465,23 @@ class SkillManager:
         match_percentage = self.border_frame_manager.compare_cooldown_image(
             cached_frame, x, y, skill_name, size, threshold=0.95
         )
+        
+        # 向调试管理器上报技能检测区域
+        if self.debug_display_manager:
+            self.debug_display_manager.update_detection_region(
+                f"skill_{skill_name}",
+                {
+                    "type": "rectangle",
+                    "x1": x,
+                    "y1": y,
+                    "x2": x + size,
+                    "y2": y + size,
+                    "color": "yellow",
+                    "skill_name": skill_name,
+                    "match_percentage": match_percentage if match_percentage is not None else 0
+                }
+            )
+        
         # 失败安全：若返回 None，跳过本轮（视为未知状态，不判定就绪）
         if match_percentage is None:
             LOG_ERROR(f"[冷却检测] {skill_name} - 本轮检测失败(模板/区域/异常)，跳过判定")

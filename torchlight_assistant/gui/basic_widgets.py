@@ -135,6 +135,9 @@ class TimingSettingsWidget(QWidget):
             ("冷却检查:", "cooldown_checker"),
             ("按键间隔:", "sequence_timer"),
             ("图像捕获间隔:", "capture_interval"),
+            ("HP药剂冷却:", "hp_cooldown"),
+            ("MP药剂冷却:", "mp_cooldown"),
+            ("MP/HP检测间隔:", "resource_check_interval"),
         ]
 
         row, col = 0, 0
@@ -177,6 +180,9 @@ class TimingSettingsWidget(QWidget):
             ].value(),
             "sequence_timer_interval": self.timing_spinboxes["sequence_timer"].value(),
             "capture_interval": self.timing_spinboxes["capture_interval"].value(),
+            "hp_cooldown": self.timing_spinboxes["hp_cooldown"].value(),
+            "mp_cooldown": self.timing_spinboxes["mp_cooldown"].value(),
+            "resource_check_interval": self.timing_spinboxes["resource_check_interval"].value(),
         }
         if self.sound_feedback_checkbox:
             config["sound_feedback_enabled"] = self.sound_feedback_checkbox.isChecked()
@@ -191,6 +197,9 @@ class TimingSettingsWidget(QWidget):
             "cooldown_checker": config.get("cooldown_checker_interval", 100),
             "sequence_timer": config.get("sequence_timer_interval", 250),
             "capture_interval": config.get("capture_interval", 40),
+            "hp_cooldown": config.get("hp_cooldown", 5000),
+            "mp_cooldown": config.get("mp_cooldown", 8000),
+            "resource_check_interval": config.get("resource_check_interval", 200),
         }
         for key, value in mapping.items():
             if key in self.timing_spinboxes:

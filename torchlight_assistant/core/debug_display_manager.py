@@ -10,10 +10,12 @@ class DebugDisplayManager:
             'hp': None,
             'mp': None,
             'skills': {},
-            'actions': []
+            'actions': [],
+            'detection_regions': {}  # 新增：检测区域信息
         }
         self.action_log_max_size = 10  # 增加到10个按键
         self.is_active = False  # 添加激活状态标志
+        self.show_detection_regions = True  # 是否显示检测区域
         
         # Define the update interval for the OSD
         self.interval_ms = 200 # Update every 200ms
@@ -80,6 +82,30 @@ class DebugDisplayManager:
             self.state['actions'].pop()
         LOG_INFO(f"[DebugDisplayManager] 动作添加: {action_text}")
 
+    def update_detection_region(self, region_type: str, region_info: dict):
+        """更新检测区域信息
+        
+        Args:
+            region_type: 区域类型，如 'hp_circle', 'mp_rectangle', 'skill_1' 等
+            region_info: 区域信息，包含坐标、颜色等
+        """
+        if 'detection_regions' not in self.state:
+            self.state['detection_regions'] = {}
+        
+        self.state['detection_regions'][region_type] = {
+            **region_info,
+            'timestamp': time.time()
+        }
+        
+        if self.is_active:
+            LOG_INFO(f"[DebugDisplayManager] 检测区域更新: {region_type} - {region_info}")
+
+    def toggle_detection_regions(self):
+        """切换检测区域显示"""
+        self.show_detection_regions = not self.show_detection_regions
+        LOG_INFO(f"[DebugDisplayManager] 检测区域显示: {'开启' if self.show_detection_regions else '关闭'}")
+        return self.show_detection_regions
+
     def publish_state(self):
         """
         This method is called by the scheduler at a throttled rate
@@ -92,9 +118,14 @@ class DebugDisplayManager:
         # 添加详细的状态日志
         skills_count = len(self.state.get('skills', {}))
         actions_count = len(self.state.get('actions', []))
-        LOG_INFO(f"[DebugDisplayManager] 发布状态: HP={self.state.get('hp')}, MP={self.state.get('mp')}, Skills={skills_count}, Actions={actions_count}")
+        regions_count = len(self.state.get('detection_regions', {}))
+        LOG_INFO(f"[DebugDisplayManager] 发布状态: HP={self.state.get('hp')}, MP={self.state.get('mp')}, Skills={skills_count}, Actions={actions_count}, Regions={regions_count}")
         
-        self.event_bus.publish('debug_osd_update', self.state)
+        # 添加检测区域显示标志
+        publish_state = self.state.copy()
+        publish_state['show_detection_regions'] = self.show_detection_regions
+        
+        self.event_bus.publish('debug_osd_update', publish_state)
 
     def get_state(self):
         return self.state
