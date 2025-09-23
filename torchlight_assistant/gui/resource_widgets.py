@@ -684,12 +684,7 @@ class ResourceManagementWidget(QWidget):
                 h, s, v = values
                 
                 # 获取全局容差设置
-                if hasattr(self, 'tolerance_widgets') and self.tolerance_widgets:
-                    h_tolerance = self.tolerance_widgets["h"].value()
-                    s_tolerance = self.tolerance_widgets["s"].value()
-                    v_tolerance = self.tolerance_widgets["v"].value()
-                else:
-                    h_tolerance, s_tolerance, v_tolerance = 10, 30, 50  # 默认容差
+                h_tolerance, s_tolerance, v_tolerance = self._get_current_tolerance()
                 
                 colors.append({
                     "h": h, "s": s, "v": v,
@@ -806,13 +801,13 @@ class ResourceManagementWidget(QWidget):
             "cooldown": self._get_cooldown_from_timing_settings("hp"),
         }
 
-        # 添加容差配置
-        if hasattr(self, 'tolerance_widgets'):
-            hp_config.update({
-                "tolerance_h": self.tolerance_widgets["h"].value(),
-                "tolerance_s": self.tolerance_widgets["s"].value(),
-                "tolerance_v": self.tolerance_widgets["v"].value(),
-            })
+        # 添加容差配置 - 从容差输入框解析
+        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance()
+        hp_config.update({
+            "tolerance_h": tolerance_h,
+            "tolerance_s": tolerance_s,
+            "tolerance_v": tolerance_v,
+        })
 
         # 根据检测模式保存相应配置
         if self.hp_detection_mode == "circle" and self.hp_circle_config:
@@ -867,15 +862,8 @@ class ResourceManagementWidget(QWidget):
             # 按行分割，每行一个颜色
             lines = [line.strip() for line in colors_text.strip().split('\n') if line.strip()]
             
-            # 从容差控件获取容差值
-            h_tol = 10  # 默认值
-            s_tol = 20
-            v_tol = 20
-            
-            if hasattr(self, 'tolerance_widgets') and self.tolerance_widgets:
-                h_tol = self.tolerance_widgets["h"].value()
-                s_tol = self.tolerance_widgets["s"].value()
-                v_tol = self.tolerance_widgets["v"].value()
+            # 从容差输入框获取容差值
+            h_tol, s_tol, v_tol = self._get_current_tolerance()
             
             # 解析每行的颜色值
             for i, line in enumerate(lines, 1):
@@ -898,12 +886,7 @@ class ResourceManagementWidget(QWidget):
         # 如果解析失败，返回默认配置
         if not colors:
             # 使用默认容差值
-            if hasattr(self, 'tolerance_widgets') and self.tolerance_widgets:
-                h_tol = self.tolerance_widgets["h"].value()
-                s_tol = self.tolerance_widgets["s"].value()
-                v_tol = self.tolerance_widgets["v"].value()
-            else:
-                h_tol, s_tol, v_tol = 10, 20, 20
+            h_tol, s_tol, v_tol = self._get_current_tolerance()
                 
             colors = [
                 {
@@ -929,13 +912,13 @@ class ResourceManagementWidget(QWidget):
             "cooldown": self._get_cooldown_from_timing_settings("mp"),
         }
 
-        # 添加容差配置
-        if hasattr(self, 'tolerance_widgets'):
-            mp_config.update({
-                "tolerance_h": self.tolerance_widgets["h"].value(),
-                "tolerance_s": self.tolerance_widgets["s"].value(),
-                "tolerance_v": self.tolerance_widgets["v"].value(),
-            })
+        # 添加容差配置 - 从容差输入框解析
+        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance()
+        mp_config.update({
+            "tolerance_h": tolerance_h,
+            "tolerance_s": tolerance_s,
+            "tolerance_v": tolerance_v,
+        })
 
         # 根据检测模式保存相应配置
         if self.mp_detection_mode == "circle" and self.mp_circle_config:
@@ -989,7 +972,7 @@ class ResourceManagementWidget(QWidget):
             "resource_management": {
                 "hp_config": self._build_hp_config(),
                 "mp_config": self._build_mp_config(),
-                "check_interval": self.check_interval_spinbox.value(),  # 从UI获取检测间隔
+                "check_interval": 200,  # 默认检测间隔，实际值由时间间隔页面管理
             }
         }
 

@@ -13,6 +13,7 @@ from .feature_widgets import AffixRerollWidget, SkillConfigWidget
 from .resource_widgets import ResourceManagementWidget
 from .region_selection_dialog import RegionSelectionDialog
 from .color_picker_dialog import ColorPickingDialog
+from .priority_keys_widget import PriorityKeysWidget
 
 # 为了向后兼容，重新导出所有组件
 __all__ = [
@@ -27,4 +28,5 @@ __all__ = [
     "ResourceManagementWidget",
     "RegionSelectionDialog",
     "ColorPickingDialog",
+    "PriorityKeysWidget",
 ]

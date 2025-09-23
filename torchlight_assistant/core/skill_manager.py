@@ -324,8 +324,8 @@ class SkillManager:
         current_key = sequence_keys[self._sequence_index]
         self._sequence_index = (self._sequence_index + 1) % len(sequence_keys)
 
-        # 直接执行按键，不需要查找技能配置
-        self.input_handler.execute_key(current_key)
+        # 直接执行按键，序列技能使用普通优先级
+        self.input_handler.execute_skill_normal(current_key)
 
     def check_cooldowns(self):
         if not self._is_running or self._is_paused:
@@ -428,11 +428,13 @@ class SkillManager:
             key_to_use = skill_config.get("Key", "")
 
         if key_to_use:
-            # 检查是否为高优先级技能
+            # 🎯 使用语义化接口根据优先级执行技能
             is_priority_skill = skill_config.get("Priority", False)
             if is_priority_skill:
-                LOG_INFO(f"[优先级执行] 高优先级技能 {skill_name} 按键 {key_to_use} 插入队列前端")
-            self.input_handler.execute_key(key_to_use, priority=is_priority_skill)
+                LOG_INFO(f"[优先级执行] 高优先级技能 {skill_name} 按键 {key_to_use}")
+                self.input_handler.execute_skill_high(key_to_use)
+            else:
+                self.input_handler.execute_skill_normal(key_to_use)
 
     def _check_cooldown_ready(
         self,

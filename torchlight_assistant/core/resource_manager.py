@@ -309,8 +309,14 @@ class ResourceManager:
         """执行资源操作"""
         key = config.get("key", "1" if resource_type == "hp" else "2")
 
-        # 执行按键
-        self.input_handler.execute_key(key)
+        # 🎯 使用语义化的紧急优先级接口
+        if resource_type == "hp":
+            self.input_handler.execute_hp_potion(key)
+        elif resource_type == "mp":
+            self.input_handler.execute_mp_potion(key)
+        else:
+            # 兼容其他类型，使用普通接口
+            self.input_handler.execute_key(key)
 
         # 记录按键时间
         self._flask_cooldowns[resource_type] = time.time()

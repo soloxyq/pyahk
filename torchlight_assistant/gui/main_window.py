@@ -33,6 +33,7 @@ from .ui_components import (
     SkillConfigWidget,
     PathfindingWidget,
     ResourceManagementWidget,
+    PriorityKeysWidget,
 )
 from ..utils.sound_manager import SoundManager
 from ..utils.debug_log import LOG_INFO, LOG_ERROR
@@ -123,6 +124,10 @@ class GameSkillConfigUI(QMainWindow):
         self.resource_management = ResourceManagementWidget()
         self.resource_management.set_main_window(self)
         self.tab_widget.addTab(self.resource_management, "智能药剂")
+
+        # 优先级按键配置
+        self.priority_keys_widget = PriorityKeysWidget()
+        self.tab_widget.addTab(self.priority_keys_widget, "优先级按键")
 
         self.main_layout.addWidget(self.tab_widget, 1)
 
@@ -372,6 +377,9 @@ class GameSkillConfigUI(QMainWindow):
                 self.pathfinding_settings.update_from_config(self._global_config)
             if self.resource_management:
                 self.resource_management.update_from_config(self._global_config)
+            if self.priority_keys_widget:
+                priority_keys_config = self._global_config.get("priority_keys", {})
+                self.priority_keys_widget.set_config(priority_keys_config)
             if self.skill_config:
                 LOG_INFO("[UI] 刷新 SkillConfigWidget...")
                 self.skill_config.update_from_config(self._skills_config, self._global_config)
@@ -409,6 +417,7 @@ class GameSkillConfigUI(QMainWindow):
         if self.affix_reroll: global_config.update(self.affix_reroll.get_config())
         if self.pathfinding_settings: global_config.update(self.pathfinding_settings.get_config())
         if self.resource_management: global_config.update(self.resource_management.get_config())
+        if self.priority_keys_widget: global_config["priority_keys"] = self.priority_keys_widget.get_config()
         skills_config = self.skill_config.get_config() if self.skill_config else {}
         if hasattr(self.skill_config, "sequence_entry"): global_config["skill_sequence"] = self.skill_config.sequence_entry.text()
         global_config["process_history"] = self._global_config.get("process_history", {})
