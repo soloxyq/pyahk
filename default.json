@@ -24,7 +24,7 @@
             "CooldownCoordX": 857,
             "CooldownCoordY": 995,
             "CooldownSize": 12,
-            "ExecuteCondition": 2,
+            "ExecuteCondition": 0,
             "ConditionCoordX": 1310,
             "ConditionCoordY": 992,
             "ConditionColor": 0,
@@ -61,8 +61,8 @@
             "AltKey": ""
         },
         "Skill5": {
-            "Enabled": false,
-            "Key": "x",
+            "Enabled": true,
+            "Key": "1",
             "Priority": false,
             "Timer": 200,
             "TriggerMode": 0,
@@ -167,7 +167,7 @@
         },
         "resource_management": {
             "hp_config": {
-                "enabled": true,
+                "enabled": false,
                 "key": "1",
                 "threshold": 50,
                 "cooldown": 1000,
@@ -176,9 +176,9 @@
                 "tolerance_v": 50,
                 "detection_mode": "rectangle",
                 "region_x1": 602,
-                "region_y1": 931,
-                "region_x2": 613,
-                "region_y2": 1050,
+                "region_y1": 934,
+                "region_x2": 608,
+                "region_y2": 1053,
                 "colors": [
                     {
                         "name": "Color1",

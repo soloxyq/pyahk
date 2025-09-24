@@ -351,8 +351,6 @@ class SkillManager:
                 LOG_ERROR(f"[帧管理] 定时技能 {skill_name} 无法获取帧数据，跳过执行")
                 return
                 
-            LOG_INFO(f"[帧管理] 定时技能 {skill_name} 获取帧数据，尺寸: {cached_frame.shape}")
-            
             # ✅ 使用获取到的帧数据执行技能，确保条件检测准确性
             self._try_execute_skill(skill_name, skill_config, cached_frame)
 
@@ -385,8 +383,6 @@ class SkillManager:
         if cached_frame is None:
             LOG_ERROR("[帧管理] 无法获取帧数据，跳过本轮技能检测")
             return  # 如果无法获取帧数据，跳过本次检测
-
-        LOG_INFO(f"[帧管理] 成功获取帧数据，尺寸: {cached_frame.shape if cached_frame is not None else 'None'}")
 
         with self._config_lock:
             # 按优先级排序：优先级高的技能先检查
@@ -423,8 +419,6 @@ class SkillManager:
             LOG_ERROR("[帧管理] 资源检查无法获取帧数据，跳过本轮")
             return
 
-        LOG_INFO(f"[帧管理] 资源检查获取帧数据，尺寸: {cached_frame.shape}")
-
         # ✅ 将同一帧数据传递给资源管理器，确保资源检测的一致性
         self.resource_manager.check_and_execute_resources(cached_frame)
 
@@ -444,9 +438,7 @@ class SkillManager:
             self._frame_usage_stats["total_frame_gets"] += 1
             
             frame = self.border_frame_manager.get_current_frame()
-            if frame is not None:
-                LOG_INFO(f"[帧管理-统计] 成功获取帧数据: {frame.shape}, 内存ID: {id(frame)}")
-            else:
+            if frame is None:
                 LOG_ERROR(f"[帧管理-统计] 获取帧数据失败: None")
             return frame
         except Exception as e:
@@ -483,7 +475,6 @@ class SkillManager:
                     self._frame_usage_stats["cached_frame_usage"] / 
                     self._frame_usage_stats["total_frame_gets"] * 100
                 )
-            LOG_INFO(f"[帧管理-统计] 技能 {skill_name} 使用缓存帧: {cached_frame.shape}, 内存ID: {id(cached_frame)}")
         else:
             LOG_ERROR(f"[帧管理-统计] 技能 {skill_name} 未使用缓存帧，性能未优化")
         

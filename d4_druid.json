@@ -18,7 +18,7 @@
         "Skill2": {
             "Enabled": true,
             "Key": "Lbutton",
-            "Priority": true,
+            "Priority": false,
             "Timer": 75,
             "TriggerMode": 0,
             "CooldownCoordX": 857,
@@ -176,9 +176,9 @@
                 "tolerance_v": 50,
                 "detection_mode": "rectangle",
                 "region_x1": 602,
-                "region_y1": 931,
-                "region_x2": 613,
-                "region_y2": 1050,
+                "region_y1": 934,
+                "region_x2": 608,
+                "region_y2": 1053,
                 "colors": [
                     {
                         "name": "Color1",
