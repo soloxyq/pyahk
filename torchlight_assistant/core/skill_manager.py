@@ -32,6 +32,13 @@ class SkillManager:
         self.debug_display_manager = debug_display_manager
 
         self._skills_config: Dict[str, Dict[str, Any]] = {}
+        
+        # 🎯 方案2性能监控统计
+        self._frame_usage_stats = {
+            "total_frame_gets": 0,  # 总的get_current_frame调用次数
+            "cached_frame_usage": 0,  # 使用缓存帧的次数
+            "performance_ratio": 0.0,  # 性能优化比例
+        }
 
         self._is_running = False
         self._is_paused = False
@@ -63,12 +70,43 @@ class SkillManager:
         """设置事件订阅"""
         # 移除对engine:state_changed的订阅，避免与MacroEngine的直接调用产生竞态条件
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
+        
+        # 🚀 订阅优先级按键的调度器控制事件
+        event_bus.subscribe("scheduler_pause_requested", self._on_scheduler_pause_requested)
+        event_bus.subscribe("scheduler_resume_requested", self._on_scheduler_resume_requested)
 
     def _on_config_updated(self, skills_config, global_config):
         """响应配置更新，并动态更新调度器任务"""
         # 更新内部配置
         self.update_all_configs(skills_config)
         self.update_global_config(global_config)
+    
+    def _on_scheduler_pause_requested(self, event_data):
+        """响应优先级按键按下 - 暂停调度器以节省CPU资源"""
+        try:
+            reason = event_data.get('reason', 'unknown')
+            active_keys = event_data.get('active_keys', [])
+            
+            # 暂停统一调度器，但不改变 _is_paused 状态（这是临时性能优化暂停）
+            if self.unified_scheduler.get_status()["running"]:
+                self.unified_scheduler.pause()
+                LOG_INFO(f"[性能优化] 调度器已暂停 - {reason}, 激活按键: {active_keys}")
+            
+        except Exception as e:
+            LOG_ERROR(f"[性能优化] 暂停调度器异常: {e}")
+    
+    def _on_scheduler_resume_requested(self, event_data):
+        """响应优先级按键释放 - 恢复调度器"""
+        try:
+            reason = event_data.get('reason', 'unknown')
+            
+            # 只有在 SkillManager 正在运行且未被用户手动暂停时才恢复
+            if self._is_running and not self._is_paused:
+                self.unified_scheduler.resume()
+                LOG_INFO(f"[性能优化] 调度器已恢复 - {reason}")
+            
+        except Exception as e:
+            LOG_ERROR(f"[性能优化] 恢复调度器异常: {e}")
 
     def _start_autonomous_scheduling(self):
         """使用统一调度器启动所有定时任务"""
@@ -299,6 +337,7 @@ class SkillManager:
                             )
 
     def execute_timed_skill(self, skill_name: str):
+        """执行定时技能 - 统一帧管理版本"""
         if not self._is_running or self._is_paused:
             return
 
@@ -306,7 +345,16 @@ class SkillManager:
             skill_config = self._skills_config.get(skill_name)
 
         if skill_config and skill_config.get("Enabled"):
-            self._try_execute_skill(skill_name, skill_config)
+            # 🎯 方案2核心：为每个定时技能也获取帧数据，支持条件检测
+            cached_frame = self._prepare_frame_detection_cache()
+            if cached_frame is None:
+                LOG_ERROR(f"[帧管理] 定时技能 {skill_name} 无法获取帧数据，跳过执行")
+                return
+                
+            LOG_INFO(f"[帧管理] 定时技能 {skill_name} 获取帧数据，尺寸: {cached_frame.shape}")
+            
+            # ✅ 使用获取到的帧数据执行技能，确保条件检测准确性
+            self._try_execute_skill(skill_name, skill_config, cached_frame)
 
     def execute_sequence_step(self):
         if not self._is_running or self._is_paused:
@@ -328,13 +376,17 @@ class SkillManager:
         self.input_handler.execute_skill_normal(current_key)
 
     def check_cooldowns(self):
+        """统一技能冷却检查 - 使用单帧数据确保一致性"""
         if not self._is_running or self._is_paused:
             return
 
-        # 性能优化：一次性获取当前帧数据
+        # 🎯 方案2核心：一次性获取帧数据，所有技能检测复用同一帧
         cached_frame = self._prepare_frame_detection_cache()
         if cached_frame is None:
+            LOG_ERROR("[帧管理] 无法获取帧数据，跳过本轮技能检测")
             return  # 如果无法获取帧数据，跳过本次检测
+
+        LOG_INFO(f"[帧管理] 成功获取帧数据，尺寸: {cached_frame.shape if cached_frame is not None else 'None'}")
 
         with self._config_lock:
             # 按优先级排序：优先级高的技能先检查
@@ -343,7 +395,7 @@ class SkillManager:
                 key=lambda x: (not x[1].get("Priority", False), x[0])  # Priority=True的排在前面
             )
 
-        # 检查技能冷却（按优先级顺序）
+        # 🔄 所有技能检测都使用同一帧数据，确保时序一致性
         priority_skills_executed = 0
         for skill_name, skill_config in skills_to_check:
             if skill_config.get("Enabled") and skill_config.get("TriggerMode") == 1:
@@ -351,36 +403,65 @@ class SkillManager:
                 if is_priority:
                     priority_skills_executed += 1
                 LOG(f"[冷却检查] 检查技能 {skill_name} (优先级: {'高' if is_priority else '普通'})")
+                
+                # ✅ 关键：所有技能检测使用同一cached_frame，确保数据一致性
                 self._try_execute_skill(skill_name, skill_config, cached_frame)
 
         if priority_skills_executed > 0:
-            LOG(f"[冷却检查] 本轮执行了 {priority_skills_executed} 个高优先级技能")
+            LOG(f"[冷却检查] 本轮使用同一帧执行了 {priority_skills_executed} 个高优先级技能")
 
         # 注意：资源管理现在有独立的调度任务，不在这里调用
 
     def check_resources(self):
-        """独立的资源管理检查任务（被统一调度器调用）"""
+        """独立的资源管理检查任务（被统一调度器调用）- 使用统一帧管理"""
         if not self._is_running or self._is_paused or not self.resource_manager:
             return
 
-        # 获取帧数据用于资源检测
+        # 🎯 方案2：为资源管理也获取独立的帧数据
         cached_frame = self._prepare_frame_detection_cache()
         if cached_frame is None:
+            LOG_ERROR("[帧管理] 资源检查无法获取帧数据，跳过本轮")
             return
 
-        # 执行资源管理检查
+        LOG_INFO(f"[帧管理] 资源检查获取帧数据，尺寸: {cached_frame.shape}")
+
+        # ✅ 将同一帧数据传递给资源管理器，确保资源检测的一致性
         self.resource_manager.check_and_execute_resources(cached_frame)
 
     def _prepare_frame_detection_cache(self) -> Optional[np.ndarray]:
         """
-        性能优化：一次性获取当前帧数据
+        性能优化：一次性获取当前帧数据（方案2核心实现）
+        
+        优势：
+        1. 减少get_current_frame()调用次数
+        2. 确保同一轮检测使用相同帧数据，保证时序一致性
+        3. 避免重复的numpy数组对象创建
+        
         返回帧数据，供后续所有检测使用
         """
         try:
-            return self.border_frame_manager.get_current_frame()
+            # 📊 统计get_current_frame调用次数
+            self._frame_usage_stats["total_frame_gets"] += 1
+            
+            frame = self.border_frame_manager.get_current_frame()
+            if frame is not None:
+                LOG_INFO(f"[帧管理-统计] 成功获取帧数据: {frame.shape}, 内存ID: {id(frame)}")
+            else:
+                LOG_ERROR(f"[帧管理-统计] 获取帧数据失败: None")
+            return frame
         except Exception as e:
             LOG_ERROR(f"[帧缓存] 准备检测缓存失败: {e}")
             return None
+
+    def get_frame_performance_stats(self) -> Dict[str, Any]:
+        """获取帧管理性能统计（方案2效果验证）"""
+        stats = self._frame_usage_stats.copy()
+        stats["optimization_summary"] = (
+            f"总调用: {stats['total_frame_gets']}, "
+            f"缓存命中: {stats['cached_frame_usage']}, "
+            f"优化率: {stats['performance_ratio']:.1f}%"
+        )
+        return stats
 
     def _try_execute_skill(
         self,
@@ -389,10 +470,23 @@ class SkillManager:
         cached_frame: Optional[np.ndarray] = None,
     ):
         """
-        统一的技能执行方法
+        统一的技能执行方法（方案2优化版本）
         - 如果提供了cached_frame，使用缓存帧数据进行检测（高性能）
         - 如果没有提供cached_frame，使用实时检测（兼容性）
         """
+        # 🔍 帧使用统计
+        if cached_frame is not None:
+            self._frame_usage_stats["cached_frame_usage"] += 1
+            # 计算性能优化比例
+            if self._frame_usage_stats["total_frame_gets"] > 0:
+                self._frame_usage_stats["performance_ratio"] = (
+                    self._frame_usage_stats["cached_frame_usage"] / 
+                    self._frame_usage_stats["total_frame_gets"] * 100
+                )
+            LOG_INFO(f"[帧管理-统计] 技能 {skill_name} 使用缓存帧: {cached_frame.shape}, 内存ID: {id(cached_frame)}")
+        else:
+            LOG_ERROR(f"[帧管理-统计] 技能 {skill_name} 未使用缓存帧，性能未优化")
+        
         trigger_mode = skill_config.get("TriggerMode")
         alt_key = skill_config.get("AltKey", "")
         execute_condition = skill_config.get("ExecuteCondition", 0)
@@ -403,6 +497,7 @@ class SkillManager:
             is_ready = self._check_cooldown_ready(
                 skill_name, skill_config, cached_frame
             )
+            
         # 2. 如果冷却就绪，再检查执行条件
         condition_result = True
         if is_ready:
@@ -431,7 +526,6 @@ class SkillManager:
             # 🎯 使用语义化接口根据优先级执行技能
             is_priority_skill = skill_config.get("Priority", False)
             if is_priority_skill:
-                LOG_INFO(f"[优先级执行] 高优先级技能 {skill_name} 按键 {key_to_use}")
                 self.input_handler.execute_skill_high(key_to_use)
             else:
                 self.input_handler.execute_skill_normal(key_to_use)
@@ -527,7 +621,7 @@ class SkillManager:
         result = self._evaluate_condition(
             condition, skill_name, skill_config, cached_frame
         )
-
+        
         return result
 
     def _evaluate_condition(
@@ -575,7 +669,7 @@ class SkillManager:
                         cached_frame, x, y
                     )
                 else:
-                    is_sufficient = not self.border_frame_manager.rgb_similarity(
+                    is_sufficient = self.border_frame_manager.rgb_similarity(
                         cached_frame, x, y, color, tolerance
                     )
 

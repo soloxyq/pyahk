@@ -2,7 +2,7 @@
     "skills": {
         "Skill1": {
             "Enabled": true,
-            "Key": "C",
+            "Key": "c",
             "Priority": false,
             "Timer": 200,
             "TriggerMode": 0,
@@ -46,7 +46,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "4",
             "Priority": false,
             "Timer": 1000,
@@ -61,7 +61,7 @@
             "AltKey": ""
         },
         "Skill5": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "x",
             "Priority": false,
             "Timer": 200,
@@ -123,12 +123,18 @@
     },
     "global": {
         "sequence_enabled": false,
+        "debug_mode": {
+            "enabled": false
+        },
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
         "cooldown_checker_interval": 110,
         "sequence_timer_interval": 1000,
         "capture_interval": 60,
+        "hp_cooldown": 1000,
+        "mp_cooldown": 2000,
+        "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
@@ -137,7 +143,8 @@
         },
         "stationary_mode_config": {
             "hotkey": "xbutton1",
-            "mode_type": "shift_modifier"
+            "mode_type": "shift_modifier",
+            "force_move_hotkey": "x"
         },
         "affix_reroll": {
             "enabled": true,
@@ -148,6 +155,84 @@
             "first_affix_button_coord": null,
             "replace_button_coord": null,
             "close_button_coord": null
+        },
+        "pathfinding_config": {
+            "hotkey": "f9",
+            "minimap_area": [
+                0,
+                0,
+                0,
+                0
+            ]
+        },
+        "resource_management": {
+            "hp_config": {
+                "enabled": true,
+                "key": "1",
+                "threshold": 50,
+                "cooldown": 1000,
+                "tolerance_h": 10,
+                "tolerance_s": 30,
+                "tolerance_v": 50,
+                "detection_mode": "rectangle",
+                "region_x1": 602,
+                "region_y1": 931,
+                "region_x2": 613,
+                "region_y2": 1050,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 157,
+                        "target_s": 75,
+                        "target_v": 29,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    },
+                    {
+                        "name": "Color2",
+                        "target_h": 40,
+                        "target_s": 84,
+                        "target_v": 48,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    }
+                ]
+            },
+            "mp_config": {
+                "enabled": false,
+                "key": "2",
+                "threshold": 50,
+                "cooldown": 2000,
+                "tolerance_h": 10,
+                "tolerance_s": 30,
+                "tolerance_v": 50,
+                "detection_mode": "rectangle",
+                "region_x1": 1552,
+                "region_y1": 910,
+                "region_x2": 1560,
+                "region_y2": 1004,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 104,
+                        "target_s": 80,
+                        "target_v": 58,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    }
+                ]
+            },
+            "check_interval": 200
+        },
+        "priority_keys": {
+            "enabled": true,
+            "keys": [
+                "space",
+                "right_mouse"
+            ]
         },
         "skill_sequence": "1,2,3,4,5,6,7,8",
         "process_history": {

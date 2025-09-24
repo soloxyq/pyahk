@@ -354,7 +354,7 @@ class BorderFrameManager:
             LOG_ERROR(f"从帧中获取像素颜色时异常: {e}")
             return None
 
-    def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0, color_config: dict = None) -> float:
+    def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0, color_config: Optional[dict] = None) -> float:
         """使用半圆形蒙版和连续段检测算法，返回匹配百分比（0.0-100.0）"""
         try:
             import cv2
@@ -644,7 +644,10 @@ class BorderFrameManager:
         if color is None:
             return False
         r, g, b = (color >> 16) & 0xFF, (color >> 8) & 0xFF, color & 0xFF
-        return (max(r, g, b) - min(r, g, b)) > color_range_threshold
+        color_range = max(r, g, b) - min(r, g, b)
+        result = color_range > color_range_threshold
+        
+        return result
 
     def is_hp_sufficient(self, frame: np.ndarray, x: int, y: int) -> bool:
         """从指定帧数据中检测HP是否充足"""

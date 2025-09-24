@@ -29,7 +29,6 @@ class MultiPriorityQueue:
         self._priority_order = ['emergency', 'high', 'normal', 'low']
         self._maxsize = maxsize
         self._cond = threading.Condition()
-        self._unfinished_tasks = 0
 
     def _total_size_unlocked(self) -> int:
         return sum(len(q) for q in self._queues.values())
@@ -64,7 +63,6 @@ class MultiPriorityQueue:
                         self._cond.wait(remaining)
 
             self._queues[priority].append(item)
-            self._unfinished_tasks += 1
             self._cond.notify()
 
     def get(self, block: bool = True, timeout: Optional[float] = None):
@@ -91,15 +89,6 @@ class MultiPriorityQueue:
                     return self._queues[priority].popleft()
             
             raise Empty  # 理论上不会到达这里
-
-    def task_done(self):
-        """标记任务完成"""
-        with self._cond:
-            if self._unfinished_tasks <= 0:
-                raise ValueError('task_done() called too many times')
-            self._unfinished_tasks -= 1
-            if self._unfinished_tasks == 0:
-                self._cond.notify_all()
 
     def qsize(self) -> int:
         """获取队列总大小"""

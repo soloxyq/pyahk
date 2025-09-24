@@ -179,19 +179,10 @@ class UnifiedScheduler:
     def pause(self) -> bool:
         """暂停所有任务执行"""
         with self._condition:
-            if not self._running:
+            if not self._running or self._paused:
                 return False
 
-            self._paused = not self._paused
-            if not self._paused:
-                # 恢复时重新计算所有任务的执行时间
-                current_time = self._now()
-                for task in self._tasks.values():
-                    if task.enabled:
-                        task.next_run_time = current_time + task.interval
-                self._rebuild_heap()
-                self._condition.notify()
-
+            self._paused = True
             return True
 
     def resume(self) -> bool:

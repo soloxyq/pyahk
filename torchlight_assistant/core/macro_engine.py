@@ -45,6 +45,8 @@ class MacroEngine:
 
         # 原地模式状态（切换模式）
         self._stationary_mode_active = False
+        # 强制移动状态（按住模式）
+        self._force_move_active = False
 
         self.config_manager = ConfigManager()
         
@@ -247,10 +249,12 @@ class MacroEngine:
             "state": self._state,
             "queue_length": self.input_handler.get_queue_length(),
         }
-        if stationary_mode is not None:
-            status_info["stationary_mode"] = stationary_mode
-        if force_move_active is not None:
-            status_info["force_move_active"] = force_move_active
+        
+        # 🔥 关键修复：总是发送当前完整状态，确保状态同步
+        # 使用内部状态变量，而不是参数值
+        status_info["stationary_mode"] = self._stationary_mode_active
+        status_info["force_move_active"] = self._force_move_active
+        
         event_bus.publish("engine:status_updated", status_info)
 
     def _update_osd_visibility(self):
@@ -541,11 +545,13 @@ class MacroEngine:
 
     def _on_force_move_key_press(self):
         """交互/强制移动热键按下事件 - 按住激活"""
+        self._force_move_active = True
         self._publish_status_update(force_move_active=True)
         LOG_INFO("[交互模式] 已激活")
 
     def _on_force_move_key_release(self):
         """交互/强制移动热键释放事件 - 松开取消"""
+        self._force_move_active = False
         self._publish_status_update(force_move_active=False)
         LOG_INFO("[交互模式] 已取消")
 
