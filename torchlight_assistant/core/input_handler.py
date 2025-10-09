@@ -124,6 +124,10 @@ class InputHandler:
         self._priority_keys_pressed = set()  # 当前按下的优先级按键
         self._priority_keys_config = {'space': 50, 'right_mouse': 50}  # 默认优先级按键配置（按键->延迟ms）
         self._priority_key_delay = 0.05  # 默认优先级按键前置延迟（秒）- 保持向后兼容
+        
+        # --- 新增：特殊按键处理区分 ---
+        self._special_keys = {'space'}  # 特殊按键：不接管，只监控状态
+        self._managed_keys = {'right_mouse'}  # 管理按键：完全接管，处理延迟
         self._keyboard_listener = None
         self._mouse_listener = None
         self._priority_mode_enabled = True  # 是否启用优先级模式
@@ -140,18 +144,18 @@ class InputHandler:
             return
             
         try:
-            # 启动键盘监听器 - 只处理优先级按键，其他按键被忽略
+            # 启动键盘监听器 - 选择性截获优先级按键
             self._keyboard_listener = KeyboardListener(
                 on_press=self._on_key_press,
                 on_release=self._on_key_release,
-                suppress=False  # 不抑制按键，让其他程序正常接收
+                suppress=True  # 启用抑制，通过返回值控制是否截获
             )
             self._keyboard_listener.start()
             
-            # 启动鼠标监听器 - 只处理优先级鼠标按键，其他点击被忽略
+            # 启动鼠标监听器 - 选择性截获优先级鼠标按键
             self._mouse_listener = MouseListener(
                 on_click=self._on_mouse_click,
-                suppress=False  # 不抑制鼠标，让其他程序正常接收
+                suppress=True  # 启用抑制，通过返回值控制是否截获
             )
             self._mouse_listener.start()
             
@@ -160,7 +164,7 @@ class InputHandler:
             LOG_ERROR(f"[输入处理器] 启动监听失败: {e}")
 
     def _on_key_press(self, key):
-        """键盘按下事件处理 - 只处理优先级按键"""
+        """键盘按下事件处理 - 分层处理优先级按键"""
         try:
             key_name = self._get_key_name(key)
             
@@ -168,21 +172,42 @@ class InputHandler:
             # 支持字典和集合格式的配置检查
             if (isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config) or \
                (isinstance(self._priority_keys_config, set) and key_name in self._priority_keys_config):
-                was_empty = len(self._priority_keys_pressed) == 0
-                self._priority_keys_pressed.add(key_name)
                 
-                # 🚀 如果是第一个优先级按键被按下，暂停技能调度器
-                if was_empty:
-                    self._pause_skill_scheduler()
-                
-                # 🎯 新增：优先级按键需要确保游戏响应，先加延迟再发送
-                self._execute_priority_key_with_delay(key_name)
+                # 🔧 防止重复按键事件 - 只有在该键未被记录为按下时才处理
+                if key_name not in self._priority_keys_pressed:
+                    was_empty = len(self._priority_keys_pressed) == 0
+                    self._priority_keys_pressed.add(key_name)
+                    
+                    # 🚀 暂停技能调度器
+                    if was_empty:
+                        self._pause_skill_scheduler()
+                    
+                    # 🎯 分层处理：特殊按键 vs 管理按键
+                    if key_name in self._special_keys:
+                        # 特殊按键（如空格）：只监控状态，不截获，让游戏自行处理
+                        LOG_INFO(f"[优先级按键] {key_name} 特殊按键 - 仅监控状态，不截获")
+                        return None  # 不截获，让按键传递到游戏
+                    else:
+                        # 管理按键（如右键、E键）：完全截获，程序接管
+                        LOG_INFO(f"[优先级按键] {key_name} 管理按键 - 截获系统事件，程序接管")
+                        self._handle_managed_key_press(key_name)
+                        return False  # 截获按键，阻止传递到游戏
+                else:
+                    # 重复按键事件 - 如果是管理按键则截获
+                    if key_name in self._managed_keys:
+                        return False  # 截获重复的管理按键事件
+                    else:
+                        return None  # 不截获重复的特殊按键事件
+            
+            # 非优先级按键，不处理，让其正常传递
+            return None
                 
         except Exception as e:
             LOG_ERROR(f"[优先级按键] _on_key_press异常: {e}")
+            return None  # 异常时不截获
 
     def _on_key_release(self, key):
-        """键盘释放事件处理 - 只处理优先级按键"""
+        """键盘释放事件处理 - 分层处理优先级按键"""
         try:
             key_name = self._get_key_name(key)
             
@@ -190,17 +215,30 @@ class InputHandler:
             # 支持字典和集合格式的配置检查
             if (isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config) or \
                (isinstance(self._priority_keys_config, set) and key_name in self._priority_keys_config):
-                self._priority_keys_pressed.discard(key_name)
                 
-                # 🚀 如果所有优先级按键都释放了，恢复技能调度器
-                if len(self._priority_keys_pressed) == 0:
-                    self._resume_skill_scheduler()
+                # 🔧 修复：防止重复释放事件 - 只有在该键被记录为按下时才处理释放
+                if key_name in self._priority_keys_pressed:
+                    self._priority_keys_pressed.discard(key_name)
+                    
+                    # 🚀 如果所有优先级按键都释放了，恢复技能调度器
+                    if len(self._priority_keys_pressed) == 0:
+                        self._resume_skill_scheduler()
+                
+                # 🎯 截获策略：管理按键截获，特殊按键放行
+                if key_name in self._managed_keys:
+                    return False  # 截获管理按键的释放事件
+                else:
+                    return None  # 不截获特殊按键的释放事件
+            
+            # 非优先级按键，不处理，让其正常传递
+            return None
                 
         except Exception as e:
             LOG_ERROR(f"[优先级按键] _on_key_release异常: {e}")
+            return None  # 异常时不截获
 
     def _on_mouse_click(self, x, y, button, pressed):
-        """鼠标点击事件处理 - 只处理优先级按键"""
+        """鼠标点击事件处理 - 分层处理优先级按键"""
         try:
             button_name = self._get_button_name(button)
             
@@ -209,27 +247,55 @@ class InputHandler:
             if (isinstance(self._priority_keys_config, dict) and button_name in self._priority_keys_config) or \
                (isinstance(self._priority_keys_config, set) and button_name in self._priority_keys_config):
                 if pressed:
-                    was_empty = len(self._priority_keys_pressed) == 0
-                    self._priority_keys_pressed.add(button_name)
-                    
-                    # 🚀 如果是第一个优先级按键被按下，暂停技能调度器
-                    if was_empty:
-                        self._pause_skill_scheduler()
-                    
-                    # 🎯 新增：优先级按键需要确保游戏响应，先加延迟再发送
-                    self._execute_priority_key_with_delay(button_name)
+                    # 🔧 修复：防止重复鼠标按下事件
+                    if button_name not in self._priority_keys_pressed:
+                        was_empty = len(self._priority_keys_pressed) == 0
+                        self._priority_keys_pressed.add(button_name)
+                        
+                        # 🚀 如果是第一个优先级按键被按下，暂停技能调度器
+                        if was_empty:
+                            self._pause_skill_scheduler()
+                        
+                        # 🎯 分层处理：特殊按键 vs 管理按键
+                        if button_name in self._special_keys:
+                            # 特殊按键：只监控状态，不截获，让游戏自行处理
+                            LOG_INFO(f"[优先级按键] {button_name} 特殊按键 - 仅监控状态，不截获")
+                            return None  # 不截获，让按键传递到游戏
+                        else:
+                            # 管理按键：完全截获，程序接管
+                            LOG_INFO(f"[优先级按键] {button_name} 管理按键 - 截获系统事件，程序接管")
+                            self._handle_managed_key_press(button_name)
+                            return False  # 截获按键，阻止传递到游戏
+                    else:
+                        # 重复按键事件 - 如果是管理按键则截获
+                        if button_name in self._managed_keys:
+                            return False  # 截获重复的管理按键事件
+                        else:
+                            return None  # 不截获重复的特殊按键事件
                 else:
-                    self._priority_keys_pressed.discard(button_name)
+                    # 🔧 修复：防止重复鼠标释放事件
+                    if button_name in self._priority_keys_pressed:
+                        self._priority_keys_pressed.discard(button_name)
+                        
+                        # 🚀 如果所有优先级按键都释放了，恢复技能调度器
+                        if len(self._priority_keys_pressed) == 0:
+                            self._resume_skill_scheduler()
                     
-                    # 🚀 如果所有优先级按键都释放了，恢复技能调度器
-                    if len(self._priority_keys_pressed) == 0:
-                        self._resume_skill_scheduler()
+                    # 🎯 截获策略：管理按键截获，特殊按键放行
+                    if button_name in self._managed_keys:
+                        return False  # 截获管理按键的释放事件
+                    else:
+                        return None  # 不截获特殊按键的释放事件
+            
+            # 非优先级按键，不处理，让其正常传递
+            return None
                     
         except Exception as e:
             LOG_ERROR(f"[优先级按键] _on_mouse_click异常: {e}")
+            return None  # 异常时不截获
 
-    def _execute_priority_key_with_delay(self, key_name: str):
-        """执行优先级按键 - 使用该按键的专属延迟"""
+    def _handle_managed_key_press(self, key_name: str):
+        """处理管理按键的按下 - 程序完全接管，处理动画前后摇"""
         try:
             # 获取该按键的专属延迟，如果是字典格式则使用，否则使用默认延迟
             if isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config:
@@ -237,12 +303,42 @@ class InputHandler:
             else:
                 delay_ms = int(self._priority_key_delay * 1000)  # 使用默认延迟作为后备
             
-            # 使用紧急优先级，添加延迟后发送按键
-            delay_command = f"delay{delay_ms}"  # 使用新的delayXX格式
+            # 🎯 管理按键模式：程序完全接管按键执行，处理动画前后摇
+            # 1. 前置延迟（等待前一动画完成）
+            delay_command = f"delay{delay_ms}"
             self._key_queue.put(delay_command, priority='emergency', block=False)
+            
+            # 2. 发送按键
             self._key_queue.put(key_name, priority='emergency', block=False)
-        except Full:
-            LOG_ERROR(f"[优先级按键] 紧急队列已满，优先级按键 {key_name} 被丢弃。")
+            
+            LOG_INFO(f"[优先级按键] {key_name} 管理按键处理 - 延迟{delay_ms}ms后执行")
+            
+        except Exception as e:
+            LOG_ERROR(f"[优先级按键] 管理按键处理失败: {e}")
+
+    def is_priority_key_active(self) -> bool:
+        """检查是否有优先级按键正在按下
+        
+        此方法供其他模块调用，用于在执行按键前检查优先级状态
+        如果有优先级按键按下，则应跳过自动化按键执行
+        """
+        return self.is_priority_mode_active()
+
+    def is_special_key_pressed(self) -> bool:
+        """检查是否有特殊按键（如空格）正在按下
+        
+        此方法供其他模块调用，用于在执行按键前检查特殊按键状态
+        如果特殊按键（如空格）按下，则应跳过所有自动化按键执行
+        """
+        return bool(self._special_keys & self._priority_keys_pressed)
+
+    # def _execute_priority_key_with_delay(self, key_name: str):
+    #     """已废弃：执行优先级按键 - 使用该按键的专属延迟
+    #     
+    #     注意：优先级按键现在只暂停调度器，不发送额外按键，
+    #     让游戏本身的按键处理接管，避免重复动作。
+    #     """
+    #     pass
             
     def _pause_skill_scheduler(self):
         """暂停技能调度器以节省CPU资源"""
@@ -357,19 +453,38 @@ class InputHandler:
         if isinstance(keys_config, dict):
             # 新格式：字典包含延迟配置
             normalized_config = {}
+            special_keys = set()
+            managed_keys = set()
+            
             for key, delay in keys_config.items():
                 normalized_key = self._normalize_key_name(key)
                 if normalized_key:
                     normalized_config[normalized_key] = max(0, int(delay))
+                    # 🎯 分类按键：空格为特殊按键，其他为管理按键
+                    if normalized_key == 'space':
+                        special_keys.add(normalized_key)
+                    else:
+                        managed_keys.add(normalized_key)
+            
             self._priority_keys_config = normalized_config
+            self._special_keys = special_keys
+            self._managed_keys = managed_keys
+            
             LOG_INFO(f"[输入处理器] 优先级按键已更新: {self._priority_keys_config}")
+            LOG_INFO(f"[输入处理器] 特殊按键: {self._special_keys}, 管理按键: {self._managed_keys}")
         else:
             # 兼容旧格式：列表格式，使用默认延迟
             normalized_keys = {self._normalize_key_name(key) for key in keys_config if key}
             # 转换为新的字典格式，使用默认延迟50ms
             default_delay = int(self._priority_key_delay * 1000)
             self._priority_keys_config = {key: default_delay for key in normalized_keys}
+            
+            # 分类按键
+            self._special_keys = {key for key in normalized_keys if key == 'space'}
+            self._managed_keys = normalized_keys - self._special_keys
+            
             LOG_INFO(f"[输入处理器] 优先级按键已更新（兼容模式）: {self._priority_keys_config}")
+            LOG_INFO(f"[输入处理器] 特殊按键: {self._special_keys}, 管理按键: {self._managed_keys}")
 
     def set_priority_keys_config(self, keys_config: Dict[str, int]):
         """设置优先级按键配置（新方法，明确支持字典格式）

@@ -4,7 +4,7 @@
             "Enabled": true,
             "Key": "q",
             "Priority": true,
-            "Timer": 200,
+            "Timer": 150,
             "TriggerMode": 1,
             "CooldownCoordX": 1446,
             "CooldownCoordY": 1035,
@@ -19,7 +19,7 @@
             "Enabled": true,
             "Key": "Lbutton",
             "Priority": false,
-            "Timer": 150,
+            "Timer": 175,
             "TriggerMode": 0,
             "CooldownCoordX": 857,
             "CooldownCoordY": 995,
@@ -129,11 +129,11 @@
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
-        "cooldown_checker_interval": 105,
+        "cooldown_checker_interval": 95,
         "sequence_timer_interval": 125,
         "capture_interval": 50,
-        "hp_cooldown": 2000,
-        "mp_cooldown": 3000,
+        "hp_cooldown": 1000,
+        "mp_cooldown": 2000,
         "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
@@ -185,7 +185,7 @@
                 "enabled": true,
                 "key": "1",
                 "threshold": 60,
-                "cooldown": 2000,
+                "cooldown": 1000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
@@ -219,7 +219,7 @@
                 "enabled": true,
                 "key": "2",
                 "threshold": 30,
-                "cooldown": 3000,
+                "cooldown": 2000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
@@ -241,6 +241,14 @@
                 ]
             },
             "check_interval": 200
+        },
+        "priority_keys": {
+            "enabled": true,
+            "keys_config": {
+                "space": 20,
+                "right_mouse": 20,
+                "e": 50
+            }
         },
         "skill_sequence": "Rbutton,q,Lbutton,Lbutton,Lbutton,Lbutton,Lbutton,LbuttonLbutton,Lbutton,Lbutton",
         "process_history": {}
