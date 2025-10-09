@@ -429,22 +429,50 @@ def register_custom_module(macro_engine):
 ```python
 class InputProcessor:
     """输入处理器基类"""
-    
+
     def __init__(self, name: str):
         self.name = name
         self.enabled = True
-    
+
     def can_process(self, action: dict) -> bool:
         """判断是否可以处理此动作"""
         return False
-    
+
     def process_action(self, action: dict) -> bool:
         """处理动作，返回是否成功"""
         return False
-    
+
     def get_priority(self) -> int:
         """获取处理器优先级，数字越小优先级越高"""
         return 100
+```
+
+#### 实际实现的输入处理器
+```python
+class DefaultInputProcessor(InputProcessor):
+    """默认输入处理器 - 处理标准按键和鼠标操作"""
+
+    def can_process(self, action: dict) -> bool:
+        """可以处理所有标准输入动作"""
+        action_type = action.get("type", "")
+        return action_type in ["key_press", "key_release", "mouse_click", "delay"]
+
+    def process_action(self, action: dict) -> bool:
+        """处理标准输入动作"""
+        action_type = action.get("type", "")
+
+        if action_type == "key_press":
+            key = action.get("key", "")
+            return self._send_key(key)
+        elif action_type == "mouse_click":
+            button = action.get("button", "left")
+            return self._click_mouse(button)
+        elif action_type == "delay":
+            delay_ms = action.get("delay", 50)
+            time.sleep(delay_ms / 1000.0)
+            return True
+
+        return False
 ```
 
 #### 示例：语音输入处理器
