@@ -62,7 +62,13 @@ class SimplifiedSkillWidget(QWidget):
 
         layout.addWidget(QLabel("键值:"))
         self._ui_widgets["Key"] = ConfigLineEdit()
-        self._ui_widgets["Key"].setMaximumWidth(50)
+        self._ui_widgets["Key"].setMaximumWidth(80)  # 增加宽度以容纳序列
+        self._ui_widgets["Key"].setToolTip(
+            "单个按键: q, w, space, lbutton\n"
+            "延迟指令: delay50, delay100\n"
+            "按键序列: delay50,q 或 q,delay100,w\n"
+            "（用逗号分隔，按顺序执行）"
+        )
         layout.addWidget(self._ui_widgets["Key"])
 
         self._ui_widgets["Priority"] = ConfigCheckBox("优先级")
@@ -149,7 +155,13 @@ class SimplifiedSkillWidget(QWidget):
 
         frame_layout.addWidget(QLabel("额外键:"))
         self._ui_widgets["AltKey"] = ConfigLineEdit()
-        self._ui_widgets["AltKey"].setMaximumWidth(40)
+        self._ui_widgets["AltKey"].setMaximumWidth(80)  # 增加宽度以容纳序列
+        self._ui_widgets["AltKey"].setToolTip(
+            "单个按键: q, w, space, lbutton\n"
+            "延迟指令: delay50, delay100\n"
+            "按键序列: delay50,q 或 q,delay100,w\n"
+            "（用逗号分隔，按顺序执行）"
+        )
         frame_layout.addWidget(self._ui_widgets["AltKey"])
 
         return frame

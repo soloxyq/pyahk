@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QListWidgetItem,
     QMessageBox,
     QInputDialog,
+    QSpinBox,
 )
 from PySide6.QtCore import Qt
 from typing import Dict, Any, Set, List
@@ -56,6 +57,38 @@ class PriorityKeysWidget(QWidget):
         self.widgets["enabled"] = ConfigCheckBox("启用优先级按键系统")
         self.widgets["enabled"].setChecked(True)
         group_layout.addWidget(self.widgets["enabled"])
+
+        # 延迟配置
+        delay_layout = QHBoxLayout()
+        delay_layout.setContentsMargins(20, 5, 0, 5)
+        
+        delay_label = QLabel("按键前置延迟:")
+        delay_label.setStyleSheet("color: #555; font-size: 9pt;")
+        delay_layout.addWidget(delay_label)
+        
+        self.widgets["delay_ms"] = QSpinBox()
+        self.widgets["delay_ms"].setRange(0, 500)  # 0-500毫秒
+        self.widgets["delay_ms"].setValue(50)  # 默认50毫秒
+        self.widgets["delay_ms"].setSuffix(" ms")
+        self.widgets["delay_ms"].setToolTip("在发送优先级按键前的延迟时间，确保游戏能正确响应")
+        self.widgets["delay_ms"].setStyleSheet("""
+            QSpinBox {
+                border: 1px solid #ccc;
+                border-radius: 3px;
+                padding: 2px 5px;
+                background-color: white;
+                font-size: 9pt;
+                min-width: 60px;
+            }
+        """)
+        delay_layout.addWidget(self.widgets["delay_ms"])
+        
+        delay_help = QLabel("(技能前摇保护)")
+        delay_help.setStyleSheet("color: #888; font-size: 8pt; font-style: italic;")
+        delay_layout.addWidget(delay_help)
+        
+        delay_layout.addStretch()
+        group_layout.addLayout(delay_layout)
 
         # 按键列表区域
         keys_frame = QFrame()
@@ -290,7 +323,8 @@ class PriorityKeysWidget(QWidget):
         """获取当前配置"""
         return {
             "enabled": self.widgets["enabled"].isChecked(),
-            "keys": self.priority_keys.copy()
+            "keys": self.priority_keys.copy(),
+            "delay_ms": self.widgets["delay_ms"].value()
         }
 
     def set_config(self, config: Dict[str, Any]):
@@ -301,6 +335,9 @@ class PriorityKeysWidget(QWidget):
         if "keys" in config:
             self.priority_keys = list(config["keys"])
             self._update_keys_display()
+            
+        if "delay_ms" in config:
+            self.widgets["delay_ms"].setValue(config["delay_ms"])
 
     def get_priority_keys(self) -> Set[str]:
         """获取优先级按键集合"""

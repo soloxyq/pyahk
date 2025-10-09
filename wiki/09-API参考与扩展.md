@@ -122,67 +122,79 @@ from torchlight_assistant.core.input_handler import InputHandler
 
 input_handler = InputHandler()
 
-# 按键操作
-input_handler.enqueue_action({
-    "type": "key_press",
-    "key": "1",
-    "priority": False  # 普通优先级
-})
-
-# 高优先级按键
-input_handler.enqueue_action({
-    "type": "key_press", 
-    "key": "escape",
-    "priority": True   # 高优先级，插队执行
-})
+# 单个按键
+input_handler.send_key("1")
 
 # 组合键
-input_handler.enqueue_action({
-    "type": "key_combo",
-    "keys": ["ctrl", "c"],
-    "priority": False
-})
+input_handler.send_key("ctrl+c")
 
-# 鼠标点击
-input_handler.enqueue_action({
-    "type": "mouse_click",
-    "x": 500,
-    "y": 300,
-    "button": "left",  # left/right/middle
-    "priority": False
-})
-
-# 鼠标移动
-input_handler.enqueue_action({
-    "type": "mouse_move",
-    "x": 600,
-    "y": 400,
-    "priority": False
-})
+# 鼠标操作
+input_handler.click_mouse("left")   # 左键点击
+input_handler.click_mouse("right")  # 右键点击
 ```
 
-#### Hold模式操作
+#### 🚀 技能执行API - 支持序列
 ```python
-# 按住操作
-input_handler.enqueue_action({
-    "type": "hold_press",
-    "key": "shift",
-    "priority": True
-})
+# 普通技能（支持序列）
+input_handler.execute_skill_normal("q")           # 单个按键
+input_handler.execute_skill_normal("delay50,q")   # 延迟后按键
+input_handler.execute_skill_normal("q,delay100,w") # 复杂序列
 
-# 释放操作  
-input_handler.enqueue_action({
-    "type": "hold_release", 
-    "key": "shift",
-    "priority": True
-})
+# 高优先级技能（支持序列）
+input_handler.execute_skill_high("delay50,escape")
+input_handler.execute_skill_high("1,delay200,2,delay100,3")
 
-# 复杂组合键按住
-input_handler.enqueue_action({
-    "type": "hold_press",
-    "key": "ctrl+shift+w",
-    "priority": True
-})
+# 辅助功能（支持序列）
+input_handler.execute_utility("delay100,tab")
+input_handler.execute_utility("i,delay50,escape")
+
+# 紧急操作（HP/MP药剂）
+input_handler.execute_hp_potion("1")    # 单个按键，高优先级
+input_handler.execute_mp_potion("2")    # 单个按键，高优先级
+```
+
+#### 序列语法支持
+```python
+# 延迟指令
+"delay50"              # 延迟50毫秒
+"delay100"             # 延迟100毫秒
+"delay1000"            # 延迟1秒
+
+# 单个按键
+"q"                    # 普通按键
+"shift+q"              # 组合按键
+"ctrl+alt+tab"         # 多键组合
+
+# 按键序列
+"delay50,q"            # 延迟50ms后按q
+"q,delay100,w"         # 按q，等待100ms，按w
+"delay50,1,delay200,2" # 多技能时机控制
+"shift+1,delay100,2"   # 组合键+延迟+普通键
+```
+
+#### 队列管理API
+```python
+# 队列状态查询
+queue_length = input_handler.get_queue_length()
+queue_stats = input_handler.get_queue_stats()
+
+# 清空队列
+input_handler.clear_queue()
+
+# 队列优先级
+# emergency > high > normal > low
+```
+
+#### 优先级按键控制
+```python
+# 检查优先级模式状态
+is_active = input_handler.is_priority_mode_active()
+
+# 获取当前活跃的优先级按键
+active_keys = input_handler.get_active_priority_keys()
+
+# 手动设置优先级模式（用于测试）
+input_handler.set_priority_mode_override(True)
 ```
 
 ### BorderFrameManager API

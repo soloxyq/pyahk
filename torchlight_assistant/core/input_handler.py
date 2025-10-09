@@ -174,6 +174,7 @@ class InputHandler:
         # --- 新增：优先级按键状态监控 ---
         self._priority_keys_pressed = set()  # 当前按下的优先级按键
         self._priority_keys_config = {'space', 'right_mouse'}  # 默认优先级按键配置
+        self._priority_key_delay = 0.05  # 优先级按键前置延迟（秒）- 确保游戏响应
         self._keyboard_listener = None
         self._mouse_listener = None
         self._priority_mode_enabled = True  # 是否启用优先级模式
@@ -223,6 +224,9 @@ class InputHandler:
                 if was_empty:
                     self._pause_skill_scheduler()
                 
+                # 🎯 新增：优先级按键需要确保游戏响应，先加延迟再发送
+                self._execute_priority_key_with_delay(key_name)
+                
         except Exception as e:
             LOG_ERROR(f"[优先级按键] _on_key_press异常: {e}")
 
@@ -256,6 +260,9 @@ class InputHandler:
                     # 🚀 如果是第一个优先级按键被按下，暂停技能调度器
                     if was_empty:
                         self._pause_skill_scheduler()
+                    
+                    # 🎯 新增：优先级按键需要确保游戏响应，先加延迟再发送
+                    self._execute_priority_key_with_delay(button_name)
                 else:
                     self._priority_keys_pressed.discard(button_name)
                     
@@ -265,6 +272,16 @@ class InputHandler:
                     
         except Exception as e:
             LOG_ERROR(f"[优先级按键] _on_mouse_click异常: {e}")
+
+    def _execute_priority_key_with_delay(self, key_name: str):
+        """执行优先级按键 - 添加延迟确保游戏响应"""
+        try:
+            # 使用紧急优先级，添加延迟后发送按键
+            delay_command = f"delay={int(self._priority_key_delay * 1000)}"  # 转换为毫秒
+            self._key_queue.put(delay_command, priority='emergency', block=False)
+            self._key_queue.put(key_name, priority='emergency', block=False)
+        except Full:
+            LOG_ERROR(f"[优先级按键] 紧急队列已满，优先级按键 {key_name} 被丢弃。")
             
     def _pause_skill_scheduler(self):
         """暂停技能调度器以节省CPU资源"""
@@ -418,6 +435,11 @@ class InputHandler:
         """获取当前按下的优先级按键"""
         return self._priority_keys_pressed.copy()
 
+    def set_priority_key_delay(self, delay_ms: int):
+        """设置优先级按键延迟时间（毫秒）"""
+        self._priority_key_delay = max(0, delay_ms) / 1000.0  # 转换为秒，确保非负
+        LOG_INFO(f"[输入处理器] 优先级按键延迟已设置为: {delay_ms}ms")
+
     def _setup_event_subscriptions(self):
         """订阅事件以接收状态更新"""
         event_bus.subscribe("engine:status_updated", self._on_status_updated)
@@ -448,10 +470,12 @@ class InputHandler:
         if priority_keys_config:
             enabled = priority_keys_config.get("enabled", True)
             keys = priority_keys_config.get("keys", ["space", "right_mouse"])
+            delay = priority_keys_config.get("delay_ms", 50)  # 默认50毫秒延迟
             
             self.set_dodge_mode(enabled)
             self.set_priority_keys(keys)
-            LOG_INFO(f"[输入处理器] 优先级按键配置已更新: 启用={enabled}, 按键={keys}")
+            self.set_priority_key_delay(delay)
+            LOG_INFO(f"[输入处理器] 优先级按键配置已更新: 启用={enabled}, 按键={keys}, 延迟={delay}ms")
         
         # Update timing from global config
         self.key_press_duration = global_config.get("key_press_duration", 10) / 1000.0
@@ -499,6 +523,46 @@ class InputHandler:
         
         LOG_INFO("[输入处理器] 资源清理完成")
 
+    def _should_deduplicate_key(self, key: str) -> bool:
+        """判断按键是否应该去重
+        
+        Args:
+            key: 按键字符串，可能是单个按键或序列（如 "delay50,q"）
+        
+        Returns:
+            bool: True表示应该去重，False表示允许重复
+        """
+        key_lower = key.lower()
+        
+        # 🎯 序列处理：如果包含逗号，检查序列中是否有不去重的元素
+        if ',' in key_lower:
+            key_sequence = [k.strip() for k in key_lower.split(',') if k.strip()]
+            for individual_key in key_sequence:
+                # 如果序列中有任何一个元素不需要去重，整个序列就不去重
+                if individual_key.startswith("delay"):
+                    return False
+                if individual_key in ["1", "2"] and hasattr(self, '_is_emergency_key'):
+                    return False
+                if individual_key in ["lbutton", "leftclick"]:
+                    return False
+            # 序列中所有元素都需要去重时，整个序列才去重
+            return True
+        
+        # 单个按键的去重逻辑（保持原有逻辑）
+        # 延迟指令不去重
+        if key_lower.startswith("delay"):
+            return False
+            
+        # 紧急药剂按键不去重（保证生存）
+        if key_lower in ["1", "2"] and hasattr(self, '_is_emergency_key'):
+            return False
+            
+        # 鼠标左键在特定情况下不去重（如连击技能）
+        if key_lower in ["lbutton", "leftclick"]:
+            return False
+            
+        return True
+
     def execute_key(self, key: str, priority: bool = False):
         """执行按键请求（通过队列异步处理）
 
@@ -515,14 +579,9 @@ class InputHandler:
         if not key:
             return
 
-        key_lower = key.lower()
-        # 对于非延迟和非鼠标左键的按键，进行去重检查
-        if not key_lower.startswith("delay") and key_lower not in [
-            "lbutton",
-            "leftclick",
-        ]:
-            if key in self._queued_keys_set:
-                return  # O(1) 复杂度去重
+        # 统一的去重检查
+        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
+            return  # O(1) 复杂度去重
 
         try:
             if priority:
@@ -561,50 +620,111 @@ class InputHandler:
         except Full:
             LOG_ERROR("[输入队列] 紧急队列已满，MP药剂被丢弃！")
 
+    def _check_priority_mode_block(self) -> bool:
+        """快速优先级模式检查 - 无日志版本"""
+        return self.is_priority_mode_active()
+
     def execute_skill_high(self, key: str):
-        """执行高优先级技能按键"""
-        if not key:
+        """执行高优先级技能按键 - 支持序列 delay50,q"""
+        if not key or self._check_priority_mode_block():
             return
         
-        # 🎯 优先级模式检查：有优先级按键按下时技能不响应
-        if self.is_priority_mode_active():
-            return
-            
-        try:
-            self._key_queue.put(key, priority='high', block=False)
-            self._queued_keys_set.add(key)
-        except Full:
-            LOG_ERROR("[输入队列] 高优先级队列已满，技能被丢弃。")
+        # 🎯 整体序列去重检查：序列作为一个整体进行去重判断
+        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
+            return  # 整个序列已经在队列中，跳过
+        
+        # 🎯 支持逗号分隔的按键序列
+        if ',' in key:
+            key_sequence = [k.strip() for k in key.split(',') if k.strip()]
+            for i, individual_key in enumerate(key_sequence):
+                try:
+                    self._key_queue.put(individual_key, priority='high', block=False)
+                    # 在最后一个元素后添加清理标记
+                    if i == len(key_sequence) - 1 and self._should_deduplicate_key(key):
+                        cleanup_marker = f"__cleanup_sequence__{key}"
+                        self._key_queue.put(cleanup_marker, priority='high', block=False)
+                except Full:
+                    LOG_ERROR("[输入队列] 高优先级队列已满，序列按键被丢弃。")
+                    break
+            # 将整个序列字符串加入去重集合
+            if self._should_deduplicate_key(key):
+                self._queued_keys_set.add(key)
+        else:
+            # 原有的单个按键逻辑
+            try:
+                self._key_queue.put(key, priority='high', block=False)
+                if self._should_deduplicate_key(key):
+                    self._queued_keys_set.add(key)
+            except Full:
+                LOG_ERROR("[输入队列] 高优先级队列已满，技能被丢弃。")
 
     def execute_skill_normal(self, key: str):
-        """执行普通技能按键"""
-        if not key:
+        """执行普通技能按键 - 支持序列 delay50,q"""
+        if not key or self._check_priority_mode_block():
             return
         
-        # 🎯 优先级模式检查：有优先级按键按下时技能不响应
-        if self.is_priority_mode_active():
-            return
-            
-        try:
-            self._key_queue.put(key, priority='normal', block=False)
-            self._queued_keys_set.add(key)
-        except Full:
-            LOG_ERROR("[输入队列] 普通队列已满，技能被丢弃。")
+        # 🎯 整体序列去重检查：序列作为一个整体进行去重判断
+        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
+            return  # 整个序列已经在队列中，跳过
+        
+        # 🎯 支持逗号分隔的按键序列
+        if ',' in key:
+            key_sequence = [k.strip() for k in key.split(',') if k.strip()]
+            for i, individual_key in enumerate(key_sequence):
+                try:
+                    self._key_queue.put(individual_key, priority='normal', block=False)
+                    # 在最后一个元素后添加清理标记
+                    if i == len(key_sequence) - 1 and self._should_deduplicate_key(key):
+                        cleanup_marker = f"__cleanup_sequence__{key}"
+                        self._key_queue.put(cleanup_marker, priority='normal', block=False)
+                except Full:
+                    LOG_ERROR("[输入队列] 普通队列已满，序列按键被丢弃。")
+                    break
+            # 将整个序列字符串加入去重集合
+            if self._should_deduplicate_key(key):
+                self._queued_keys_set.add(key)
+        else:
+            # 原有的单个按键逻辑
+            try:
+                self._key_queue.put(key, priority='normal', block=False)
+                if self._should_deduplicate_key(key):
+                    self._queued_keys_set.add(key)
+            except Full:
+                LOG_ERROR("[输入队列] 普通队列已满，技能被丢弃。")
 
     def execute_utility(self, key: str):
-        """执行辅助功能按键 - 低优先级"""
-        if not key:
+        """执行辅助功能按键 - 低优先级 - 支持序列"""
+        if not key or self._check_priority_mode_block():
             return
         
-        # 🎯 优先级模式检查：有优先级按键按下时辅助功能也不响应
-        if self.is_priority_mode_active():
-            return
-            
-        try:
-            self._key_queue.put(key, priority='low', block=False)
-            self._queued_keys_set.add(key)
-        except Full:
-            LOG_ERROR("[输入队列] 低优先级队列已满，辅助功能被丢弃。")
+        # 🎯 整体序列去重检查：序列作为一个整体进行去重判断
+        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
+            return  # 整个序列已经在队列中，跳过
+        
+        # 🎯 支持逗号分隔的按键序列
+        if ',' in key:
+            key_sequence = [k.strip() for k in key.split(',') if k.strip()]
+            for i, individual_key in enumerate(key_sequence):
+                try:
+                    self._key_queue.put(individual_key, priority='low', block=False)
+                    # 在最后一个元素后添加清理标记
+                    if i == len(key_sequence) - 1 and self._should_deduplicate_key(key):
+                        cleanup_marker = f"__cleanup_sequence__{key}"
+                        self._key_queue.put(cleanup_marker, priority='low', block=False)
+                except Full:
+                    LOG_ERROR("[输入队列] 低优先级队列已满，序列按键被丢弃。")
+                    break
+            # 将整个序列字符串加入去重集合
+            if self._should_deduplicate_key(key):
+                self._queued_keys_set.add(key)
+        else:
+            # 原有的单个按键逻辑
+            try:
+                self._key_queue.put(key, priority='low', block=False)
+                if self._should_deduplicate_key(key):
+                    self._queued_keys_set.add(key)
+            except Full:
+                LOG_ERROR("[输入队列] 低优先级队列已满，辅助功能被丢弃。")
 
     def get_queue_length(self) -> int:
         """获取当前队列长度"""
@@ -632,6 +752,12 @@ class InputHandler:
             
             try:
                 key_lower = key_to_execute.lower()
+                
+                # 🎯 处理序列清理标记
+                if key_lower.startswith("__cleanup_sequence__"):
+                    sequence_key = key_to_execute[len("__cleanup_sequence__"):]
+                    self._queued_keys_set.discard(sequence_key)
+                    continue
                 
                 # 处理延迟指令
                 if key_lower.startswith("delay"):
