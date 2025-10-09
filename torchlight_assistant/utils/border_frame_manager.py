@@ -354,6 +354,38 @@ class BorderFrameManager:
             LOG_ERROR(f"从帧中获取像素颜色时异常: {e}")
             return None
 
+    def _create_enhanced_color_mask(self, hsv_region: np.ndarray, template_hsv: np.ndarray, resource_type: str, h_tolerance: int, s_tolerance: int, v_tolerance: int) -> np.ndarray:
+        """创建增强的颜色掩码，支持红色双区间处理"""
+        # 对于HP资源，使用红色双区间处理
+        if resource_type == 'hp':
+            # 红色的H值分布在0-10和170-179两个区间
+            template_h = template_hsv[:, :, 0]
+            region_h = hsv_region[:, :, 0]
+            
+            # 区间1: 0-10
+            h_match1 = np.abs(region_h.astype(np.int16) - template_h.astype(np.int16)) <= h_tolerance
+            
+            # 区间2: 170-179 (处理跨越0度的情况)
+            h_diff = np.abs(region_h.astype(np.int16) - template_h.astype(np.int16))
+            h_diff_wrap = np.minimum(h_diff, 180 - h_diff)
+            h_match2 = h_diff_wrap <= h_tolerance
+            
+            h_match = h_match1 | h_match2
+        else:
+            # 其他资源使用标准HSV差值匹配
+            h_diff = np.abs(hsv_region[:, :, 0].astype(np.int16) - template_hsv[:, :, 0].astype(np.int16))
+            h_diff = np.minimum(h_diff, 180 - h_diff)
+            h_match = h_diff <= h_tolerance
+        
+        # S和V通道使用标准匹配
+        s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
+        v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
+        
+        s_match = s_diff <= s_tolerance
+        v_match = v_diff <= v_tolerance
+        
+        return h_match & s_match & v_match
+
     def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0, color_config: Optional[dict] = None) -> float:
         """使用半圆形蒙版和连续段检测算法，返回匹配百分比（0.0-100.0）"""
         try:
@@ -403,16 +435,20 @@ class BorderFrameManager:
                 region = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
             hsv_region = cv2.cvtColor(region, cv2.COLOR_BGR2HSV)
 
-            # --- 半圆蒙版逻辑 ---
-            circular_mask = np.zeros((radius * 2, radius * 2), dtype=np.uint8)
-            cv2.circle(circular_mask, (radius, radius), radius, (255,), -1)
+            # --- 半圆蒙版逻辑（优化版）---
+            # 使用更精确的圆形掩码创建
+            y_indices, x_indices = np.ogrid[:radius*2, :radius*2]
+            center_coord = float(radius)
+            dist_from_center = np.sqrt((x_indices - center_coord) ** 2 + (y_indices - center_coord) ** 2)
+            circular_mask = (dist_from_center <= radius).astype(np.uint8) * 255
 
+            # 创建半圆掩码
             half_mask = np.zeros_like(circular_mask)
             width, height = radius * 2, radius * 2
             if resource_type == 'hp':  # HP的右半边被干扰，只分析左半边
-                cv2.rectangle(half_mask, (0, 0), (width // 2, height), 255, -1)
+                half_mask[:, :width // 2] = 255
             elif resource_type == 'mp':  # MP的左半边被干扰，只分析右半边
-                cv2.rectangle(half_mask, (width // 2, 0), (width, height), 255, -1)
+                half_mask[:, width // 2:] = 255
 
             final_mask = cv2.bitwise_and(circular_mask, half_mask)
             # --- 结束 ---
@@ -421,21 +457,15 @@ class BorderFrameManager:
             s_tolerance = cached_template.get("s_tolerance", 20)
             v_tolerance = cached_template.get("v_tolerance", 20)
 
-            h_diff = np.abs(hsv_region[:, :, 0].astype(np.int16) - template_hsv[:, :, 0].astype(np.int16))
-            h_diff = np.minimum(h_diff, 180 - h_diff)
-            s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
-            v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
+            # 使用增强的颜色匹配（支持红色双区间）
+            pixel_match = self._create_enhanced_color_mask(
+                hsv_region, template_hsv, resource_type, h_tolerance, s_tolerance, v_tolerance
+            )
 
-            # 修复：明确分解布尔比较操作
-            h_match = h_diff <= h_tolerance
-            s_match = s_diff <= s_tolerance
-            v_match = v_diff <= v_tolerance
-            pixel_match = h_match & s_match & v_match
-
-            # --- 学习别人的连续段检测算法 ---
+            # --- 优化的连续段检测算法 ---
             # 计算每行在蒙版内的匹配像素数
             masked_match = cv2.bitwise_and(pixel_match.astype(np.uint8), pixel_match.astype(np.uint8), mask=final_mask)
-            vertical_sum = np.sum(masked_match, axis=1)  # 修复：明确指定axis参数
+            vertical_sum = np.sum(masked_match, axis=1)
 
             # 计算每行的有效像素阈值（蒙版内像素数的60%）
             mask_vertical_sum = np.sum(final_mask > 0, axis=1)
@@ -588,22 +618,16 @@ class BorderFrameManager:
             s_tolerance = cached_template.get("s_tolerance", 20)
             v_tolerance = cached_template.get("v_tolerance", 20)
 
-            # 逐像素HSV比较
-            h_diff = np.abs(hsv_region[:, :, 0].astype(np.int16) - template_hsv[:, :, 0].astype(np.int16))
-            h_diff = np.minimum(h_diff, 180 - h_diff) # 处理H色相的环形特性
+            # 使用增强的颜色匹配（支持红色双区间）
+            # 从resource_name中提取资源类型
+            resource_type = resource_name.replace('_region', '') if '_region' in resource_name else 'unknown'
+            pixel_match = self._create_enhanced_color_mask(
+                hsv_region, template_hsv, resource_type, h_tolerance, s_tolerance, v_tolerance
+            )
 
-            s_diff = np.abs(hsv_region[:, :, 1].astype(np.int16) - template_hsv[:, :, 1].astype(np.int16))
-            v_diff = np.abs(hsv_region[:, :, 2].astype(np.int16) - template_hsv[:, :, 2].astype(np.int16))
-
-            # 分解布尔比较操作以避免数组比较错误
-            h_match = h_diff <= h_tolerance
-            s_match = s_diff <= s_tolerance
-            v_match = v_diff <= v_tolerance
-            pixel_match = h_match & s_match & v_match
-
-            # --- 学习别人的连续段检测算法 ---
+            # --- 优化的连续段检测算法 ---
             # 计算每行的匹配像素数
-            vertical_sum = np.sum(pixel_match, axis=1)  # 明确指定axis参数
+            vertical_sum = np.sum(pixel_match, axis=1)
 
             # 判断每行是否"有效"（60%以上的像素是目标颜色）
             row_threshold = t_width * 0.6

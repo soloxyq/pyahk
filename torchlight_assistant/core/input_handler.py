@@ -122,8 +122,8 @@ class InputHandler:
         }
         # --- 新增：优先级按键状态监控 ---
         self._priority_keys_pressed = set()  # 当前按下的优先级按键
-        self._priority_keys_config = {'space', 'right_mouse'}  # 默认优先级按键配置
-        self._priority_key_delay = 0.05  # 优先级按键前置延迟（秒）- 确保游戏响应
+        self._priority_keys_config = {'space': 50, 'right_mouse': 50}  # 默认优先级按键配置（按键->延迟ms）
+        self._priority_key_delay = 0.05  # 默认优先级按键前置延迟（秒）- 保持向后兼容
         self._keyboard_listener = None
         self._mouse_listener = None
         self._priority_mode_enabled = True  # 是否启用优先级模式
@@ -165,7 +165,9 @@ class InputHandler:
             key_name = self._get_key_name(key)
             
             # 只处理配置的优先级按键，忽略其他所有按键
-            if key_name in self._priority_keys_config:
+            # 支持字典和集合格式的配置检查
+            if (isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config) or \
+               (isinstance(self._priority_keys_config, set) and key_name in self._priority_keys_config):
                 was_empty = len(self._priority_keys_pressed) == 0
                 self._priority_keys_pressed.add(key_name)
                 
@@ -185,7 +187,9 @@ class InputHandler:
             key_name = self._get_key_name(key)
             
             # 只处理配置的优先级按键，忽略其他所有按键
-            if key_name in self._priority_keys_config:
+            # 支持字典和集合格式的配置检查
+            if (isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config) or \
+               (isinstance(self._priority_keys_config, set) and key_name in self._priority_keys_config):
                 self._priority_keys_pressed.discard(key_name)
                 
                 # 🚀 如果所有优先级按键都释放了，恢复技能调度器
@@ -201,7 +205,9 @@ class InputHandler:
             button_name = self._get_button_name(button)
             
             # 只处理配置的优先级按键，忽略其他所有鼠标按键
-            if button_name in self._priority_keys_config:
+            # 支持字典和集合格式的配置检查
+            if (isinstance(self._priority_keys_config, dict) and button_name in self._priority_keys_config) or \
+               (isinstance(self._priority_keys_config, set) and button_name in self._priority_keys_config):
                 if pressed:
                     was_empty = len(self._priority_keys_pressed) == 0
                     self._priority_keys_pressed.add(button_name)
@@ -223,10 +229,16 @@ class InputHandler:
             LOG_ERROR(f"[优先级按键] _on_mouse_click异常: {e}")
 
     def _execute_priority_key_with_delay(self, key_name: str):
-        """执行优先级按键 - 添加延迟确保游戏响应"""
+        """执行优先级按键 - 使用该按键的专属延迟"""
         try:
+            # 获取该按键的专属延迟，如果是字典格式则使用，否则使用默认延迟
+            if isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config:
+                delay_ms = self._priority_keys_config[key_name]
+            else:
+                delay_ms = int(self._priority_key_delay * 1000)  # 使用默认延迟作为后备
+            
             # 使用紧急优先级，添加延迟后发送按键
-            delay_command = f"delay={int(self._priority_key_delay * 1000)}"  # 转换为毫秒
+            delay_command = f"delay{delay_ms}"  # 使用新的delayXX格式
             self._key_queue.put(delay_command, priority='emergency', block=False)
             self._key_queue.put(key_name, priority='emergency', block=False)
         except Full:
@@ -334,16 +346,38 @@ class InputHandler:
             self._stop_priority_listeners()
         LOG_INFO(f"[输入处理器] 优先级模式已 {'开启' if enabled else '关闭'}")
 
-    def set_priority_keys(self, keys_list: list):
-        """设置优先级按键列表
+    def set_priority_keys(self, keys_config):
+        """设置优先级按键配置
         
         Args:
-            keys_list: 按键名称列表，如 ['space', 'right_mouse', 'ctrl']
+            keys_config: 按键配置，可以是：
+                - dict: {key_name: delay_ms} 格式，如 {'space': 50, 'right_mouse': 100}
+                - list: [key_name] 格式，如 ['space', 'right_mouse']（使用默认延迟）
         """
-        # 标准化所有按键名称
-        normalized_keys = {self._normalize_key_name(key) for key in keys_list if key}
-        self._priority_keys_config = normalized_keys
-        LOG_INFO(f"[输入处理器] 优先级按键已更新: {self._priority_keys_config}")
+        if isinstance(keys_config, dict):
+            # 新格式：字典包含延迟配置
+            normalized_config = {}
+            for key, delay in keys_config.items():
+                normalized_key = self._normalize_key_name(key)
+                if normalized_key:
+                    normalized_config[normalized_key] = max(0, int(delay))
+            self._priority_keys_config = normalized_config
+            LOG_INFO(f"[输入处理器] 优先级按键已更新: {self._priority_keys_config}")
+        else:
+            # 兼容旧格式：列表格式，使用默认延迟
+            normalized_keys = {self._normalize_key_name(key) for key in keys_config if key}
+            # 转换为新的字典格式，使用默认延迟50ms
+            default_delay = int(self._priority_key_delay * 1000)
+            self._priority_keys_config = {key: default_delay for key in normalized_keys}
+            LOG_INFO(f"[输入处理器] 优先级按键已更新（兼容模式）: {self._priority_keys_config}")
+
+    def set_priority_keys_config(self, keys_config: Dict[str, int]):
+        """设置优先级按键配置（新方法，明确支持字典格式）
+        
+        Args:
+            keys_config: 按键配置字典 {key_name: delay_ms}
+        """
+        self.set_priority_keys(keys_config)
 
     def _stop_priority_listeners(self):
         """停止优先级按键监听器"""
@@ -418,13 +452,23 @@ class InputHandler:
         priority_keys_config = global_config.get("priority_keys", {})
         if priority_keys_config:
             enabled = priority_keys_config.get("enabled", True)
-            keys = priority_keys_config.get("keys", ["space", "right_mouse"])
-            delay = priority_keys_config.get("delay_ms", 50)  # 默认50毫秒延迟
+            
+            # 支持新的keys_config格式和旧的keys+delay_ms格式
+            if "keys_config" in priority_keys_config:
+                # 新格式：每个按键单独延迟
+                keys_config = priority_keys_config["keys_config"]
+                self.set_priority_keys(keys_config)
+                LOG_INFO(f"[输入处理器] 优先级按键配置已更新（新格式）: 启用={enabled}, 配置={keys_config}")
+            else:
+                # 旧格式：全局延迟
+                keys = priority_keys_config.get("keys", ["space", "right_mouse"])
+                delay = priority_keys_config.get("delay_ms", 50)
+                
+                self.set_priority_keys(keys)
+                self.set_priority_key_delay(delay)
+                LOG_INFO(f"[输入处理器] 优先级按键配置已更新（兼容格式）: 启用={enabled}, 按键={keys}, 延迟={delay}ms")
             
             self.set_dodge_mode(enabled)
-            self.set_priority_keys(keys)
-            self.set_priority_key_delay(delay)
-            LOG_INFO(f"[输入处理器] 优先级按键配置已更新: 启用={enabled}, 按键={keys}, 延迟={delay}ms")
         
         # Update timing from global config
         self.key_press_duration = global_config.get("key_press_duration", 10) / 1000.0
