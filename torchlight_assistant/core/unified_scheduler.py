@@ -56,7 +56,7 @@ class UnifiedScheduler:
         interval: float,
         callback: Callable,
         args: tuple = (),
-    kwargs: Optional[dict] = None,
+        kwargs: Optional[dict] = None,
         start_immediately: bool = False,
     ) -> bool:
         """添加定时任务
@@ -72,12 +72,14 @@ class UnifiedScheduler:
         Returns:
             是否添加成功
         """
+        if interval <= 0:
+            LOG_ERROR(f"[统一调度器] 任务 '{task_id}' 间隔必须大于0: {interval}")
+            return False
+            
         try:
             with self._condition:
                 if task_id in self._tasks:
                     return False
-
-                # 移除高频调试输出以减少日志噪音
 
                 # 基于 monotonic 计算下次执行时间
                 next_run = self._now() + (0.01 if start_immediately else interval)

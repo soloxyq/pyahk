@@ -31,7 +31,13 @@ class MultiPriorityQueue:
         self._cond = threading.Condition()
 
     def _total_size_unlocked(self) -> int:
+        """快速计算总大小 - 避免重复遍历"""
         return sum(len(q) for q in self._queues.values())
+    
+    def get_priority_stats(self) -> dict:
+        """获取各优先级队列的统计信息 - 用于调试"""
+        with self._cond:
+            return {priority: len(queue) for priority, queue in self._queues.items()}
 
     def put(self, item: Any, priority: str = 'normal', block: bool = False, timeout: Optional[float] = None):
         """放入元素
@@ -66,12 +72,15 @@ class MultiPriorityQueue:
             self._cond.notify()
 
     def get(self, block: bool = True, timeout: Optional[float] = None):
-        """取出元素 - 按优先级顺序"""
+        """取出元素 - 按优先级顺序，优化版本"""
         with self._cond:
-            if not block:
-                if self._total_size_unlocked() == 0:
-                    raise Empty
-            else:
+            # 快速检查：先检查是否有元素，避免不必要的等待逻辑
+            total_size = self._total_size_unlocked()
+            
+            if not block and total_size == 0:
+                raise Empty
+                
+            if block and total_size == 0:
                 if timeout is None:
                     while self._total_size_unlocked() == 0:
                         self._cond.wait()
@@ -83,10 +92,11 @@ class MultiPriorityQueue:
                             raise Empty
                         self._cond.wait(remaining)
 
-            # 按优先级顺序取出
+            # 优化：按优先级顺序取出，避免多次检查空队列
             for priority in self._priority_order:
-                if self._queues[priority]:
-                    return self._queues[priority].popleft()
+                queue = self._queues[priority]
+                if queue:  # 只检查非空队列
+                    return queue.popleft()
             
             raise Empty  # 理论上不会到达这里
 

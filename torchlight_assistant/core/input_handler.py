@@ -111,65 +111,14 @@ class InputHandler:
             "ahk_exe": None,
         }
 
-        # 按键映射 - 支持常用游戏按键
-        self.key_mapping = {
-            "a": "a",
-            "b": "b",
-            "c": "c",
-            "d": "d",
-            "e": "e",
-            "f": "f",
-            "g": "g",
-            "h": "h",
-            "i": "i",
-            "j": "j",
-            "k": "k",
-            "l": "l",
-            "m": "m",
-            "n": "n",
-            "o": "o",
-            "p": "p",
-            "q": "q",
-            "r": "r",
-            "s": "s",
-            "t": "t",
-            "u": "u",
-            "v": "v",
-            "w": "w",
-            "x": "x",
-            "y": "y",
-            "z": "z",
-            "f1": Key.f1,
-            "f2": Key.f2,
-            "f3": Key.f3,
-            "f4": Key.f4,
-            "f5": Key.f5,
-            "f6": Key.f6,
-            "f7": Key.f7,
-            "f8": Key.f8,
-            "f9": Key.f9,
-            "f10": Key.f10,
-            "f11": Key.f11,
-            "f12": Key.f12,
-            "space": Key.space,
-            "enter": Key.enter,
-            "shift": Key.shift,
-            "ctrl": Key.ctrl,
-            "alt": Key.alt,
-            "tab": Key.tab,
-            "esc": Key.esc,
-            "backspace": Key.backspace,
-            "delete": Key.delete,
-            "1": "1",
-            "2": "2",
-            "3": "3",
-            "4": "4",
-            "5": "5",
-            "6": "6",
-            "7": "7",
-            "8": "8",
-            "9": "9",
-            "0": "0",
+        # 高效按键映射 - 只映射特殊键，普通字符直接使用
+        self.special_key_mapping = {
+            "f1": Key.f1, "f2": Key.f2, "f3": Key.f3, "f4": Key.f4,
+            "f5": Key.f5, "f6": Key.f6, "f7": Key.f7, "f8": Key.f8,
+            "f9": Key.f9, "f10": Key.f10, "f11": Key.f11, "f12": Key.f12,
+            "space": Key.space, "enter": Key.enter, "shift": Key.shift,
+            "ctrl": Key.ctrl, "alt": Key.alt, "tab": Key.tab,
+            "esc": Key.esc, "backspace": Key.backspace, "delete": Key.delete,
         }
         # --- 新增：优先级按键状态监控 ---
         self._priority_keys_pressed = set()  # 当前按下的优先级按键
@@ -624,11 +573,8 @@ class InputHandler:
         """快速优先级模式检查 - 无日志版本"""
         return self.is_priority_mode_active()
 
-    def execute_skill_high(self, key: str):
-        """执行高优先级技能按键 - 支持序列 delay50,q"""
-        if not key or self._check_priority_mode_block():
-            return
-        
+    def _execute_key_sequence(self, key: str, priority: str, error_msg: str):
+        """通用的按键序列执行逻辑"""
         # 🎯 整体序列去重检查：序列作为一个整体进行去重判断
         if self._should_deduplicate_key(key) and key in self._queued_keys_set:
             return  # 整个序列已经在队列中，跳过
@@ -638,13 +584,13 @@ class InputHandler:
             key_sequence = [k.strip() for k in key.split(',') if k.strip()]
             for i, individual_key in enumerate(key_sequence):
                 try:
-                    self._key_queue.put(individual_key, priority='high', block=False)
+                    self._key_queue.put(individual_key, priority=priority, block=False)
                     # 在最后一个元素后添加清理标记
                     if i == len(key_sequence) - 1 and self._should_deduplicate_key(key):
                         cleanup_marker = f"__cleanup_sequence__{key}"
-                        self._key_queue.put(cleanup_marker, priority='high', block=False)
+                        self._key_queue.put(cleanup_marker, priority=priority, block=False)
                 except Full:
-                    LOG_ERROR("[输入队列] 高优先级队列已满，序列按键被丢弃。")
+                    LOG_ERROR(error_msg)
                     break
             # 将整个序列字符串加入去重集合
             if self._should_deduplicate_key(key):
@@ -652,79 +598,29 @@ class InputHandler:
         else:
             # 原有的单个按键逻辑
             try:
-                self._key_queue.put(key, priority='high', block=False)
+                self._key_queue.put(key, priority=priority, block=False)
                 if self._should_deduplicate_key(key):
                     self._queued_keys_set.add(key)
             except Full:
-                LOG_ERROR("[输入队列] 高优先级队列已满，技能被丢弃。")
+                LOG_ERROR(error_msg)
+
+    def execute_skill_high(self, key: str):
+        """执行高优先级技能按键 - 支持序列 delay50,q"""
+        if not key or self._check_priority_mode_block():
+            return
+        self._execute_key_sequence(key, 'high', "[输入队列] 高优先级队列已满，序列按键被丢弃。")
 
     def execute_skill_normal(self, key: str):
         """执行普通技能按键 - 支持序列 delay50,q"""
         if not key or self._check_priority_mode_block():
             return
-        
-        # 🎯 整体序列去重检查：序列作为一个整体进行去重判断
-        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
-            return  # 整个序列已经在队列中，跳过
-        
-        # 🎯 支持逗号分隔的按键序列
-        if ',' in key:
-            key_sequence = [k.strip() for k in key.split(',') if k.strip()]
-            for i, individual_key in enumerate(key_sequence):
-                try:
-                    self._key_queue.put(individual_key, priority='normal', block=False)
-                    # 在最后一个元素后添加清理标记
-                    if i == len(key_sequence) - 1 and self._should_deduplicate_key(key):
-                        cleanup_marker = f"__cleanup_sequence__{key}"
-                        self._key_queue.put(cleanup_marker, priority='normal', block=False)
-                except Full:
-                    LOG_ERROR("[输入队列] 普通队列已满，序列按键被丢弃。")
-                    break
-            # 将整个序列字符串加入去重集合
-            if self._should_deduplicate_key(key):
-                self._queued_keys_set.add(key)
-        else:
-            # 原有的单个按键逻辑
-            try:
-                self._key_queue.put(key, priority='normal', block=False)
-                if self._should_deduplicate_key(key):
-                    self._queued_keys_set.add(key)
-            except Full:
-                LOG_ERROR("[输入队列] 普通队列已满，技能被丢弃。")
+        self._execute_key_sequence(key, 'normal', "[输入队列] 普通队列已满，序列按键被丢弃。")
 
     def execute_utility(self, key: str):
         """执行辅助功能按键 - 低优先级 - 支持序列"""
         if not key or self._check_priority_mode_block():
             return
-        
-        # 🎯 整体序列去重检查：序列作为一个整体进行去重判断
-        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
-            return  # 整个序列已经在队列中，跳过
-        
-        # 🎯 支持逗号分隔的按键序列
-        if ',' in key:
-            key_sequence = [k.strip() for k in key.split(',') if k.strip()]
-            for i, individual_key in enumerate(key_sequence):
-                try:
-                    self._key_queue.put(individual_key, priority='low', block=False)
-                    # 在最后一个元素后添加清理标记
-                    if i == len(key_sequence) - 1 and self._should_deduplicate_key(key):
-                        cleanup_marker = f"__cleanup_sequence__{key}"
-                        self._key_queue.put(cleanup_marker, priority='low', block=False)
-                except Full:
-                    LOG_ERROR("[输入队列] 低优先级队列已满，序列按键被丢弃。")
-                    break
-            # 将整个序列字符串加入去重集合
-            if self._should_deduplicate_key(key):
-                self._queued_keys_set.add(key)
-        else:
-            # 原有的单个按键逻辑
-            try:
-                self._key_queue.put(key, priority='low', block=False)
-                if self._should_deduplicate_key(key):
-                    self._queued_keys_set.add(key)
-            except Full:
-                LOG_ERROR("[输入队列] 低优先级队列已满，辅助功能被丢弃。")
+        self._execute_key_sequence(key, 'low', "[输入队列] 低优先级队列已满，序列按键被丢弃。")
 
     def get_queue_length(self) -> int:
         """获取当前队列长度"""
@@ -883,9 +779,11 @@ class InputHandler:
         try:
             key_lower = key_str.lower()
 
-            # 获取按键对象
-            if key_lower in self.key_mapping:
-                key_obj = self.key_mapping[key_lower]
+            # 获取按键对象 - 优化：直接检查特殊键，普通字符直接使用
+            if key_lower in self.special_key_mapping:
+                key_obj = self.special_key_mapping[key_lower]
+            elif len(key_lower) == 1 and key_lower.isalnum():
+                key_obj = key_lower  # 普通字符直接使用
             else:
                 return False
 
@@ -965,9 +863,11 @@ class InputHandler:
             key_lower = key_str.lower()
             modifier_lower = modifier.lower()
 
-            # 获取按键对象
-            if key_lower in self.key_mapping:
-                key_obj = self.key_mapping[key_lower]
+            # 获取按键对象 - 优化：直接检查特殊键，普通字符直接使用
+            if key_lower in self.special_key_mapping:
+                key_obj = self.special_key_mapping[key_lower]
+            elif len(key_lower) == 1 and key_lower.isalnum():
+                key_obj = key_lower  # 普通字符直接使用
             else:
                 return False
 

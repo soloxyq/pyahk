@@ -43,20 +43,16 @@ class SkillManager:
         self._is_running = False
         self._is_paused = False
 
-        # 添加缺失的属性
+        # 线程安全配置
         self._config_lock = threading.Lock()
         self._resource_condition_history = {}
         self._sequence_index = 0
         self._required_consecutive_checks = 2
-        # 跟踪已按住的键（一次性动作管理）
-        self._held_hold_keys = set()
-
+        
         # 按住键状态跟踪（一次性按下/释放，不在循环中）
         self._held_hold_keys = set()
 
         # 自主调度相关属性
-        self._scheduler_threads = {}
-        self._scheduler_stop_events = {}
         self._global_config = {}
 
         # 统一调度器
