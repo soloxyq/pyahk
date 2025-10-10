@@ -14,6 +14,12 @@ WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
 WM_SYSKEYDOWN = 0x0104
 WM_SYSKEYUP = 0x0105
+WM_LBUTTONDOWN = 0x0201    # 左键按下
+WM_LBUTTONUP = 0x0202      # 左键释放
+WM_RBUTTONDOWN = 0x0204    # 右键按下
+WM_RBUTTONUP = 0x0205      # 右键释放
+WM_MBUTTONDOWN = 0x0207    # 中键按下
+WM_MBUTTONUP = 0x0208      # 中键释放
 WM_XBUTTONDOWN = 0x020B
 WM_XBUTTONUP = 0x020C
 HC_ACTION = 0
@@ -48,8 +54,11 @@ VK_CODES = {
     "numlock": 0x90, "scrolllock": 0x91,
 
     # Mouse buttons (for hook processing, not standard VK_CODEs for RegisterHotkey)
-    "xbutton1": 0x05,  # 鼠标侧键1
-    "xbutton2": 0x06,  # 鼠标侧键2
+    "left_mouse": 0x01,   # 鼠标左键
+    "right_mouse": 0x02,  # 鼠标右键
+    "middle_mouse": 0x04, # 鼠标中键
+    "xbutton1": 0x05,     # 鼠标侧键1
+    "xbutton2": 0x06,     # 鼠标侧键2
 }
 
 REVERSE_VK_CODES = {v: k for k, v in VK_CODES.items()}
@@ -210,18 +219,50 @@ class CtypesHotkeyManager:
             )
 
     def _low_level_mouse_proc(self, nCode, wParam, lParam):
-        """鼠标钩子处理程序，专门处理鼠标侧键"""
+        """鼠标钩子处理程序，处理所有鼠标按键事件"""
         try:
             if nCode >= 0:
                 mouse_struct = ctypes.cast(
                     lParam, ctypes.POINTER(self.MSLLHOOKSTRUCT)
                 ).contents
 
-                # 检查是否是鼠标侧键事件
-                if wParam == WM_XBUTTONDOWN:
-                    # 从mouseData中提取按键信息
+                vk_code = None
+                key_name = None
+                is_press = False
+
+                # 处理左键
+                if wParam == WM_LBUTTONDOWN:
+                    vk_code = VK_CODES.get("left_mouse")
+                    key_name = "left_mouse"
+                    is_press = True
+                elif wParam == WM_LBUTTONUP:
+                    vk_code = VK_CODES.get("left_mouse")
+                    key_name = "left_mouse"
+                    is_press = False
+
+                # 处理右键
+                elif wParam == WM_RBUTTONDOWN:
+                    vk_code = VK_CODES.get("right_mouse")
+                    key_name = "right_mouse"
+                    is_press = True
+                elif wParam == WM_RBUTTONUP:
+                    vk_code = VK_CODES.get("right_mouse")
+                    key_name = "right_mouse"
+                    is_press = False
+
+                # 处理中键
+                elif wParam == WM_MBUTTONDOWN:
+                    vk_code = VK_CODES.get("middle_mouse")
+                    key_name = "middle_mouse"
+                    is_press = True
+                elif wParam == WM_MBUTTONUP:
+                    vk_code = VK_CODES.get("middle_mouse")
+                    key_name = "middle_mouse"
+                    is_press = False
+
+                # 处理侧键
+                elif wParam == WM_XBUTTONDOWN or wParam == WM_XBUTTONUP:
                     mouse_data = mouse_struct.mouseData
-                    # 高位字节包含按键信息
                     button = (mouse_data >> 16) & 0xFFFF
 
                     if button == 1:  # XButton1
@@ -234,7 +275,11 @@ class CtypesHotkeyManager:
                         return ctypes.windll.user32.CallNextHookEx(
                             self.mouse_hook, nCode, wParam, lParam
                         )
+                    
+                    is_press = (wParam == WM_XBUTTONDOWN)
 
+                # 如果识别到鼠标按键事件，处理它
+                if vk_code is not None and key_name is not None:
                     should_suppress = False
                     if vk_code in self.suppress_keys:
                         should_suppress = True
@@ -245,40 +290,27 @@ class CtypesHotkeyManager:
                     ):
                         should_suppress = self.suppress_condition_callback(key_name)
 
-                    if key_name and key_name not in self.pressed_keys:
-                        self.pressed_keys.add(key_name)
-                        if (
-                            vk_code in self.key_events
-                            and self.key_events[vk_code]["on_press"]
-                        ):
-                            self.key_events[vk_code]["on_press"]()
+                    if is_press:
+                        # 按键按下
+                        if key_name not in self.pressed_keys:
+                            self.pressed_keys.add(key_name)
+                            if (
+                                vk_code in self.key_events
+                                and self.key_events[vk_code]["on_press"]
+                            ):
+                                self.key_events[vk_code]["on_press"]()
+                    else:
+                        # 按键释放
+                        if key_name in self.pressed_keys:
+                            self.pressed_keys.remove(key_name)
+                            if (
+                                vk_code in self.key_events
+                                and self.key_events[vk_code]["on_release"]
+                            ):
+                                self.key_events[vk_code]["on_release"]()
 
                     if should_suppress:
                         return 1
-
-                elif wParam == WM_XBUTTONUP:
-                    # 处理鼠标侧键释放事件
-                    mouse_data = mouse_struct.mouseData
-                    button = (mouse_data >> 16) & 0xFFFF
-
-                    if button == 1:  # XButton1
-                        vk_code = VK_CODES.get("xbutton1")
-                        key_name = "xbutton1"
-                    elif button == 2:  # XButton2
-                        vk_code = VK_CODES.get("xbutton2")
-                        key_name = "xbutton2"
-                    else:
-                        return ctypes.windll.user32.CallNextHookEx(
-                            self.mouse_hook, nCode, wParam, lParam
-                        )
-
-                    if key_name and key_name in self.pressed_keys:
-                        self.pressed_keys.remove(key_name)
-                        if (
-                            vk_code in self.key_events
-                            and self.key_events[vk_code]["on_release"]
-                        ):
-                            self.key_events[vk_code]["on_release"]()
 
             return ctypes.windll.user32.CallNextHookEx(
                 self.mouse_hook, nCode, wParam, lParam

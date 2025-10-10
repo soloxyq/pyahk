@@ -244,10 +244,15 @@
         },
         "priority_keys": {
             "enabled": true,
-            "keys_config": {
-                "space": 20,
-                "right_mouse": 20,
-                "e": 50
+            "special_keys": [
+                "space",
+                "right_mouse"
+            ],
+            "managed_keys": {
+                "e": {
+                    "target": "9",
+                    "delay": 50
+                }
             }
         },
         "skill_sequence": "Rbutton,q,Lbutton,Lbutton,Lbutton,Lbutton,Lbutton,LbuttonLbutton,Lbutton,Lbutton",

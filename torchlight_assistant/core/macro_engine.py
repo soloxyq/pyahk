@@ -140,8 +140,8 @@ class MacroEngine:
 
                 try:
                     event_bus.publish("engine:state_changed", new_state, old_state)
-                    # 在状态转换时，总是包含当前的原地模式状态，确保状态同步
-                    self._publish_status_update(stationary_mode=self._stationary_mode_active)
+                    # 在状态转换时，发布完整的状态更新
+                    self._publish_status_update()
                 except Exception as e:
                     LOG_ERROR(f"[状态转换] 事件发布异常: {e}")
                     import traceback
@@ -240,21 +240,14 @@ class MacroEngine:
 
         LOG_INFO("[状态转换] 子系统启动完成")
 
-    def _publish_status_update(
-        self,
-        stationary_mode: Optional[bool] = None,
-        force_move_active: Optional[bool] = None,
-    ):
+    def _publish_status_update(self):
+        """发布当前完整的状态信息，确保状态同步"""
         status_info = {
             "state": self._state,
             "queue_length": self.input_handler.get_queue_length(),
+            "stationary_mode": self._stationary_mode_active,
+            "force_move_active": self._force_move_active,
         }
-        
-        # 🔥 关键修复：总是发送当前完整状态，确保状态同步
-        # 使用内部状态变量，而不是参数值
-        status_info["stationary_mode"] = self._stationary_mode_active
-        status_info["force_move_active"] = self._force_move_active
-        
         event_bus.publish("engine:status_updated", status_info)
 
     def _update_osd_visibility(self):
@@ -533,7 +526,7 @@ class MacroEngine:
         """原地模式热键按下事件 - 切换模式"""
         # 无论当前状态如何，都允许切换原地模式
         self._stationary_mode_active = not self._stationary_mode_active
-        self._publish_status_update(stationary_mode=self._stationary_mode_active)
+        self._publish_status_update()
         if self._stationary_mode_active:
             LOG_INFO("[原地模式] 已激活")
         else:
@@ -546,13 +539,13 @@ class MacroEngine:
     def _on_force_move_key_press(self):
         """交互/强制移动热键按下事件 - 按住激活"""
         self._force_move_active = True
-        self._publish_status_update(force_move_active=True)
+        self._publish_status_update()
         LOG_INFO("[交互模式] 已激活")
 
     def _on_force_move_key_release(self):
         """交互/强制移动热键释放事件 - 松开取消"""
         self._force_move_active = False
-        self._publish_status_update(force_move_active=False)
+        self._publish_status_update()
         LOG_INFO("[交互模式] 已取消")
 
     def get_current_state(self) -> MacroState:

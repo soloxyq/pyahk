@@ -132,7 +132,7 @@ class InputHandler:
         self._ahk_hwnd = None  # 缓存句柄，减少 FindWindow 频率
 
         self._setup_event_subscriptions()
-        self._start_priority_listeners()  # 启动优先级按键监听
+        # 注意：优先级按键监听将在配置加载后通过 _on_config_updated 启动
 
     def _start_priority_listeners(self):
         """使用热键管理器注册优先级按键监听"""
@@ -346,8 +346,6 @@ class InputHandler:
 
     def _on_config_updated(self, skills_config: Dict, global_config: Dict):
         """从全局配置中更新输入处理器的相关配置"""
-        # ... (省略部分不相关代码)
-        
         priority_keys_config = global_config.get("priority_keys", {})
         if priority_keys_config:
             enabled = priority_keys_config.get("enabled", True)
@@ -472,6 +470,104 @@ class InputHandler:
         self._key_queue.clear()
         self._queued_keys_set.clear()
         LOG_INFO("[输入处理器] 按键队列已清空")
+
+    def execute_skill_normal(self, key: str):
+        """执行普通技能按键 - 普通优先级"""
+        if not key:
+            return
+
+        # 优先级模式检查：有优先级按键按下时技能不响应
+        if self.is_priority_mode_active():
+            return
+
+        try:
+            self._key_queue.put(key, priority='normal', block=False)
+            self._queued_keys_set.add(key)
+        except Full:
+            LOG_ERROR("[输入队列] 普通队列已满，技能被丢弃。")
+
+    def execute_skill_high(self, key: str):
+        """执行高优先级技能按键"""
+        if not key:
+            return
+
+        # 优先级模式检查：有优先级按键按下时技能不响应
+        if self.is_priority_mode_active():
+            return
+
+        try:
+            self._key_queue.put(key, priority='high', block=False)
+            self._queued_keys_set.add(key)
+        except Full:
+            LOG_ERROR("[输入队列] 高优先级队列已满，技能被丢弃。")
+
+    def execute_utility(self, key: str):
+        """执行辅助功能按键 - 低优先级"""
+        if not key:
+            return
+
+        # 优先级模式检查：有优先级按键按下时辅助功能也不响应
+        if self.is_priority_mode_active():
+            return
+
+        try:
+            self._key_queue.put(key, priority='low', block=False)
+            self._queued_keys_set.add(key)
+        except Full:
+            LOG_ERROR("[输入队列] 低优先级队列已满，辅助功能被丢弃。")
+
+    def execute_hp_potion(self, key: str):
+        """执行HP药剂按键 - 紧急优先级（闪避时仍然响应）"""
+        if not key:
+            return
+        try:
+            self._key_queue.put(key, priority='emergency', block=False)
+            self._queued_keys_set.add(key)
+        except Full:
+            LOG_ERROR("[输入队列] 紧急队列已满，HP药剂被丢弃！")
+
+    def execute_mp_potion(self, key: str):
+        """执行MP药剂按键 - 紧急优先级（闪避时仍然响应）"""
+        if not key:
+            return
+        try:
+            self._key_queue.put(key, priority='emergency', block=False)
+            self._queued_keys_set.add(key)
+        except Full:
+            LOG_ERROR("[输入队列] 紧急队列已满，MP药剂被丢弃！")
+
+    def activate_target_window(self):
+        """根据配置激活目标窗口"""
+        if not self.window_activation_config["enabled"] or not WIN32_AVAILABLE:
+            return False
+
+        ahk_class = self.window_activation_config.get("ahk_class", "").strip()
+        ahk_exe = self.window_activation_config.get("ahk_exe", "").strip()
+
+        # 检查是否有有效的配置参数
+        if not ahk_class and not ahk_exe:
+            return False
+
+        hwnd = None
+        # 优先使用类名查找
+        if ahk_class:
+            hwnd = win32gui.FindWindow(ahk_class, None)
+
+        # 如果类名找不到，并且提供了进程名，则使用进程名查找
+        if not hwnd and ahk_exe:
+            hwnd = WindowUtils.find_window_by_process_name(ahk_exe)
+
+        if hwnd:
+            try:
+                # 使用改进的WindowUtils.activate_window方法
+                success = WindowUtils.activate_window(hwnd)
+                return success
+            except Exception as e:
+                LOG_ERROR(f"[窗口激活] 激活失败: {e}")
+                return False
+        else:
+            LOG_INFO("[窗口激活] 未找到目标窗口")
+            return False
 
     def send_key(self, key_str: str) -> bool:
         """使用Pynput发送按键 - 高游戏兼容性"""

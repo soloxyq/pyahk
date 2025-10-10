@@ -229,16 +229,10 @@
         },
         "priority_keys": {
             "enabled": true,
-            "monitoring_keys": [
+            "special_keys": [
                 "space"
             ],
-            "managed_keys": {
-                "right_mouse": 50,
-                "e": {
-                    "target": "0",
-                    "delay": 30
-                }
-            }
+            "managed_keys": {}
         },
         "skill_sequence": "1,2,3,4,5,6,7,8",
         "process_history": {
