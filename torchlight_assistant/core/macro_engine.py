@@ -707,6 +707,11 @@ class MacroEngine:
                 "hotkey": "f9",
                 "minimap_area": [1600, 70, 250, 250],  # 默认小地图区域 (示例值)
             },
+            "priority_keys": {
+                "enabled": False,  # 默认禁用
+                "special_keys": [],
+                "managed_keys": {}
+            },
         }
         return {"skills": default_skills, "global": default_global}
 

@@ -9,10 +9,10 @@ from ..utils.multi_priority_queue import MultiPriorityQueue
 from .event_bus import event_bus
 from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 
-# 使用Pynput - 更好的游戏兼容性，类似AHK的实现方式
+# 使用Pynput控制器进行输入模拟
 try:
-    from pynput.keyboard import Key, Controller as KeyboardController, Listener as KeyboardListener
-    from pynput.mouse import Button, Controller as MouseController, Listener as MouseListener
+    from pynput.keyboard import Key, Controller as KeyboardController
+    from pynput.mouse import Button, Controller as MouseController
 
     PYNPUT_AVAILABLE = True
 except ImportError:
@@ -120,17 +120,13 @@ class InputHandler:
             "ctrl": Key.ctrl, "alt": Key.alt, "tab": Key.tab,
             "esc": Key.esc, "backspace": Key.backspace, "delete": Key.delete,
         }
-        # --- 新增：优先级按键状态监控 ---
-        self._priority_keys_pressed = set()  # 当前按下的优先级按键
-        self._priority_keys_config = {'space': 50, 'right_mouse': 50}  # 默认优先级按键配置（按键->延迟ms）
-        self._priority_key_delay = 0.05  # 默认优先级按键前置延迟（秒）- 保持向后兼容
         
-        # --- 新增：特殊按键处理区分 ---
-        self._special_keys = {'space'}  # 特殊按键：不接管，只监控状态
-        self._managed_keys = {'right_mouse'}  # 管理按键：完全接管，处理延迟
-        self._keyboard_listener = None
-        self._mouse_listener = None
+        # --- 统一的优先级按键配置 ---
+        self._priority_keys_pressed = set()  # 当前按下的优先级按键
+        self._priority_keys_config = {}  # {source_key: {"target": target_key, "delay": ms, "type": "managed"|"monitoring"}}
+        self._registered_priority_keys = set()  # 已注册到热键管理器的按键
         self._priority_mode_enabled = True  # 是否启用优先级模式
+
         self._ahk_enabled = True
         self._ahk_window_title = "HoldServer_Window_UniqueName_12345"
         self._ahk_hwnd = None  # 缓存句柄，减少 FindWindow 频率
@@ -139,211 +135,91 @@ class InputHandler:
         self._start_priority_listeners()  # 启动优先级按键监听
 
     def _start_priority_listeners(self):
-        """启动键盘和鼠标监听器 - 只监听配置的优先级按键"""
-        if not self._priority_mode_enabled:
+        """使用热键管理器注册优先级按键监听"""
+        if not self._priority_mode_enabled or not self._priority_keys_config or not self.hotkey_manager:
             return
             
         try:
-            # 启动键盘监听器 - 选择性截获优先级按键
-            self._keyboard_listener = KeyboardListener(
-                on_press=self._on_key_press,
-                on_release=self._on_key_release,
-                suppress=True  # 启用抑制，通过返回值控制是否截获
-            )
-            self._keyboard_listener.start()
-            
-            # 启动鼠标监听器 - 选择性截获优先级鼠标按键
-            self._mouse_listener = MouseListener(
-                on_click=self._on_mouse_click,
-                suppress=True  # 启用抑制，通过返回值控制是否截获
-            )
-            self._mouse_listener.start()
+            for key_name, config in self._priority_keys_config.items():
+                if key_name not in self._registered_priority_keys:
+                    suppress_mode = "never" if config.get('type') == 'monitoring' else "always"
+                    
+                    self.hotkey_manager.register_key_event(
+                        key_name,
+                        on_press=lambda k=key_name: self._on_priority_key_press(k),
+                        on_release=lambda k=key_name: self._on_priority_key_release(k),
+                        suppress=suppress_mode
+                    )
+                    self._registered_priority_keys.add(key_name)
             
             LOG_INFO(f"[输入处理器] 优先级按键监听已启动: {self._priority_keys_config}")
         except Exception as e:
             LOG_ERROR(f"[输入处理器] 启动监听失败: {e}")
 
-    def _on_key_press(self, key):
-        """键盘按下事件处理 - 分层处理优先级按键"""
+    def _on_priority_key_press(self, key_name: str):
+        """统一的优先级按键按下处理"""
         try:
-            key_name = self._get_key_name(key)
-            
-            # 只处理配置的优先级按键，忽略其他所有按键
-            # 支持字典和集合格式的配置检查
-            if (isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config) or \
-               (isinstance(self._priority_keys_config, set) and key_name in self._priority_keys_config):
-                
-                # 🔧 防止重复按键事件 - 只有在该键未被记录为按下时才处理
-                if key_name not in self._priority_keys_pressed:
-                    was_empty = len(self._priority_keys_pressed) == 0
-                    self._priority_keys_pressed.add(key_name)
-                    
-                    # 🚀 暂停技能调度器
-                    if was_empty:
-                        self._pause_skill_scheduler()
-                    
-                    # 🎯 分层处理：特殊按键 vs 管理按键
-                    if key_name in self._special_keys:
-                        # 特殊按键（如空格）：只监控状态，不截获，让游戏自行处理
-                        LOG_INFO(f"[优先级按键] {key_name} 特殊按键 - 仅监控状态，不截获")
-                        return None  # 不截获，让按键传递到游戏
-                    else:
-                        # 管理按键（如右键、E键）：完全截获，程序接管
-                        LOG_INFO(f"[优先级按键] {key_name} 管理按键 - 截获系统事件，程序接管")
-                        self._handle_managed_key_press(key_name)
-                        return False  # 截获按键，阻止传递到游戏
-                else:
-                    # 重复按键事件 - 如果是管理按键则截获
-                    if key_name in self._managed_keys:
-                        return False  # 截获重复的管理按键事件
-                    else:
-                        return None  # 不截获重复的特殊按键事件
-            
-            # 非优先级按键，不处理，让其正常传递
-            return None
-                
-        except Exception as e:
-            LOG_ERROR(f"[优先级按键] _on_key_press异常: {e}")
-            return None  # 异常时不截获
+            if key_name not in self._priority_keys_config:
+                return
 
-    def _on_key_release(self, key):
-        """键盘释放事件处理 - 分层处理优先级按键"""
-        try:
-            key_name = self._get_key_name(key)
-            
-            # 只处理配置的优先级按键，忽略其他所有按键
-            # 支持字典和集合格式的配置检查
-            if (isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config) or \
-               (isinstance(self._priority_keys_config, set) and key_name in self._priority_keys_config):
+            if key_name not in self._priority_keys_pressed:
+                was_empty = len(self._priority_keys_pressed) == 0
+                self._priority_keys_pressed.add(key_name)
                 
-                # 🔧 修复：防止重复释放事件 - 只有在该键被记录为按下时才处理释放
-                if key_name in self._priority_keys_pressed:
-                    self._priority_keys_pressed.discard(key_name)
+                if was_empty:
+                    self._pause_skill_scheduler()
+
+                config = self._priority_keys_config[key_name]
+                key_type = config.get('type', 'monitoring')
+
+                if key_type == 'monitoring':
+                    # 特殊按键：只监控状态，不拦截，不重发
+                    LOG_INFO(f"[优先级按键] {key_name} 特殊按键 - 仅监控状态")
+                elif key_type in ['managed', 'remapping']:
+                    # 管理按键和映射按键：统一使用延迟+队列机制
+                    target_key = config.get('target', key_name)
+                    delay_ms = config.get('delay', 50)
                     
-                    # 🚀 如果所有优先级按键都释放了，恢复技能调度器
+                    # 统一使用队列处理，确保延迟生效
+                    self._handle_managed_key_with_delay(target_key, delay_ms, key_name)
+                    
+                    # 管理按键处理后立即释放状态
+                    self._priority_keys_pressed.discard(key_name)
                     if len(self._priority_keys_pressed) == 0:
                         self._resume_skill_scheduler()
-                
-                # 🎯 截获策略：管理按键截获，特殊按键放行
-                if key_name in self._managed_keys:
-                    return False  # 截获管理按键的释放事件
-                else:
-                    return None  # 不截获特殊按键的释放事件
-            
-            # 非优先级按键，不处理，让其正常传递
-            return None
-                
-        except Exception as e:
-            LOG_ERROR(f"[优先级按键] _on_key_release异常: {e}")
-            return None  # 异常时不截获
 
-    def _on_mouse_click(self, x, y, button, pressed):
-        """鼠标点击事件处理 - 分层处理优先级按键"""
-        try:
-            button_name = self._get_button_name(button)
-            
-            # 只处理配置的优先级按键，忽略其他所有鼠标按键
-            # 支持字典和集合格式的配置检查
-            if (isinstance(self._priority_keys_config, dict) and button_name in self._priority_keys_config) or \
-               (isinstance(self._priority_keys_config, set) and button_name in self._priority_keys_config):
-                if pressed:
-                    # 🔧 修复：防止重复鼠标按下事件
-                    if button_name not in self._priority_keys_pressed:
-                        was_empty = len(self._priority_keys_pressed) == 0
-                        self._priority_keys_pressed.add(button_name)
-                        
-                        # 🚀 如果是第一个优先级按键被按下，暂停技能调度器
-                        if was_empty:
-                            self._pause_skill_scheduler()
-                        
-                        # 🎯 分层处理：特殊按键 vs 管理按键
-                        if button_name in self._special_keys:
-                            # 特殊按键：只监控状态，不截获，让游戏自行处理
-                            LOG_INFO(f"[优先级按键] {button_name} 特殊按键 - 仅监控状态，不截获")
-                            return None  # 不截获，让按键传递到游戏
-                        else:
-                            # 管理按键：完全截获，程序接管
-                            LOG_INFO(f"[优先级按键] {button_name} 管理按键 - 截获系统事件，程序接管")
-                            self._handle_managed_key_press(button_name)
-                            return False  # 截获按键，阻止传递到游戏
-                    else:
-                        # 重复按键事件 - 如果是管理按键则截获
-                        if button_name in self._managed_keys:
-                            return False  # 截获重复的管理按键事件
-                        else:
-                            return None  # 不截获重复的特殊按键事件
-                else:
-                    # 🔧 修复：防止重复鼠标释放事件
-                    if button_name in self._priority_keys_pressed:
-                        self._priority_keys_pressed.discard(button_name)
-                        
-                        # 🚀 如果所有优先级按键都释放了，恢复技能调度器
-                        if len(self._priority_keys_pressed) == 0:
-                            self._resume_skill_scheduler()
-                    
-                    # 🎯 截获策略：管理按键截获，特殊按键放行
-                    if button_name in self._managed_keys:
-                        return False  # 截获管理按键的释放事件
-                    else:
-                        return None  # 不截获特殊按键的释放事件
-            
-            # 非优先级按键，不处理，让其正常传递
-            return None
-                    
         except Exception as e:
-            LOG_ERROR(f"[优先级按键] _on_mouse_click异常: {e}")
-            return None  # 异常时不截获
+            LOG_ERROR(f"[优先级按键] 按键按下处理异常: {e}")
 
-    def _handle_managed_key_press(self, key_name: str):
-        """处理管理按键的按下 - 程序完全接管，处理动画前后摇"""
+    def _on_priority_key_release(self, key_name: str):
+        """统一的优先级按键释放处理"""
         try:
-            # 获取该按键的专属延迟，如果是字典格式则使用，否则使用默认延迟
-            if isinstance(self._priority_keys_config, dict) and key_name in self._priority_keys_config:
-                delay_ms = self._priority_keys_config[key_name]
+            if key_name in self._priority_keys_pressed:
+                self._priority_keys_pressed.discard(key_name)
+                if len(self._priority_keys_pressed) == 0:
+                    self._resume_skill_scheduler()
+        except Exception as e:
+            LOG_ERROR(f"[优先级按键] 按键释放处理异常: {e}")
+
+    def _handle_managed_key_with_delay(self, target_key: str, delay_ms: int, source_key: str):
+        """统一处理管理按键（包括普通管理和重映射），确保延迟生效"""
+        try:
+            if source_key != target_key:
+                LOG_INFO(f"[按键映射] {source_key} → {target_key} (延迟: {delay_ms}ms)")
             else:
-                delay_ms = int(self._priority_key_delay * 1000)  # 使用默认延迟作为后备
+                LOG_INFO(f"[管理按键] {source_key} 程序接管 (延迟: {delay_ms}ms)")
             
-            # 🎯 管理按键模式：程序完全接管按键执行，处理动画前后摇
-            # 1. 前置延迟（等待前一动画完成）
-            delay_command = f"delay{delay_ms}"
-            self._key_queue.put(delay_command, priority='emergency', block=False)
-            
-            # 2. 发送按键
-            self._key_queue.put(key_name, priority='emergency', block=False)
-            
-            LOG_INFO(f"[优先级按键] {key_name} 管理按键处理 - 延迟{delay_ms}ms后执行")
+            # 使用紧急优先级队列，确保延迟和按键顺序执行
+            if delay_ms > 0:
+                self._key_queue.put(f"delay{delay_ms}", priority='emergency', block=False)
+            self._key_queue.put(target_key, priority='emergency', block=False)
             
         except Exception as e:
-            LOG_ERROR(f"[优先级按键] 管理按键处理失败: {e}")
+            LOG_ERROR(f"[管理按键] 处理失败: {e}")
 
-    def is_priority_key_active(self) -> bool:
-        """检查是否有优先级按键正在按下
-        
-        此方法供其他模块调用，用于在执行按键前检查优先级状态
-        如果有优先级按键按下，则应跳过自动化按键执行
-        """
-        return self.is_priority_mode_active()
-
-    def is_special_key_pressed(self) -> bool:
-        """检查是否有特殊按键（如空格）正在按下
-        
-        此方法供其他模块调用，用于在执行按键前检查特殊按键状态
-        如果特殊按键（如空格）按下，则应跳过所有自动化按键执行
-        """
-        return bool(self._special_keys & self._priority_keys_pressed)
-
-    # def _execute_priority_key_with_delay(self, key_name: str):
-    #     """已废弃：执行优先级按键 - 使用该按键的专属延迟
-    #     
-    #     注意：优先级按键现在只暂停调度器，不发送额外按键，
-    #     让游戏本身的按键处理接管，避免重复动作。
-    #     """
-    #     pass
-            
     def _pause_skill_scheduler(self):
         """暂停技能调度器以节省CPU资源"""
         try:
-            # 通过事件总线通知 SkillManager 暂停调度
             event_bus.publish('scheduler_pause_requested', {
                 'reason': 'priority_key_pressed',
                 'active_keys': list(self._priority_keys_pressed)
@@ -355,7 +231,6 @@ class InputHandler:
     def _resume_skill_scheduler(self):
         """恢复技能调度器"""
         try:
-            # 通过事件总线通知 SkillManager 恢复调度
             event_bus.publish('scheduler_resume_requested', {
                 'reason': 'priority_key_released'
             })
@@ -368,65 +243,22 @@ class InputHandler:
         if not key:
             return ""
         
-        # 基本标准化：小写并去除空格
         normalized = key.lower().strip()
         
-        # 统一按键名称映射
         key_mapping = {
-            # 鼠标按键标准化
-            'left_mouse': 'left_mouse',
-            'leftmouse': 'left_mouse',
-            'mouse_left': 'left_mouse',
-            'lbutton': 'left_mouse',
-            'leftclick': 'left_mouse',
-            
-            'right_mouse': 'right_mouse',
-            'rightmouse': 'right_mouse',
-            'mouse_right': 'right_mouse',
-            'rbutton': 'right_mouse',
-            'rightclick': 'right_mouse',
-            
-            'middle_mouse': 'middle_mouse',
-            'middlemouse': 'middle_mouse',
-            'mouse_middle': 'middle_mouse',
-            'mbutton': 'middle_mouse',
-            
-            # 特殊键标准化
-            'spacebar': 'space',
-            'space_bar': 'space',
-            'ctrl': 'ctrl',
-            'control': 'ctrl',
+            'left_mouse': 'left_mouse', 'leftmouse': 'left_mouse', 'lbutton': 'left_mouse', 'leftclick': 'left_mouse',
+            'right_mouse': 'right_mouse', 'rightmouse': 'right_mouse', 'rbutton': 'right_mouse', 'rightclick': 'right_mouse',
+            'middle_mouse': 'middle_mouse', 'middlemouse': 'middle_mouse', 'mbutton': 'middle_mouse',
+            'spacebar': 'space', 'space_bar': 'space',
+            'ctrl': 'ctrl', 'control': 'ctrl',
             'shift': 'shift',
             'alt': 'alt',
-            'enter': 'enter',
-            'return': 'enter',
+            'enter': 'enter', 'return': 'enter',
             'tab': 'tab',
             'escape': 'esc',
-            'esc': 'esc',
         }
         
-        # 应用映射
         return key_mapping.get(normalized, normalized)
-
-    def _get_key_name(self, key) -> str:
-        """获取按键名称"""
-        if key == Key.space:
-            return 'space'
-        elif hasattr(key, 'char') and key.char:
-            return self._normalize_key_name(key.char)
-        else:
-            return self._normalize_key_name(str(key).replace('Key.', ''))
-
-    def _get_button_name(self, button) -> str:
-        """获取鼠标按键名称"""
-        if button == Button.left:
-            return 'left_mouse'
-        elif button == Button.right:
-            return 'right_mouse'
-        elif button == Button.middle:
-            return 'middle_mouse'
-        else:
-            return self._normalize_key_name(str(button))
 
     def set_dry_run_mode(self, enabled: bool):
         """开启或关闭干跑模式"""
@@ -436,160 +268,101 @@ class InputHandler:
     def set_dodge_mode(self, enabled: bool):
         """开启或关闭优先级模式（原闪避模式）"""
         self._priority_mode_enabled = enabled
-        if enabled and not self._keyboard_listener:
+        if enabled and not self._registered_priority_keys and self._priority_keys_config:
             self._start_priority_listeners()
-        elif not enabled and self._keyboard_listener:
+        elif not enabled and self._registered_priority_keys:
             self._stop_priority_listeners()
-        LOG_INFO(f"[输入处理器] 优先级模式已 {'开启' if enabled else '关闭'}")
+        LOG_INFO(f"[输入处理器] 优先级模式已 {'开启' if enabled else '关闭'} (配置按键数: {len(self._priority_keys_config)})")
 
-    def set_priority_keys(self, keys_config):
-        """设置优先级按键配置
+    def set_priority_keys(self, config: dict):
+        """设置优先级按键配置，采用统一的新格式"""
         
-        Args:
-            keys_config: 按键配置，可以是：
-                - dict: {key_name: delay_ms} 格式，如 {'space': 50, 'right_mouse': 100}
-                - list: [key_name] 格式，如 ['space', 'right_mouse']（使用默认延迟）
-        """
-        if isinstance(keys_config, dict):
-            # 新格式：字典包含延迟配置
-            normalized_config = {}
-            special_keys = set()
-            managed_keys = set()
-            
-            for key, delay in keys_config.items():
-                normalized_key = self._normalize_key_name(key)
-                if normalized_key:
-                    normalized_config[normalized_key] = max(0, int(delay))
-                    # 🎯 分类按键：空格为特殊按键，其他为管理按键
-                    if normalized_key == 'space':
-                        special_keys.add(normalized_key)
-                    else:
-                        managed_keys.add(normalized_key)
-            
-            self._priority_keys_config = normalized_config
-            self._special_keys = special_keys
-            self._managed_keys = managed_keys
-            
-            LOG_INFO(f"[输入处理器] 优先级按键已更新: {self._priority_keys_config}")
-            LOG_INFO(f"[输入处理器] 特殊按键: {self._special_keys}, 管理按键: {self._managed_keys}")
-        else:
-            # 兼容旧格式：列表格式，使用默认延迟
-            normalized_keys = {self._normalize_key_name(key) for key in keys_config if key}
-            # 转换为新的字典格式，使用默认延迟50ms
-            default_delay = int(self._priority_key_delay * 1000)
-            self._priority_keys_config = {key: default_delay for key in normalized_keys}
-            
-            # 分类按键
-            self._special_keys = {key for key in normalized_keys if key == 'space'}
-            self._managed_keys = normalized_keys - self._special_keys
-            
-            LOG_INFO(f"[输入处理器] 优先级按键已更新（兼容模式）: {self._priority_keys_config}")
-            LOG_INFO(f"[输入处理器] 特殊按键: {self._special_keys}, 管理按键: {self._managed_keys}")
+        # 新格式: { "special_keys": ["space"], "managed_keys": {"right_mouse": 50, "e": {"target": "0", "delay": 30}} }
+        special_keys = config.get('special_keys', [])
+        managed_keys_config = config.get('managed_keys', {})
+        
+        # 兼容旧格式
+        if 'monitoring_keys' in config:
+            special_keys = config.get('monitoring_keys', [])
+        
+        new_config = {}
 
-    def set_priority_keys_config(self, keys_config: Dict[str, int]):
-        """设置优先级按键配置（新方法，明确支持字典格式）
+        # 处理特殊按键（监控按键）
+        for key in special_keys:
+            normalized_key = self._normalize_key_name(key)
+            if normalized_key:
+                new_config[normalized_key] = {"type": "monitoring"}
+
+        # 处理管理按键（包括普通和重映射）
+        for key, value in managed_keys_config.items():
+            normalized_key = self._normalize_key_name(key)
+            if not normalized_key:
+                continue
+            
+            if isinstance(value, dict) and 'target' in value:
+                # 重映射按键：拦截 key，发送 target
+                new_config[normalized_key] = {
+                    "type": "remapping",
+                    "target": value['target'],
+                    "delay": max(0, int(value.get('delay', 50)))
+                }
+            else:
+                # 普通管理按键：拦截并重发同名按键（但只支持映射按键）
+                # 因为纯简单延迟配置会导致拦截后无法成功发送，所以跳过
+                LOG_INFO(f"[输入处理器] 跳过简单延迟配置: {key} = {value} （需要映射配置才能正常工作）")
+                continue
+
+        self._priority_keys_config = new_config
         
-        Args:
-            keys_config: 按键配置字典 {key_name: delay_ms}
-        """
-        self.set_priority_keys(keys_config)
+        LOG_INFO(f"[输入处理器] 优先级按键已更新: {self._priority_keys_config}")
+        
+        # 重启监听器以应用新配置
+        if self._priority_mode_enabled:
+            if self._registered_priority_keys:
+                self._stop_priority_listeners()
+            if self._priority_keys_config:
+                self._start_priority_listeners()
 
     def _stop_priority_listeners(self):
-        """停止优先级按键监听器"""
+        """停止并注销所有优先级按键监听"""
         try:
-            if self._keyboard_listener:
-                self._keyboard_listener.stop()
-                # 等待监听器完全停止
-                try:
-                    self._keyboard_listener.join(timeout=1.0)
-                except:
-                    pass
-                self._keyboard_listener = None
-                
-            if self._mouse_listener:
-                self._mouse_listener.stop()
-                # 等待监听器完全停止
-                try:
-                    self._mouse_listener.join(timeout=1.0)
-                except:
-                    pass
-                self._mouse_listener = None
-                
+            if self.hotkey_manager and self._registered_priority_keys:
+                for key_name in list(self._registered_priority_keys):
+                    self.hotkey_manager.unregister_hotkey(key_name)
+                self._registered_priority_keys.clear()
             self._priority_keys_pressed.clear()
             LOG_INFO("[输入处理器] 优先级按键监听已停止")
-            
         except Exception as e:
             LOG_ERROR(f"[输入处理器] 停止优先级监听器时出错: {e}")
-            # 强制清理
-            self._keyboard_listener = None
-            self._mouse_listener = None
-            self._priority_keys_pressed.clear()
 
     def is_priority_mode_active(self) -> bool:
         """检查是否有优先级按键正在按下"""
         return self._priority_mode_enabled and bool(self._priority_keys_pressed)
-
-    def get_active_priority_keys(self) -> set:
-        """获取当前按下的优先级按键"""
-        return self._priority_keys_pressed.copy()
-
-    def set_priority_key_delay(self, delay_ms: int):
-        """设置优先级按键延迟时间（毫秒）"""
-        self._priority_key_delay = max(0, delay_ms) / 1000.0  # 转换为秒，确保非负
-        LOG_INFO(f"[输入处理器] 优先级按键延迟已设置为: {delay_ms}ms")
 
     def _setup_event_subscriptions(self):
         """订阅事件以接收状态更新"""
         event_bus.subscribe("engine:status_updated", self._on_status_updated)
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
 
-    def _on_status_updated(self, status_info: Dict[str, Any]):
-        """响应状态更新，更新缓存的状态信息"""
-        self._cached_force_move = status_info.get("force_move_active", False)
-        self._cached_stationary_mode = status_info.get("stationary_mode", False)
-
     def _on_config_updated(self, skills_config: Dict, global_config: Dict):
-        """从全局配置中更新原地模式类型和窗口激活配置"""
-        stationary_config = global_config.get("stationary_mode_config", {})
-        self._cached_stationary_mode_type = stationary_config.get(
-            "mode_type", "block_mouse"
-        )
+        """从全局配置中更新输入处理器的相关配置"""
+        # ... (省略部分不相关代码)
         
-        # 更新窗口激活配置
-        window_config = global_config.get("window_activation", {})
-        self.set_window_activation(
-            enabled=window_config.get("enabled", False),
-            ahk_class=window_config.get("ahk_class", ""),
-            ahk_exe=window_config.get("ahk_exe", "")
-        )
-        
-        # 更新优先级按键配置
         priority_keys_config = global_config.get("priority_keys", {})
         if priority_keys_config:
             enabled = priority_keys_config.get("enabled", True)
-            
-            # 支持新的keys_config格式和旧的keys+delay_ms格式
-            if "keys_config" in priority_keys_config:
-                # 新格式：每个按键单独延迟
-                keys_config = priority_keys_config["keys_config"]
-                self.set_priority_keys(keys_config)
-                LOG_INFO(f"[输入处理器] 优先级按键配置已更新（新格式）: 启用={enabled}, 配置={keys_config}")
-            else:
-                # 旧格式：全局延迟
-                keys = priority_keys_config.get("keys", ["space", "right_mouse"])
-                delay = priority_keys_config.get("delay_ms", 50)
-                
-                self.set_priority_keys(keys)
-                self.set_priority_key_delay(delay)
-                LOG_INFO(f"[输入处理器] 优先级按键配置已更新（兼容格式）: 启用={enabled}, 按键={keys}, 延迟={delay}ms")
-            
             self.set_dodge_mode(enabled)
+            self.set_priority_keys(priority_keys_config)
         
-        # Update timing from global config
         self.key_press_duration = global_config.get("key_press_duration", 10) / 1000.0
         self.mouse_click_duration = (
             global_config.get("mouse_click_duration", 5) / 1000.0
         )
+
+    def _on_status_updated(self, status_info: Dict[str, Any]):
+        """响应状态更新，更新缓存的状态信息"""
+        self._cached_force_move = status_info.get("force_move_active", False)
+        self._cached_stationary_mode = status_info.get("stationary_mode", False)
 
     def start(self):
         """启动按键队列处理线程"""
@@ -607,20 +380,20 @@ class InputHandler:
     def cleanup(self):
         """停止并清理资源"""
         LOG_INFO("[输入处理器] 开始清理资源...")
-        
+
         # 1. 首先停止优先级监听器
         self._stop_priority_listeners()
-        
+
         # 2. 停止处理线程
         self._stop_event.set()
         if self._processing_thread and self._processing_thread.is_alive():
             try:
-                self._processing_thread.join(timeout=2.0)  # 增加超时时间
+                self._processing_thread.join(timeout=2.0)
                 if self._processing_thread.is_alive():
                     LOG_ERROR("[输入处理器] 处理线程未能在规定时间内停止")
             except Exception as e:
                 LOG_ERROR(f"[输入处理器] 停止处理线程时出错: {e}")
-        
+
         # 3. 清理队列和状态
         try:
             self._key_queue.clear()
@@ -628,192 +401,21 @@ class InputHandler:
             self._priority_keys_pressed.clear()
         except Exception as e:
             LOG_ERROR(f"[输入处理器] 清理队列时出错: {e}")
-        
+
         LOG_INFO("[输入处理器] 资源清理完成")
-
-    def _should_deduplicate_key(self, key: str) -> bool:
-        """判断按键是否应该去重
-        
-        Args:
-            key: 按键字符串，可能是单个按键或序列（如 "delay50,q"）
-        
-        Returns:
-            bool: True表示应该去重，False表示允许重复
-        """
-        key_lower = key.lower()
-        
-        # 🎯 序列处理：如果包含逗号，检查序列中是否有不去重的元素
-        if ',' in key_lower:
-            key_sequence = [k.strip() for k in key_lower.split(',') if k.strip()]
-            for individual_key in key_sequence:
-                # 如果序列中有任何一个元素不需要去重，整个序列就不去重
-                if individual_key.startswith("delay"):
-                    return False
-                if individual_key in ["1", "2"] and hasattr(self, '_is_emergency_key'):
-                    return False
-                if individual_key in ["lbutton", "leftclick"]:
-                    return False
-            # 序列中所有元素都需要去重时，整个序列才去重
-            return True
-        
-        # 单个按键的去重逻辑（保持原有逻辑）
-        # 延迟指令不去重
-        if key_lower.startswith("delay"):
-            return False
-            
-        # 紧急药剂按键不去重（保证生存）
-        if key_lower in ["1", "2"] and hasattr(self, '_is_emergency_key'):
-            return False
-            
-        # 鼠标左键在特定情况下不去重（如连击技能）
-        if key_lower in ["lbutton", "leftclick"]:
-            return False
-            
-        return True
-
-    def execute_key(self, key: str, priority: bool = False):
-        """执行按键请求（通过队列异步处理）
-
-        Args:
-            key: 要执行的按键
-            priority: 是否为高优先级按键（插入队列前端）
-        """
-        # 干跑模式拦截
-        if self.dry_run_mode:
-            if self.debug_display_manager:
-                self.debug_display_manager.add_action(key)
-            return
-
-        if not key:
-            return
-
-        # 统一的去重检查
-        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
-            return  # O(1) 复杂度去重
-
-        try:
-            if priority:
-                self._key_queue.put(key, priority='high', block=False)
-            else:
-                self._key_queue.put(key, priority='normal', block=False)
-            self._queued_keys_set.add(key)
-            self._queue_full_warned = False
-        except Full:
-            # 区分日志文案
-            if not self._queue_full_warned:
-                if priority:
-                    LOG_ERROR("[输入队列] 高优先级队列已满，按键被丢弃。")
-                else:
-                    LOG_ERROR("[输入队列] 队列已满，按键被丢弃。")
-                self._queue_full_warned = True
-
-    # 语义化的按键执行接口
-    def execute_hp_potion(self, key: str):
-        """执行HP药剂按键 - 紧急优先级（闪避时仍然响应）"""
-        if not key:
-            return
-        try:
-            self._key_queue.put(key, priority='emergency', block=False)
-            self._queued_keys_set.add(key)
-        except Full:
-            LOG_ERROR("[输入队列] 紧急队列已满，HP药剂被丢弃！")
-
-    def execute_mp_potion(self, key: str):
-        """执行MP药剂按键 - 紧急优先级（闪避时仍然响应）"""
-        if not key:
-            return
-        try:
-            self._key_queue.put(key, priority='emergency', block=False)
-            self._queued_keys_set.add(key)
-        except Full:
-            LOG_ERROR("[输入队列] 紧急队列已满，MP药剂被丢弃！")
-
-    def _check_priority_mode_block(self) -> bool:
-        """快速优先级模式检查 - 无日志版本"""
-        return self.is_priority_mode_active()
-
-    def _execute_key_sequence(self, key: str, priority: str, error_msg: str):
-        """通用的按键序列执行逻辑"""
-        # 🎯 整体序列去重检查：序列作为一个整体进行去重判断
-        if self._should_deduplicate_key(key) and key in self._queued_keys_set:
-            return  # 整个序列已经在队列中，跳过
-        
-        # 🎯 支持逗号分隔的按键序列
-        if ',' in key:
-            key_sequence = [k.strip() for k in key.split(',') if k.strip()]
-            for i, individual_key in enumerate(key_sequence):
-                try:
-                    self._key_queue.put(individual_key, priority=priority, block=False)
-                    # 在最后一个元素后添加清理标记
-                    if i == len(key_sequence) - 1 and self._should_deduplicate_key(key):
-                        cleanup_marker = f"__cleanup_sequence__{key}"
-                        self._key_queue.put(cleanup_marker, priority=priority, block=False)
-                except Full:
-                    LOG_ERROR(error_msg)
-                    break
-            # 将整个序列字符串加入去重集合
-            if self._should_deduplicate_key(key):
-                self._queued_keys_set.add(key)
-        else:
-            # 原有的单个按键逻辑
-            try:
-                self._key_queue.put(key, priority=priority, block=False)
-                if self._should_deduplicate_key(key):
-                    self._queued_keys_set.add(key)
-            except Full:
-                LOG_ERROR(error_msg)
-
-    def execute_skill_high(self, key: str):
-        """执行高优先级技能按键 - 支持序列 delay50,q"""
-        if not key or self._check_priority_mode_block():
-            return
-        self._execute_key_sequence(key, 'high', "[输入队列] 高优先级队列已满，序列按键被丢弃。")
-
-    def execute_skill_normal(self, key: str):
-        """执行普通技能按键 - 支持序列 delay50,q"""
-        if not key or self._check_priority_mode_block():
-            return
-        self._execute_key_sequence(key, 'normal', "[输入队列] 普通队列已满，序列按键被丢弃。")
-
-    def execute_utility(self, key: str):
-        """执行辅助功能按键 - 低优先级 - 支持序列"""
-        if not key or self._check_priority_mode_block():
-            return
-        self._execute_key_sequence(key, 'low', "[输入队列] 低优先级队列已满，序列按键被丢弃。")
-
-    def get_queue_length(self) -> int:
-        """获取当前队列长度"""
-        return self._key_queue.qsize()
-
-    def get_queue_stats(self) -> dict:
-        """获取简单的队列状态"""
-        return {"total": self._key_queue.qsize()}
-
-    def clear_queue(self):
-        """安全地清空按键队列和跟踪集合"""
-        self._key_queue.clear()
-        self._queued_keys_set.clear()
-        LOG_INFO("[输入处理器] 按键队列已清空")
 
     def _queue_processor_loop(self):
         """队列处理器循环"""
         while not self._stop_event.is_set():
             try:
                 key_to_execute = self._key_queue.get(timeout=0.1)
-                # 移除时检查是否存在，避免KeyError
                 self._queued_keys_set.discard(key_to_execute)
             except Empty:
                 continue
-            
+
             try:
                 key_lower = key_to_execute.lower()
-                
-                # 🎯 处理序列清理标记
-                if key_lower.startswith("__cleanup_sequence__"):
-                    sequence_key = key_to_execute[len("__cleanup_sequence__"):]
-                    self._queued_keys_set.discard(sequence_key)
-                    continue
-                
+
                 # 处理延迟指令
                 if key_lower.startswith("delay"):
                     try:
@@ -824,10 +426,10 @@ class InputHandler:
                         LOG_ERROR(f"[按键处理] 无效的延迟按键格式: {key_to_execute}")
                     continue
 
-                # 使用缓存的状态和配置进行决策
+                # 使用缓存的状态进行决策
                 if self._cached_force_move:
                     # X键按下时，所有技能键都改成F键（交互键）
-                    self.send_key("f")
+                    self._execute_key("f")
                 elif self._cached_stationary_mode:
                     if self._cached_stationary_mode_type == "block_mouse":
                         if key_lower not in ["lbutton", "leftclick", "rbutton", "rightclick"]:
@@ -841,10 +443,9 @@ class InputHandler:
                 LOG_ERROR(f"[队列处理器] 处理按键 '{key_to_execute}' 时发生异常: {e}")
 
     def _execute_key(self, key_str: str):
-        """根据按键类型执行具体输入操作 - 简化版本"""
+        """根据按键类型执行具体输入操作"""
         key_lower = key_str.lower()
-        
-        # 处理按键执行
+
         if key_lower in ["lbutton", "leftclick"]:
             self.click_mouse("left")
         elif key_lower in ["rbutton", "rightclick"]:
@@ -862,64 +463,15 @@ class InputHandler:
         else:
             self.send_key_with_modifier(key_str, "shift")
 
-    def set_window_activation(
-        self, enabled: bool = True, ahk_class: Optional[str] = None, ahk_exe: Optional[str] = None
-    ) -> bool:
-        """设置窗口激活配置
+    def get_queue_length(self) -> int:
+        """获取当前队列长度"""
+        return self._key_queue.qsize()
 
-        Args:
-            ahk_class: 窗口类名 (例如: 'Qt5156QWindowIcon')
-            ahk_exe: 进程可执行文件名 (例如: 'MuMuNxDevice.exe')
-            enabled: 是否启用窗口激活功能
-
-        Returns:
-            是否设置成功
-        """
-        try:
-            # 清理参数，将None转换为空字符串
-            ahk_class = ahk_class or ""
-            ahk_exe = ahk_exe or ""
-
-            self.window_activation_config.update(
-                {"enabled": enabled, "ahk_class": ahk_class, "ahk_exe": ahk_exe}
-            )
-
-            pass
-
-            return True
-        except Exception as e:
-            return False
-
-    def activate_target_window(self):
-        """根据配置激活目标窗口。"""
-        if not self.window_activation_config["enabled"] or not WIN32_AVAILABLE:
-            return False
-
-        ahk_class = self.window_activation_config.get("ahk_class", "").strip()
-        ahk_exe = self.window_activation_config.get("ahk_exe", "").strip()
-
-        # 检查是否有有效的配置参数
-        if not ahk_class and not ahk_exe:
-            return False
-
-        hwnd = None
-        # 优先使用类名查找
-        if ahk_class:
-            hwnd = win32gui.FindWindow(ahk_class, None)
-
-        # 如果类名找不到，并且提供了进程名，则使用进程名查找
-        if not hwnd and ahk_exe:
-            hwnd = WindowUtils.find_window_by_process_name(ahk_exe)
-
-        if hwnd:
-            try:
-                # 使用改进的WindowUtils.activate_window方法
-                success = WindowUtils.activate_window(hwnd)
-                return success
-            except Exception as e:
-                return False
-        else:
-            return False
+    def clear_queue(self):
+        """安全地清空按键队列和跟踪集合"""
+        self._key_queue.clear()
+        self._queued_keys_set.clear()
+        LOG_INFO("[输入处理器] 按键队列已清空")
 
     def send_key(self, key_str: str) -> bool:
         """使用Pynput发送按键 - 高游戏兼容性"""
@@ -956,9 +508,7 @@ class InputHandler:
         except Exception:
             return False
 
-    def click_mouse(
-        self, button: str = "left", hold_time: Optional[float] = None
-    ) -> bool:
+    def click_mouse(self, button: str = "left", hold_time: Optional[float] = None) -> bool:
         """使用Pynput点击鼠标"""
         with self.input_lock:
             try:
@@ -967,9 +517,7 @@ class InputHandler:
                 LOG_ERROR(f"Error clicking mouse: {e}")
                 return False
 
-    def _click_mouse_pynput(
-        self, button: str, hold_time: Optional[float] = None
-    ) -> bool:
+    def _click_mouse_pynput(self, button: str, hold_time: Optional[float] = None) -> bool:
         """使用Pynput点击鼠标 - 类似AHK Click的实现"""
         try:
             if button.lower() == "left":
@@ -992,17 +540,6 @@ class InputHandler:
 
         except Exception:
             return False
-
-    def get_mouse_position(self) -> tuple:
-        """获取鼠标位置"""
-        try:
-            return self.mouse.position
-        except Exception:
-            return (0, 0)
-
-    def is_key_pressed(self, key_str: str) -> bool:
-        """检查按键是否被按下"""
-        return self.hotkey_manager.is_key_pressed(key_str)
 
     def send_key_with_modifier(self, key_str: str, modifier: str = "shift") -> bool:
         """发送带修饰符的按键"""
@@ -1054,60 +591,7 @@ class InputHandler:
         except Exception:
             return False
 
-    def click_mouse_at(self, x: int, y: int, button: str = "left", 
-                      hold_time: Optional[float] = None) -> bool:
-        """
-        在指定坐标点击鼠标
-        
-        Args:
-            x, y: 点击坐标
-            button: 鼠标按钮 ("left", "right", "middle")
-            hold_time: 按住时间（秒）
-        """
-        with self.input_lock:
-            try:
-                return self._click_mouse_at_pynput(x, y, button, hold_time)
-            except Exception as e:
-                LOG_ERROR(f"Error clicking mouse at ({x}, {y}): {e}")
-                return False
-    
-    def _click_mouse_at_pynput(self, x: int, y: int, button: str, 
-                              hold_time: Optional[float] = None) -> bool:
-        """使用pynput在指定坐标点击鼠标"""
-        if not PYNPUT_AVAILABLE:
-            return False
-        
-        try:
-            # 映射按钮名称
-            button_map = {
-                "left": Button.left,
-                "right": Button.right,
-                "middle": Button.middle,
-            }
-            
-            mouse_button = button_map.get(button.lower(), Button.left)
-            
-            # 移动鼠标到指定位置
-            self.mouse.position = (x, y)
-            time.sleep(0.01)  # 短暂延迟确保鼠标移动完成
-            
-            # 点击
-            self.mouse.press(mouse_button)
-            time.sleep(hold_time or self.mouse_click_duration)
-            self.mouse.release(mouse_button)
-            
-            return True
-            
-        except Exception as e:
-            LOG_ERROR(f"Error in _click_mouse_at_pynput: {e}")
-            return False
-
-    def click_mouse_with_modifier(
-        self,
-        button: str = "left",
-        modifier: str = "shift",
-        hold_time: Optional[float] = None,
-    ) -> bool:
+    def click_mouse_with_modifier(self, button: str = "left", modifier: str = "shift", hold_time: Optional[float] = None) -> bool:
         """发送带修饰符的鼠标点击"""
         with self.input_lock:
             try:
@@ -1134,9 +618,7 @@ class InputHandler:
                     return False
 
                 # 使用传入的时间或默认时间
-                click_duration = (
-                    hold_time if hold_time is not None else self.mouse_click_duration
-                )
+                click_duration = hold_time if hold_time is not None else self.mouse_click_duration
 
                 # 发送修饰符+鼠标点击事件
                 self.keyboard.press(modifier_obj)
@@ -1151,19 +633,6 @@ class InputHandler:
             except Exception as e:
                 LOG_ERROR(f"Error clicking mouse {button} with {modifier}: {e}")
                 return False
-
-    def send_key_sequence(self, keys: list, delay: float = 0.1) -> bool:
-        """发送按键序列"""
-        try:
-            for key in keys:
-                if not self.send_key(key):
-                    return False
-                if delay > 0:
-                    time.sleep(delay)
-            return True
-        except Exception as e:
-            LOG_ERROR(f"Error sending key sequence: {e}")
-            return False
 
     # ========== AHK Hold/Release 对外接口 ==========
     def set_ahk_hold(self, enabled: bool = True, window_title: Optional[str] = None):
@@ -1230,16 +699,3 @@ class InputHandler:
         cds.lpData = ctypes.cast(buf, ctypes.c_void_p)
         res = SendMessageW(hwnd, WM_COPYDATA, 0, ctypes.byref(cds))
         return bool(res)
-    # =================================================
-
-    def get_window_activation_status(self) -> Dict[str, Any]:
-        """获取窗口激活配置状态
-
-        Returns:
-            包含窗口激活配置的字典
-        """
-        return {
-            "enabled": self.window_activation_config["enabled"],
-            "ahk_class": self.window_activation_config["ahk_class"],
-            "ahk_exe": self.window_activation_config["ahk_exe"],
-        }

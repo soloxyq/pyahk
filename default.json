@@ -139,7 +139,7 @@
         "window_activation": {
             "enabled": true,
             "ahk_class": "Diablo IV Main Window Class",
-            "ahk_exe": "Diablo IV.exe"
+            "ahk_exe": ""
         },
         "stationary_mode_config": {
             "hotkey": "xbutton1",
@@ -167,7 +167,7 @@
         },
         "resource_management": {
             "hp_config": {
-                "enabled": false,
+                "enabled": true,
                 "key": "1",
                 "threshold": 50,
                 "cooldown": 1000,
@@ -175,10 +175,10 @@
                 "tolerance_s": 30,
                 "tolerance_v": 50,
                 "detection_mode": "rectangle",
-                "region_x1": 602,
-                "region_y1": 934,
-                "region_x2": 608,
-                "region_y2": 1053,
+                "region_x1": 136,
+                "region_y1": 910,
+                "region_x2": 213,
+                "region_y2": 1004,
                 "colors": [
                     {
                         "name": "Color1",
@@ -201,7 +201,7 @@
                 ]
             },
             "mp_config": {
-                "enabled": false,
+                "enabled": true,
                 "key": "2",
                 "threshold": 50,
                 "cooldown": 2000,
@@ -229,10 +229,16 @@
         },
         "priority_keys": {
             "enabled": true,
-            "keys": [
-                "space",
-                "right_mouse"
-            ]
+            "monitoring_keys": [
+                "space"
+            ],
+            "managed_keys": {
+                "right_mouse": 50,
+                "e": {
+                    "target": "0",
+                    "delay": 30
+                }
+            }
         },
         "skill_sequence": "1,2,3,4,5,6,7,8",
         "process_history": {

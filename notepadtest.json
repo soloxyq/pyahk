@@ -124,7 +124,7 @@
     "global": {
         "sequence_enabled": false,
         "debug_mode": {
-            "enabled": true
+            "enabled": false
         },
         "queue_processor_interval": 50,
         "key_press_duration": 10,
@@ -132,6 +132,9 @@
         "cooldown_checker_interval": 200,
         "sequence_timer_interval": 75,
         "capture_interval": 60,
+        "hp_cooldown": 5000,
+        "mp_cooldown": 8000,
+        "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
@@ -167,7 +170,10 @@
                 "enabled": true,
                 "key": "1",
                 "threshold": 50,
-                "cooldown": 1000,
+                "cooldown": 5000,
+                "tolerance_h": 10,
+                "tolerance_s": 30,
+                "tolerance_v": 50,
                 "detection_mode": "rectangle",
                 "region_x1": 899,
                 "region_y1": 129,
@@ -176,12 +182,21 @@
                 "colors": [
                     {
                         "name": "Color1",
-                        "target_h": 0,
-                        "target_s": 0,
-                        "target_v": 255,
-                        "tolerance_h": 5,
-                        "tolerance_s": 15,
-                        "tolerance_v": 15
+                        "target_h": 157,
+                        "target_s": 75,
+                        "target_v": 29,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    },
+                    {
+                        "name": "Color2",
+                        "target_h": 40,
+                        "target_s": 84,
+                        "target_v": 48,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
                     }
                 ]
             },
@@ -189,7 +204,10 @@
                 "enabled": true,
                 "key": "2",
                 "threshold": 50,
-                "cooldown": 2000,
+                "cooldown": 8000,
+                "tolerance_h": 10,
+                "tolerance_s": 30,
+                "tolerance_v": 50,
                 "detection_mode": "rectangle",
                 "region_x1": 242,
                 "region_y1": 179,
@@ -198,16 +216,25 @@
                 "colors": [
                     {
                         "name": "Color1",
-                        "target_h": 0,
-                        "target_s": 0,
-                        "target_v": 255,
-                        "tolerance_h": 5,
-                        "tolerance_s": 15,
-                        "tolerance_v": 15
+                        "target_h": 104,
+                        "target_s": 80,
+                        "target_v": 58,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
                     }
                 ]
             },
             "check_interval": 200
+        },
+        "priority_keys": {
+            "enabled": true,
+            "special_keys": [
+                "space"
+            ],
+            "managed_keys": {
+                "e": 50
+            }
         },
         "skill_sequence": "1,2,3,4,5,6,7,8,9",
         "process_history": {
