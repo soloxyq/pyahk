@@ -95,6 +95,7 @@ class InputHandler:
         # 使用多级优先队列
         self._key_queue = MultiPriorityQueue(maxsize=9)
         self._queued_keys_set = set()
+        self._managed_key_map = {}  # 映射：target_key -> source_key，用于去重清理
         self._processing_thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._queue_full_warned = False
@@ -174,7 +175,8 @@ class InputHandler:
 
                 if key_type == 'monitoring':
                     # 特殊按键：只监控状态，不拦截，不重发
-                    LOG_INFO(f"[优先级按键] {key_name} 特殊按键 - 仅监控状态")
+                    # 不清空队列，而是在执行时过滤普通技能，但保留HP/MP等紧急按键
+                    pass  # 静默处理，不输出日志
                 elif key_type in ['managed', 'remapping']:
                     # 管理按键和映射按键：统一使用延迟+队列机制
                     target_key = config.get('target', key_name)
@@ -206,18 +208,33 @@ class InputHandler:
         try:
             # 规范化目标按键名，兼容多种写法
             target_key = self._normalize_key_name(target_key)
-            if source_key != target_key:
-                LOG_INFO(f"[按键映射] {source_key} → {target_key} (延迟: {delay_ms}ms)")
-            else:
-                LOG_INFO(f"[管理按键] {source_key} 程序接管 (延迟: {delay_ms}ms)")
             
-            # 使用紧急优先级队列，确保延迟和按键顺序执行
+            # 1. 去重检查：使用源按键作为唯一标识（delay + 按键作为整体）
+            # 例如：e键映射到+，去重标识就是 "e"，而不是单独的 "+"
+            if source_key in self._queued_keys_set:
+                return
+            
+            # 2. 将源按键加入去重集合
+            self._queued_keys_set.add(source_key)
+            
+            if source_key != target_key:
+                LOG(f"[按键映射] {source_key} → {target_key} (延迟: {delay_ms}ms)")
+            else:
+                LOG(f"[管理按键] {source_key} 程序接管 (延迟: {delay_ms}ms)")
+            
+            # 3. 将指令序列推入队列
             if delay_ms > 0:
                 self._key_queue.put(f"delay{delay_ms}", priority='emergency', block=False)
             self._key_queue.put(target_key, priority='emergency', block=False)
             
+            # 4. 推入清理标记（序列执行完后清除源按键的去重标记）
+            cleanup_marker = f"__cleanup_sequence__{source_key}"
+            self._key_queue.put(cleanup_marker, priority='emergency', block=False)
+            
         except Exception as e:
             LOG_ERROR(f"[管理按键] 处理失败: {e}")
+            import traceback
+            LOG_ERROR(f"[管理按键] 异常详情:\n{traceback.format_exc()}")
 
     def _pause_skill_scheduler(self):
         """暂停技能调度器以节省CPU资源"""
@@ -226,7 +243,7 @@ class InputHandler:
                 'reason': 'priority_key_pressed',
                 'active_keys': list(self._priority_keys_pressed)
             })
-            LOG_INFO("[性能优化] 优先级按键激活 - 技能调度器已暂停")
+            LOG("[性能优化] 优先级按键激活 - 技能调度器已暂停")
         except Exception as e:
             LOG_ERROR(f"[性能优化] 暂停调度器失败: {e}")
     
@@ -236,7 +253,7 @@ class InputHandler:
             event_bus.publish('scheduler_resume_requested', {
                 'reason': 'priority_key_released'
             })
-            LOG_INFO("[性能优化] 优先级按键释放 - 技能调度器已恢复")
+            LOG("[性能优化] 优先级按键释放 - 技能调度器已恢复")
         except Exception as e:
             LOG_ERROR(f"[性能优化] 恢复调度器失败: {e}")
 
@@ -358,6 +375,14 @@ class InputHandler:
         self.mouse_click_duration = (
             global_config.get("mouse_click_duration", 5) / 1000.0
         )
+        
+        # 更新窗口激活配置
+        window_activation = global_config.get("window_activation", {})
+        if window_activation:
+            self.window_activation_config["enabled"] = window_activation.get("enabled", False)
+            self.window_activation_config["ahk_class"] = window_activation.get("ahk_class", "")
+            self.window_activation_config["ahk_exe"] = window_activation.get("ahk_exe", "")
+            LOG_INFO(f"[输入处理器] 窗口激活配置已更新: enabled={self.window_activation_config['enabled']}, class={self.window_activation_config['ahk_class']}, exe={self.window_activation_config['ahk_exe']}")
 
     def _on_status_updated(self, status_info: Dict[str, Any]):
         """响应状态更新，更新缓存的状态信息"""
@@ -418,11 +443,56 @@ class InputHandler:
                 if self._handle_delay_command(key_to_execute):
                     continue
                 
+                # 处理清理标记（序列执行完毕后清除去重标识）
+                if key_to_execute.startswith("__cleanup_sequence__"):
+                    source_key = key_to_execute.replace("__cleanup_sequence__", "")
+                    self._queued_keys_set.discard(source_key)
+                    continue
+                
+                # Space等特殊监控按键按下时，过滤普通技能，但保留HP/MP等紧急按键
+                if self.is_priority_mode_active():
+                    # 检查是否是紧急按键（HP/MP等）
+                    if not self._is_emergency_key(key_to_execute):
+                        # 普通技能，丢弃
+                        continue
+                    # 紧急按键，继续执行
+                
                 # 根据缓存状态选择执行策略
                 self._execute_with_current_mode(key_to_execute)
                 
             except Exception as e:
                 LOG_ERROR(f"[队列处理器] 处理按键 '{key_to_execute}' 时发生异常: {e}")
+
+    def _is_emergency_key(self, key: str) -> bool:
+        """判断是否是紧急按键（HP/MP药剂等生存技能）
+        
+        紧急按键的特征：
+        1. 通过 execute_hp_potion 或 execute_mp_potion 入队（使用 emergency 优先级）
+        2. 即使在优先级模式激活时也应该执行
+        """
+        # 这里可以根据实际情况扩展判断逻辑
+        # 目前简单判断：由于HP/MP使用emergency优先级，
+        # 而普通技能使用normal优先级，我们可以通过队列优先级来区分
+        # 但由于这里已经从队列中取出，我们需要另一种方式
+        
+        # 暂时使用简单策略：所有按键都可能是紧急的
+        # 更好的方式是在入队时打标记，或者维护一个紧急按键列表
+        # 由于HP/MP使用单独的方法入队，我们可以检查配置
+        
+        # 获取资源配置中的HP/MP按键
+        if hasattr(self, 'config_manager') and self.config_manager:
+            global_config = self.config_manager.get_global_config()
+            resource_config = global_config.get('resource_management', {})
+            
+            hp_key = resource_config.get('hp_config', {}).get('key', '')
+            mp_key = resource_config.get('mp_config', {}).get('key', '')
+            
+            # 如果是HP或MP按键，认为是紧急按键
+            if key.lower() in [hp_key.lower(), mp_key.lower()]:
+                return True
+        
+        return False
+
 
     def _handle_delay_command(self, key: str) -> bool:
         """处理延迟指令，返回True表示已处理"""
@@ -506,7 +576,9 @@ class InputHandler:
             self._key_queue.put(key, priority='normal', block=False)
             self._queued_keys_set.add(key)
         except Full:
-            LOG_ERROR("[输入队列] 普通队列已满，技能被丢弃。")
+            if not self._queue_full_warned:
+                LOG_ERROR(f"[输入队列] 普通队列已满 (大小: {self._key_queue.qsize()})，按键 '{key}' 被丢弃")
+                self._queue_full_warned = True
 
     def execute_skill_high(self, key: str):
         """执行高优先级技能按键"""
@@ -560,7 +632,14 @@ class InputHandler:
 
     def activate_target_window(self):
         """根据配置激活目标窗口"""
-        if not self.window_activation_config["enabled"] or not WIN32_AVAILABLE:
+        LOG_INFO(f"[窗口激活] 开始激活窗口，配置: enabled={self.window_activation_config.get('enabled')}, class={self.window_activation_config.get('ahk_class')}, exe={self.window_activation_config.get('ahk_exe')}")
+        
+        if not self.window_activation_config["enabled"]:
+            LOG_INFO("[窗口激活] 窗口激活功能未启用")
+            return False
+            
+        if not WIN32_AVAILABLE:
+            LOG_ERROR("[窗口激活] Win32 API不可用")
             return False
 
         ahk_class = self.window_activation_config.get("ahk_class", "").strip()
@@ -568,27 +647,45 @@ class InputHandler:
 
         # 检查是否有有效的配置参数
         if not ahk_class and not ahk_exe:
+            LOG_ERROR("[窗口激活] 未配置ahk_class或ahk_exe参数")
             return False
 
         hwnd = None
         # 优先使用类名查找
         if ahk_class:
+            LOG_INFO(f"[窗口激活] 尝试使用类名查找窗口: {ahk_class}")
             hwnd = win32gui.FindWindow(ahk_class, None)
+            if hwnd:
+                LOG_INFO(f"[窗口激活] 通过类名找到窗口句柄: {hwnd}")
+            else:
+                LOG_INFO(f"[窗口激活] 类名 '{ahk_class}' 未找到窗口")
 
         # 如果类名找不到，并且提供了进程名，则使用进程名查找
         if not hwnd and ahk_exe:
+            LOG_INFO(f"[窗口激活] 尝试使用进程名查找窗口: {ahk_exe}")
             hwnd = WindowUtils.find_window_by_process_name(ahk_exe)
+            if hwnd:
+                LOG_INFO(f"[窗口激活] 通过进程名找到窗口句柄: {hwnd}")
+            else:
+                LOG_INFO(f"[窗口激活] 进程名 '{ahk_exe}' 未找到窗口")
 
         if hwnd:
             try:
+                LOG_INFO(f"[窗口激活] 准备激活窗口句柄: {hwnd}")
                 # 使用改进的WindowUtils.activate_window方法
                 success = WindowUtils.activate_window(hwnd)
+                if success:
+                    LOG_INFO(f"[窗口激活] 窗口激活成功！句柄: {hwnd}")
+                else:
+                    LOG_ERROR(f"[窗口激活] 窗口激活失败，句柄: {hwnd}")
                 return success
             except Exception as e:
-                LOG_ERROR(f"[窗口激活] 激活失败: {e}")
+                LOG_ERROR(f"[窗口激活] 激活异常: {e}")
+                import traceback
+                LOG_ERROR(f"[窗口激活] 异常详情:\n{traceback.format_exc()}")
                 return False
         else:
-            LOG_INFO("[窗口激活] 未找到目标窗口")
+            LOG_ERROR(f"[窗口激活] 未找到目标窗口 (class={ahk_class}, exe={ahk_exe})")
             return False
 
     def send_key(self, key_str: str) -> bool:
@@ -620,9 +717,11 @@ class InputHandler:
             # 获取按键对象 - 优化：直接检查特殊键，普通字符直接使用
             if key_lower in self.special_key_mapping:
                 key_obj = self.special_key_mapping[key_lower]
-            elif len(key_lower) == 1 and key_lower.isalnum():
-                key_obj = key_lower  # 普通字符直接使用
+            elif len(key_str) == 1:
+                # 支持所有单字符（字母、数字、符号如 +、-、= 等）
+                key_obj = key_str  # 保持原始大小写，让pynput处理
             else:
+                LOG_ERROR(f"[按键发送] 不支持的按键: {key_str}")
                 return False
 
             # 发送按键事件 - 按下并释放
@@ -632,7 +731,8 @@ class InputHandler:
 
             return True
 
-        except Exception:
+        except Exception as e:
+            LOG_ERROR(f"[按键发送] 发送按键 '{key_str}' 时出错: {e}")
             return False
 
     def click_mouse(self, button: str = "left", hold_time: Optional[float] = None) -> bool:
