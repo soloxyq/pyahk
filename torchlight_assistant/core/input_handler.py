@@ -376,6 +376,13 @@ class InputHandler:
             global_config.get("mouse_click_duration", 5) / 1000.0
         )
         
+        # 更新原地模式配置
+        stationary_config = global_config.get("stationary_mode_config", {})
+        if stationary_config:
+            mode_type = stationary_config.get("mode_type", "block_mouse")
+            self._cached_stationary_mode_type = mode_type
+            LOG_INFO(f"[输入处理器] 原地模式类型已更新: {mode_type}")
+        
         # 更新窗口激活配置
         window_activation = global_config.get("window_activation", {})
         if window_activation:

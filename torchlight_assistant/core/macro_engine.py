@@ -82,8 +82,8 @@ class MacroEngine:
         self.hotkey_manager = hotkey_manager or CtypesHotkeyManager()
 
         self._setup_event_subscriptions()
-        self.load_config(self.current_config_file)
-        self._setup_hotkeys()
+        self.load_config(self.current_config_file)  # 先加载配置(会注册x/a热键)
+        self._setup_hotkeys()  # 再启动hotkey_manager
 
     def _setup_event_subscriptions(self):
         event_bus.subscribe("ui:load_config_requested", self.load_config)
@@ -379,6 +379,8 @@ class MacroEngine:
         self, skills_config: Dict[str, Any], global_config: Dict[str, Any]
     ):
         """响应配置更新，安全地更新所有可配置的热键和资源管理器。"""
+        LOG_INFO(f"[配置更新] _on_config_updated 被调用")
+        
         # 更新资源管理器配置
         resource_config = global_config.get("resource_management", {})
         if resource_config:
@@ -390,7 +392,10 @@ class MacroEngine:
         self.input_handler.set_dry_run_mode(debug_mode_enabled)
         LOG_INFO(f"[DEBUG MODE] _on_config_updated: 干跑模式已设置为 {debug_mode_enabled}")
 
-        # 提取新的热键配置
+        # 先取消所有可配置的热键,避免角色转换冲突
+        self._unregister_all_configurable_hotkeys()
+        
+        # 提取新的热键配置并重新注册
         stationary_config = global_config.get("stationary_mode_config", {})
         pathfinding_config = global_config.get("pathfinding_config", {})
 
@@ -402,125 +407,92 @@ class MacroEngine:
             "pathfinding": pathfinding_config.get("hotkey", "").strip().lower(),
         }
 
-        # 逐个安全地更新热键
+        # 重新注册所有热键
         for hotkey_type, new_key in new_hotkeys.items():
-            if not self._update_hotkey_safely(hotkey_type, new_key):
-                # 如果更新失败，向UI发送通知
+            if not self._register_hotkey(hotkey_type, new_key):
+                # 如果注册失败，向UI发送通知
                 event_bus.publish("ui:hotkey_update_failed", hotkey_type, new_key)
 
         # 更新OSD可见性
         self._update_osd_visibility()
 
-    def _update_hotkey_safely(self, hotkey_type: str, new_key: str) -> bool:
-        """安全地更新单个热键，实现原子化操作（先注册，后取消）。"""
+    def _unregister_all_configurable_hotkeys(self):
+        """取消注册所有可配置的热键(stationary/force_move/pathfinding)"""
+        LOG_INFO("[热键管理] 取消注册所有可配置热键")
+        
+        # 取消原地模式热键
+        if self._registered_stationary_hotkey:
+            try:
+                self.hotkey_manager.unregister_hotkey(self._registered_stationary_hotkey)
+                LOG_INFO(f"[热键管理] 已取消原地模式热键: {self._registered_stationary_hotkey}")
+            except Exception as e:
+                LOG_ERROR(f"[热键管理] 取消原地模式热键失败: {e}")
+            self._registered_stationary_hotkey = None
+        
+        # 取消交互/强制移动热键
+        if self._registered_force_move_hotkey:
+            try:
+                self.hotkey_manager.unregister_hotkey(self._registered_force_move_hotkey)
+                LOG_INFO(f"[热键管理] 已取消交互/强制移动热键: {self._registered_force_move_hotkey}")
+            except Exception as e:
+                LOG_ERROR(f"[热键管理] 取消交互/强制移动热键失败: {e}")
+            self._registered_force_move_hotkey = None
+        
+        # 取消寻路模式热键
+        if self._registered_pathfinding_hotkey:
+            try:
+                self.hotkey_manager.unregister_hotkey(self._registered_pathfinding_hotkey)
+                LOG_INFO(f"[热键管理] 已取消寻路模式热键: {self._registered_pathfinding_hotkey}")
+            except Exception as e:
+                LOG_ERROR(f"[热键管理] 取消寻路模式热键失败: {e}")
+            self._registered_pathfinding_hotkey = None
+    
+    def _register_hotkey(self, hotkey_type: str, key: str) -> bool:
+        """注册单个热键"""
+        if not key:
+            LOG_INFO(f"[热键管理] 热键 '{hotkey_type}' 为空,跳过注册")
+            return True
+        
         hotkey_map = {
             "stationary": {
-                "getter": lambda: self._registered_stationary_hotkey,
-                "setter": lambda key: setattr(
-                    self, "_registered_stationary_hotkey", key
-                ),
+                "setter": lambda k: setattr(self, "_registered_stationary_hotkey", k),
                 "callback": self._on_stationary_key_press,
                 "release_callback": self._on_stationary_key_release,
                 "suppress": "conditional",
             },
             "force_move": {
-                "getter": lambda: self._registered_force_move_hotkey,
-                "setter": lambda key: setattr(
-                    self, "_registered_force_move_hotkey", key
-                ),
+                "setter": lambda k: setattr(self, "_registered_force_move_hotkey", k),
                 "callback": self._on_force_move_key_press,
                 "release_callback": self._on_force_move_key_release,
                 "suppress": False,
             },
             "pathfinding": {
-                "getter": lambda: self._registered_pathfinding_hotkey,
-                "setter": lambda key: setattr(
-                    self, "_registered_pathfinding_hotkey", key
-                ),
+                "setter": lambda k: setattr(self, "_registered_pathfinding_hotkey", k),
                 "callback": self._on_f9_key_press,
                 "release_callback": None,
                 "suppress": "conditional",
             },
         }
-
+        
         if hotkey_type not in hotkey_map:
+            LOG_ERROR(f"[热键管理] 未知的热键类型: {hotkey_type}")
             return False
-
+        
         config = hotkey_map[hotkey_type]
-        old_key = config["getter"]()
-
-        # 如果新旧热键相同，则无需操作
-        if old_key == new_key:
+        
+        try:
+            self.hotkey_manager.register_key_event(
+                key,
+                on_press=config["callback"],
+                on_release=config.get("release_callback"),
+                suppress=config["suppress"],
+            )
+            config["setter"](key)
+            LOG_INFO(f"[热键管理] 成功注册热键 '{hotkey_type}': {key}")
             return True
-
-        # 尝试注册新热键
-        if new_key:
-            try:
-                self.hotkey_manager.register_key_event(
-                    new_key,
-                    on_press=config["callback"],
-                    on_release=config.get("release_callback"),
-                    suppress=config["suppress"],
-                )
-                LOG_INFO(f"[热键管理] 成功注册新热键 '{hotkey_type}': {new_key}")
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 注册热键 '{hotkey_type}' ({new_key}) 失败: {e}")
-                # 注册失败，保持原状，返回False
-                return False
-
-        # 新热键注册成功（或新热键为空），现在可以安全地取消旧热键
-        if old_key:
-            try:
-                self.hotkey_manager.unregister_hotkey(old_key)
-                LOG_INFO(f"[热键管理] 成功取消旧热键 '{hotkey_type}': {old_key}")
-            except Exception as e:
-                LOG_ERROR(
-                    f"[热键管理] 取消旧热键 '{hotkey_type}' ({old_key}) 失败: {e}"
-                )
-
-        # 更新状态变量
-        config["setter"](new_key if new_key else None)
-        return True
-
-    def _unregister_pathfinding_hotkey(self):
-        """取消注册寻路模式热键"""
-        if self._registered_pathfinding_hotkey:
-            try:
-                self.hotkey_manager.unregister_hotkey(
-                    self._registered_pathfinding_hotkey
-                )
-                LOG_INFO(
-                    f"[热键管理] 已取消寻路模式热键: {self._registered_pathfinding_hotkey}"
-                )
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 取消寻路模式热键失败: {e}")
-            self._registered_pathfinding_hotkey = None
-
-    def _unregister_stationary_hotkeys(self):
-        """取消注册原地模式和交互模式热键"""
-        if self._registered_stationary_hotkey:
-            try:
-                self.hotkey_manager.unregister_hotkey(
-                    self._registered_stationary_hotkey
-                )
-                LOG_INFO(
-                    f"[热键管理] 已取消原地模式热键: {self._registered_stationary_hotkey}"
-                )
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 取消原地模式热键失败: {e}")
-            self._registered_stationary_hotkey = None
-
-        if self._registered_force_move_hotkey:
-            try:
-                self.hotkey_manager.unregister_hotkey(
-                    self._registered_force_move_hotkey
-                )
-                LOG_INFO(
-                    f"[热键管理] 已取消交互/强制移动热键: {self._registered_force_move_hotkey}"
-                )
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 取消交互/强制移动热键失败: {e}")
-            self._registered_force_move_hotkey = None
+        except Exception as e:
+            LOG_ERROR(f"[热键管理] 注册热键 '{hotkey_type}' ({key}) 失败: {e}")
+            return False
 
     def _on_stationary_key_press(self):
         """原地模式热键按下事件 - 切换模式"""
@@ -605,6 +577,9 @@ class MacroEngine:
             LOG_ERROR(f"[DEBUG MODE] 设置DEBUG MODE异常详情:\n{traceback.format_exc()}")
 
     def load_config(self, config_file: str):
+        LOG_INFO(f"[配置加载] 开始加载配置文件: {config_file}")
+        LOG_INFO(f"[配置加载] 当前X键注册状态: {self._registered_stationary_hotkey}")
+        LOG_INFO(f"[配置加载] 当前A键注册状态: {self._registered_force_move_hotkey}")
         try:
             config_path = __import__("pathlib").Path(config_file)
             if not config_path.exists() or config_path.stat().st_size == 0:
@@ -737,8 +712,7 @@ class MacroEngine:
             self._cleanup_layer(layer_name, components)
 
         # 最后，清理自身状态
-        self._unregister_stationary_hotkeys()
-        self._unregister_pathfinding_hotkey()
+        self._unregister_all_configurable_hotkeys()
         LOG_INFO("[清理] 所有组件清理完毕。")
 
     def _cleanup_layer(self, layer_name: str, components: list):
