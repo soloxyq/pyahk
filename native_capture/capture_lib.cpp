@@ -83,6 +83,11 @@ public:
     int original_width = 0;   // 原始屏幕宽度
     int original_height = 0;  // 原始屏幕高度
     
+    // Staging texture for GPU-to-CPU transfer (reused across captures)
+    ID3D11Texture2D* staging_texture = nullptr;
+    int staging_width = 0;
+    int staging_height = 0;
+    
     // Timing
     int64_t last_capture_time = 0;
     
@@ -91,6 +96,10 @@ public:
     }
     
     void cleanup() {
+        if (staging_texture) {
+            staging_texture->Release();
+            staging_texture = nullptr;
+        }
         if (duplication) {
             duplication->Release();
             duplication = nullptr;
@@ -207,19 +216,23 @@ static bool SetupDuplication(DXGICaptureSession* session) {
     session->original_width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
     session->original_height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
     
-    // Initialize buffers with maximum possible size to avoid frequent resizing
-    size_t max_buffer_size = session->original_width * session->original_height * 4;
-    size_t initial_buffer_size = session->config.enable_region ? 
-        (session->config.region.width * session->config.region.height * 4) : max_buffer_size;
+    // Calculate buffer size based on actual capture region
+    int buffer_width = session->config.enable_region ? 
+        session->config.region.width : session->original_width;
+    int buffer_height = session->config.enable_region ? 
+        session->config.region.height : session->original_height;
     
-    // Pre-allocate with some extra space to handle minor size variations
-    size_t allocate_size = (std::max)(initial_buffer_size, max_buffer_size / 4);
+    // Calculate required size (BGRA = 4 bytes per pixel)
+    size_t required_size = buffer_width * buffer_height * 4;
+    
+    // Allocate 110% of required size to handle minor resolution changes
+    size_t allocate_size = required_size * 110 / 100;
     
     try {
-        session->buffer_a.reserve(allocate_size + 1024); // Extra 1KB for safety
-        session->buffer_b.reserve(allocate_size + 1024);
         session->buffer_a.resize(allocate_size);
         session->buffer_b.resize(allocate_size);
+        DEBUG_PRINT("SetupDuplication: Allocated " << allocate_size 
+                   << " bytes for " << buffer_width << "x" << buffer_height);
     } catch (const std::bad_alloc&) {
         return false; // Failed to allocate buffers
     }
@@ -279,26 +292,42 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
     D3D11_TEXTURE2D_DESC desc;
     desktopTexture->GetDesc(&desc);
     
-    ID3D11Texture2D* stagingTexture = nullptr;
-    D3D11_TEXTURE2D_DESC stagingDesc = desc;
-    stagingDesc.Usage = D3D11_USAGE_STAGING;
-    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    stagingDesc.BindFlags = 0;
-    stagingDesc.MiscFlags = 0;
-    
-    hr = g_d3d_device->CreateTexture2D(&stagingDesc, nullptr, &stagingTexture);
-    if (FAILED(hr)) {
-        desktopTexture->Release();
-        session->duplication->ReleaseFrame();
-        return false;
+    // Reuse staging texture if dimensions match, otherwise recreate
+    if (!session->staging_texture || 
+        session->staging_width != static_cast<int>(desc.Width) || 
+        session->staging_height != static_cast<int>(desc.Height)) {
+        
+        // Release old staging texture if exists
+        if (session->staging_texture) {
+            session->staging_texture->Release();
+            session->staging_texture = nullptr;
+        }
+        
+        // Create new staging texture
+        D3D11_TEXTURE2D_DESC stagingDesc = desc;
+        stagingDesc.Usage = D3D11_USAGE_STAGING;
+        stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        stagingDesc.BindFlags = 0;
+        stagingDesc.MiscFlags = 0;
+        
+        hr = g_d3d_device->CreateTexture2D(&stagingDesc, nullptr, &session->staging_texture);
+        if (FAILED(hr)) {
+            desktopTexture->Release();
+            session->duplication->ReleaseFrame();
+            return false;
+        }
+        
+        session->staging_width = desc.Width;
+        session->staging_height = desc.Height;
+        DEBUG_PRINT("CaptureFrameData: Created staging texture " 
+                   << desc.Width << "x" << desc.Height);
     }
     
-    g_d3d_context->CopyResource(stagingTexture, desktopTexture);
+    g_d3d_context->CopyResource(session->staging_texture, desktopTexture);
     
     D3D11_MAPPED_SUBRESOURCE mapped;
-    hr = g_d3d_context->Map(stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+    hr = g_d3d_context->Map(session->staging_texture, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) {
-        stagingTexture->Release();
         desktopTexture->Release();
         session->duplication->ReleaseFrame();
         return false;
@@ -330,8 +359,7 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
             DEBUG_PRINT("CaptureFrameData: Buffer resized to " << new_size << " bytes (required: " << required_size << ")");
         } catch (const std::bad_alloc&) {
             // handle allocation failure
-            g_d3d_context->Unmap(stagingTexture, 0);
-            stagingTexture->Release();
+            g_d3d_context->Unmap(session->staging_texture, 0);
             desktopTexture->Release();
             session->duplication->ReleaseFrame();
             return false;
@@ -361,9 +389,8 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
     // Swap buffers for next capture
     session->writing_to_a = !session->writing_to_a;
     
-    // Cleanup
-    g_d3d_context->Unmap(stagingTexture, 0);
-    stagingTexture->Release();
+    // Cleanup (staging texture is reused, not released)
+    g_d3d_context->Unmap(session->staging_texture, 0);
     desktopTexture->Release();
     session->duplication->ReleaseFrame();
     
