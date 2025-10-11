@@ -204,6 +204,8 @@ class InputHandler:
     def _handle_managed_key_with_delay(self, target_key: str, delay_ms: int, source_key: str):
         """统一处理管理按键（包括普通管理和重映射），确保延迟生效"""
         try:
+            # 规范化目标按键名，兼容多种写法
+            target_key = self._normalize_key_name(target_key)
             if source_key != target_key:
                 LOG_INFO(f"[按键映射] {source_key} → {target_key} (延迟: {delay_ms}ms)")
             else:
@@ -444,10 +446,12 @@ class InputHandler:
         """根据按键类型执行具体输入操作"""
         key_lower = key_str.lower()
 
-        if key_lower in ["lbutton", "leftclick"]:
+        if key_lower in ["lbutton", "leftclick", "left_mouse"]:
             self.click_mouse("left")
-        elif key_lower in ["rbutton", "rightclick"]:
+        elif key_lower in ["rbutton", "rightclick", "right_mouse"]:
             self.click_mouse("right")
+        elif key_lower in ["middle_mouse"]:
+            self.click_mouse("middle")
         else:
             self.send_key(key_str)
 
@@ -574,6 +578,15 @@ class InputHandler:
         if not key_str:
             return False
 
+        # 干跑模式：只记录动作，不实际发送
+        if self.dry_run_mode:
+            try:
+                if self.debug_display_manager:
+                    self.debug_display_manager.add_action(f"Key:{key_str}")
+            except Exception:
+                pass
+            return True
+
         with self.input_lock:
             try:
                 return self._send_key_pynput(key_str)
@@ -606,6 +619,16 @@ class InputHandler:
 
     def click_mouse(self, button: str = "left", hold_time: Optional[float] = None) -> bool:
         """使用Pynput点击鼠标"""
+        # 干跑模式：只记录动作，不实际发送
+        if self.dry_run_mode:
+            try:
+                if self.debug_display_manager:
+                    detail = f",{hold_time:.3f}s" if hold_time is not None else ""
+                    self.debug_display_manager.add_action(f"Mouse:{button}{detail}")
+            except Exception:
+                pass
+            return True
+
         with self.input_lock:
             try:
                 return self._click_mouse_pynput(button, hold_time)
@@ -641,6 +664,15 @@ class InputHandler:
         """发送带修饰符的按键"""
         if not key_str:
             return False
+
+        # 干跑模式：只记录动作，不实际发送
+        if self.dry_run_mode:
+            try:
+                if self.debug_display_manager:
+                    self.debug_display_manager.add_action(f"Key:{modifier}+{key_str}")
+            except Exception:
+                pass
+            return True
 
         with self.input_lock:
             try:
@@ -689,6 +721,16 @@ class InputHandler:
 
     def click_mouse_with_modifier(self, button: str = "left", modifier: str = "shift", hold_time: Optional[float] = None) -> bool:
         """发送带修饰符的鼠标点击"""
+        # 干跑模式：只记录动作，不实际发送
+        if self.dry_run_mode:
+            try:
+                if self.debug_display_manager:
+                    detail = f",{hold_time:.3f}s" if hold_time is not None else ""
+                    self.debug_display_manager.add_action(f"Mouse:{modifier}+{button}{detail}")
+            except Exception:
+                pass
+            return True
+
         with self.input_lock:
             try:
                 # 获取修饰符对象

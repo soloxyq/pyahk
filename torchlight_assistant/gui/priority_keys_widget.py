@@ -464,9 +464,10 @@ class PriorityKeysWidget(QWidget):
         # 新的默认配置：分层结构
         self.special_keys = {"space"}  # 空格：状态监控
         self.managed_keys = {"right_mouse"}  # 右键：程序接管
-        
+
         self.priority_keys_config["space"] = 0         # 特殊按键：无延迟
-        self.priority_keys_config["right_mouse"] = 50   # 管理按键：50ms延迟
+        # 管理按键使用对象格式，默认自映射，便于与核心对齐
+        self.priority_keys_config["right_mouse"] = {"target": "right_mouse", "delay": 50}
         
         self._update_keys_display()
 
@@ -497,10 +498,14 @@ class PriorityKeysWidget(QWidget):
         display_name = key_names.get(key, f'{key.upper()}键')
         
         if isinstance(config, dict):
-            # 映射按键
-            target = config.get('target', '')
-            delay = config.get('delay', 0)
-            return f"🔁 {display_name} ({key}) → {target} - {delay}ms"
+            # 映射/管理按键（对象格式）
+            target = str(config.get('target', '')).strip()
+            delay = int(config.get('delay', 0))
+            # 目标与源相同：显示为管理按键；不同则显示为映射
+            if target and target != key:
+                return f"🔁 {display_name} ({key}) → {target} - {delay}ms"
+            else:
+                return f"🔧 {display_name} ({key}) - {delay}ms"
         else:
             # 简单按键
             delay = config
@@ -600,8 +605,8 @@ class PriorityKeysWidget(QWidget):
             self.special_keys.discard(key_name)
             LOG_INFO(f"[优先级按键] 添加映射按键: {key_name} → {target_key} (延迟: {delay}ms)")
         else:
-            # 管理按键：使用配置的延迟
-            self.priority_keys_config[key_name] = delay
+            # 管理按键：使用对象格式，默认自映射
+            self.priority_keys_config[key_name] = {"target": key_name, "delay": delay}
             self.managed_keys.add(key_name)
             self.special_keys.discard(key_name)
             LOG_INFO(f"[优先级按键] 添加管理按键: {key_name} (延迟: {delay}ms)")
@@ -637,7 +642,7 @@ class PriorityKeysWidget(QWidget):
             return
         
         key_name = current_item.data(Qt.ItemDataRole.UserRole)
-        new_target = self.edit_target_input.text().strip()
+        new_target = self._normalize_key_name(self.edit_target_input.text().strip())
         
         if key_name in self.priority_keys_config:
             config = self.priority_keys_config[key_name]
@@ -715,8 +720,8 @@ class PriorityKeysWidget(QWidget):
                 self.priority_keys_config[key] = 0
                 self.special_keys.add(key)
             else:
-                # 其他按键为管理按键
-                self.priority_keys_config[key] = delay
+                # 其他按键为管理按键（对象格式，自映射）
+                self.priority_keys_config[key] = {"target": key, "delay": delay}
                 self.managed_keys.add(key)
         
         self._update_keys_display()
@@ -737,20 +742,26 @@ class PriorityKeysWidget(QWidget):
         
         if has_selection:
             key_name = current_item.data(Qt.ItemDataRole.UserRole)
-        if key_name in self.priority_keys_config:
-            config = self.priority_keys_config[key_name]
+            if key_name in self.priority_keys_config:
+                config = self.priority_keys_config[key_name]
             
-            # 解析延迟值
-            if isinstance(config, dict):
-                delay = config.get('delay', 0)
-                # 确保delay是整数
-                if isinstance(delay, str):
-                    try:
-                        delay = int(delay)
-                    except ValueError:
-                        delay = 0
-            else:
-                delay = config
+                # 解析延迟值
+                if isinstance(config, dict):
+                    delay = config.get('delay', 0)
+                    # 确保delay是整数
+                    if isinstance(delay, str):
+                        try:
+                            delay = int(delay)
+                        except ValueError:
+                            delay = 0
+                    # 对象格式时允许编辑目标
+                    self.edit_target_input.setEnabled(True)
+                    self.edit_target_input.setText(str(config.get('target', '')))
+                else:
+                    delay = int(config)
+                    # 特殊按键不允许编辑目标
+                    self.edit_target_input.setEnabled(False)
+                    self.edit_target_input.clear()
             
             # 更新延迟输入框
             self.edit_delay_input.blockSignals(True)  # 防止循环信号
@@ -788,20 +799,24 @@ class PriorityKeysWidget(QWidget):
                     margin: 2px 0px;
                 }
             """)
+            self.edit_target_input.setEnabled(False)
+            self.edit_target_input.clear()
 
     def get_config(self) -> Dict[str, Any]:
-        """获取当前配置 - 支持映射格式"""
+        """获取当前配置 - 始终输出对象格式的管理按键信息"""
         managed_keys_config = {}
         
         # 从 priority_keys_config 中提取管理按键配置
         for key, config in self.priority_keys_config.items():
             if key in self.managed_keys:
                 if isinstance(config, dict):
-                    # 映射按键：保持字典格式
-                    managed_keys_config[key] = config
+                    # 映射/管理按键：保持/输出对象格式
+                    target = str(config.get('target', key)).strip() or key
+                    delay = int(config.get('delay', 0))
+                    managed_keys_config[key] = {"target": target, "delay": delay}
                 else:
-                    # 简单管理按键：转为数值
-                    managed_keys_config[key] = config
+                    # 兼容：将简单延迟转换为对象格式（默认自映射）
+                    managed_keys_config[key] = {"target": key, "delay": int(config)}
         
         return {
             "enabled": self.widgets["enabled"].isChecked(),
@@ -810,7 +825,7 @@ class PriorityKeysWidget(QWidget):
         }
 
     def set_config(self, config: Dict[str, Any]):
-        """设置配置 - 只支持新格式"""
+        """设置配置 - 规范化为对象格式（管理按键）"""
         if "enabled" in config:
             self.widgets["enabled"].setChecked(config["enabled"])
         
@@ -828,9 +843,14 @@ class PriorityKeysWidget(QWidget):
             self.priority_keys_config[key] = 0
             self.special_keys.add(key)
         
-        # 管理按键：使用配置的延迟
-        for key, delay in managed_keys_config.items():
-            self.priority_keys_config[key] = delay
+        # 管理按键：规范为对象格式
+        for key, val in managed_keys_config.items():
+            if isinstance(val, dict):
+                target = str(val.get('target', key)).strip() or key
+                delay = int(val.get('delay', 0))
+                self.priority_keys_config[key] = {"target": target, "delay": delay}
+            else:
+                self.priority_keys_config[key] = {"target": key, "delay": int(val)}
             self.managed_keys.add(key)
         
         self._update_keys_display()

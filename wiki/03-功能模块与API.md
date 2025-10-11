@@ -1,6 +1,6 @@
-# 03 功能模块详解
+# 03 功能模块与 API
 
-本章详细介绍pyahk的四大核心功能模块：技能系统、智能药剂、装备洗练和自动寻路。每个模块都采用模块化设计，既可独立运行，也可协同工作。
+本章覆盖 pyahk 的核心功能模块（技能系统、智能药剂、装备洗练、自动寻路、优先级输入）及其常用 API，既可独立运行，也可协同工作。
 
 ## 🎮 优先级按键系统（高精度手动操作）
 
@@ -239,3 +239,71 @@ pyahk采用多级优先队列系统，确保最关键的操作能被最先执行
 4. **自动恢复**: 释放按键后自动恢复正常调度
 
 这种设计确保了手动操作的绝对优先级和游戏体验的流畅性。
+
+---
+
+## 🔌 常用 API 索引（精选）
+
+以下列出项目内最常用、对二次开发最友好的 API（完整细节已在原 09 文档中，现合并精简于此）：
+
+### EventBus
+```python
+from torchlight_assistant.core.event_bus import event_bus
+
+def handler(data=None, **kw):
+  ...
+
+event_bus.subscribe("custom:event", handler)
+event_bus.publish("custom:event", data={"msg": "hi"})
+event_bus.unsubscribe("custom:event", handler)
+```
+
+内置事件要点：
+- engine:state_changed, engine:config_updated, engine:shutdown
+- ui:load_config_requested, ui:save_full_config_requested
+- scheduler_pause_requested, scheduler_resume_requested
+
+### UnifiedScheduler
+```python
+from torchlight_assistant.core.unified_scheduler import UnifiedScheduler
+
+s = UnifiedScheduler()
+s.add_task(task_id="tick", interval=0.5, callback=lambda: None)
+s.pause(); s.resume(); s.remove_task("tick")
+s.add_one_time_task(task_id="later", delay=2.0, callback=lambda: None)
+```
+
+### InputHandler（支持序列与优先级）
+```python
+from torchlight_assistant.core.input_handler import InputHandler
+
+ih = InputHandler()
+ih.execute_skill_normal("delay50,q")
+ih.execute_skill_high("q,delay100,w")
+ih.execute_utility("tab")
+ih.execute_hp_potion("1")
+
+# 队列与状态
+ih.get_queue_length(); ih.get_queue_stats(); ih.clear_queue()
+ih.is_priority_mode_active(); ih.get_active_priority_keys()
+```
+
+序列语法：delayX，组合键如 shift+q；逗号分隔；末尾自动清理标记防止重复堆积。
+
+### BorderFrameManager（图像/模板缓存）
+```python
+from torchlight_assistant.utils.border_frame_manager import BorderFrameManager
+
+bm = BorderFrameManager()
+frame = bm.get_current_frame()
+roi = bm.get_region_frame(100, 50, 200, 100)
+bm.set_template_cache("hp", {"hsv": [0,0,0]})
+bm.get_template_cache("hp"); bm.clear_cache()
+```
+
+### 自定义扩展点（概览）
+- 模块基类：实现 start/stop/_process_iteration，订阅事件即可接入
+- 输入处理器：can_process/process_action 增强输入语义
+- 条件检查器：check_condition(frame, skill_config) 拓展执行条件
+
+更多高级示例（插件、AI 决策、游戏 Profile 工厂）可参考原 09 文档内容，现已折叠至本章附录或源代码注释。

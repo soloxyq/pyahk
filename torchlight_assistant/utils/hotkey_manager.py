@@ -47,7 +47,7 @@ VK_CODES = {
 
     # Special keys
     "backspace": 0x08, "tab": 0x09, "clear": 0x0C, "enter": 0x0D, "shift": 0x10, "ctrl": 0x11,
-    "alt": 0x12, "pause": 0x13, "capslock": 0x14, "escape": 0x1B, "space": 0x20, "pageup": 0x21,
+    "alt": 0x12, "pause": 0x13, "capslock": 0x14, "escape": 0x1B, "esc": 0x1B, "space": 0x20, "pageup": 0x21,
     "pagedown": 0x22, "end": 0x23, "home": 0x24, "left": 0x25, "up": 0x26, "right": 0x27,
     "down": 0x28, "select": 0x29, "print": 0x2A, "execute": 0x2B, "snapshot": 0x2C, "insert": 0x2D,
     "delete": 0x2E, "help": 0x2F, "lwin": 0x5B, "rwin": 0x5C, "apps": 0x5D, "sleep": 0x5F,
@@ -191,20 +191,18 @@ class CtypesHotkeyManager:
                 if wParam == WM_KEYDOWN or wParam == WM_SYSKEYDOWN:
                     if key_name and key_name not in self.pressed_keys:
                         self.pressed_keys.add(key_name)
-                        if (
-                            vk_code in self.key_events
-                            and self.key_events[vk_code]["on_press"]
-                        ):
-                            self.key_events[vk_code]["on_press"]()
+                        if vk_code in self.key_events:
+                            cb = self.key_events[vk_code]["on_press"]
+                            if cb is not None:
+                                cb()
 
                 elif wParam == WM_KEYUP or wParam == WM_SYSKEYUP:
                     if key_name and key_name in self.pressed_keys:
                         self.pressed_keys.remove(key_name)
-                        if (
-                            vk_code in self.key_events
-                            and self.key_events[vk_code]["on_release"]
-                        ):
-                            self.key_events[vk_code]["on_release"]()
+                        if vk_code in self.key_events:
+                            cb = self.key_events[vk_code]["on_release"]
+                            if cb is not None:
+                                cb()
 
                 if should_suppress:
                     return 1
@@ -294,20 +292,18 @@ class CtypesHotkeyManager:
                         # 按键按下
                         if key_name not in self.pressed_keys:
                             self.pressed_keys.add(key_name)
-                            if (
-                                vk_code in self.key_events
-                                and self.key_events[vk_code]["on_press"]
-                            ):
-                                self.key_events[vk_code]["on_press"]()
+                            if vk_code in self.key_events:
+                                cb = self.key_events[vk_code]["on_press"]
+                                if cb is not None:
+                                    cb()
                     else:
                         # 按键释放
                         if key_name in self.pressed_keys:
                             self.pressed_keys.remove(key_name)
-                            if (
-                                vk_code in self.key_events
-                                and self.key_events[vk_code]["on_release"]
-                            ):
-                                self.key_events[vk_code]["on_release"]()
+                            if vk_code in self.key_events:
+                                cb = self.key_events[vk_code]["on_release"]
+                                if cb is not None:
+                                    cb()
 
                     if should_suppress:
                         return 1
