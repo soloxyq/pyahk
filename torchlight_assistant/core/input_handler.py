@@ -405,7 +405,7 @@ class InputHandler:
         LOG_INFO("[输入处理器] 资源清理完成")
 
     def _queue_processor_loop(self):
-        """队列处理器循环"""
+        """队列处理器循环 - 优化版：提取方法，减少嵌套"""
         while not self._stop_event.is_set():
             try:
                 key_to_execute = self._key_queue.get(timeout=0.1)
@@ -414,33 +414,51 @@ class InputHandler:
                 continue
 
             try:
-                key_lower = key_to_execute.lower()
-
-                # 处理延迟指令
-                if key_lower.startswith("delay"):
-                    try:
-                        delay_ms = int(key_lower[5:])
-                        if self._stop_event.wait(delay_ms / 1000.0):
-                            break
-                    except (ValueError, IndexError):
-                        LOG_ERROR(f"[按键处理] 无效的延迟按键格式: {key_to_execute}")
+                # 处理延迟指令（提前返回，减少嵌套）
+                if self._handle_delay_command(key_to_execute):
                     continue
-
-                # 使用缓存的状态进行决策
-                if self._cached_force_move:
-                    # X键按下时，所有技能键都改成F键（交互键）
-                    self._execute_key("f")
-                elif self._cached_stationary_mode:
-                    if self._cached_stationary_mode_type == "block_mouse":
-                        if key_lower not in ["lbutton", "leftclick", "rbutton", "rightclick"]:
-                            self._execute_key(key_to_execute)
-                    elif self._cached_stationary_mode_type == "shift_modifier":
-                        self._execute_key_with_shift(key_to_execute)
-                else:
-                    self._execute_key(key_to_execute)
-
+                
+                # 根据缓存状态选择执行策略
+                self._execute_with_current_mode(key_to_execute)
+                
             except Exception as e:
                 LOG_ERROR(f"[队列处理器] 处理按键 '{key_to_execute}' 时发生异常: {e}")
+
+    def _handle_delay_command(self, key: str) -> bool:
+        """处理延迟指令，返回True表示已处理"""
+        key_lower = key.lower()
+        if not key_lower.startswith("delay"):
+            return False
+        
+        try:
+            delay_ms = int(key_lower[5:])
+            # 等待指定时间，如果收到停止信号则提前返回
+            self._stop_event.wait(delay_ms / 1000.0)
+        except (ValueError, IndexError):
+            LOG_ERROR(f"[按键处理] 无效的延迟格式: {key}")
+        
+        return True
+
+    def _execute_with_current_mode(self, key: str):
+        """根据当前模式执行按键"""
+        if self._cached_force_move:
+            # X键按下时，所有技能键都改成F键（交互键）
+            self._execute_key("f")
+        elif self._cached_stationary_mode:
+            self._execute_stationary_mode(key)
+        else:
+            self._execute_key(key)
+
+    def _execute_stationary_mode(self, key: str):
+        """原地攻击模式的执行逻辑"""
+        if self._cached_stationary_mode_type == "block_mouse":
+            # 阻断鼠标模式：过滤鼠标按键
+            key_lower = key.lower()
+            if key_lower not in ["lbutton", "leftclick", "rbutton", "rightclick"]:
+                self._execute_key(key)
+        elif self._cached_stationary_mode_type == "shift_modifier":
+            # Shift修饰模式：所有按键带Shift
+            self._execute_key_with_shift(key)
 
     def _execute_key(self, key_str: str):
         """根据按键类型执行具体输入操作"""
