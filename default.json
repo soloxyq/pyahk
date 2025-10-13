@@ -126,12 +126,6 @@
         "debug_mode": {
             "enabled": false
         },
-        "tesseract_ocr": {
-            "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
-            "lang": "eng",
-            "psm_mode": 7,
-            "char_whitelist": "0123456789/"
-        },
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
@@ -180,16 +174,17 @@
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "rectangle",
-                "region_x1": 136,
-                "region_y1": 910,
-                "region_x2": 213,
-                "region_y2": 1004,
+                "detection_mode": "text_ocr",
                 "text_x1": 97,
                 "text_y1": 814,
                 "text_x2": 218,
                 "text_y2": 835,
-                "match_threshold": 0.70,
+                "ocr_engine": "tesseract",
+                "match_threshold": 0.7,
+                "region_x1": 136,
+                "region_y1": 910,
+                "region_x2": 213,
+                "region_y2": 1004,
                 "colors": [
                     {
                         "name": "Color1",
@@ -219,16 +214,17 @@
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "rectangle",
-                "region_x1": 1552,
-                "region_y1": 910,
-                "region_x2": 1560,
-                "region_y2": 1004,
+                "detection_mode": "text_ocr",
                 "text_x1": 1767,
                 "text_y1": 814,
                 "text_x2": 1894,
                 "text_y2": 835,
-                "match_threshold": 0.70,
+                "ocr_engine": "tesseract",
+                "match_threshold": 0.7,
+                "region_x1": 1552,
+                "region_y1": 910,
+                "region_x2": 1560,
+                "region_y2": 1004,
                 "colors": [
                     {
                         "name": "Color1",
@@ -256,6 +252,12 @@
                 "NutstoreClient.exe",
                 "notepad++.exe"
             ]
+        },
+        "tesseract_ocr": {
+            "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            "lang": "eng",
+            "psm_mode": 7,
+            "char_whitelist": "0123456789/"
         }
     }
 }

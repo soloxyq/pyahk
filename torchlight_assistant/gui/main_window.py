@@ -420,7 +420,20 @@ class GameSkillConfigUI(QMainWindow):
         if self.priority_keys_widget: global_config["priority_keys"] = self.priority_keys_widget.get_config()
         skills_config = self.skill_config.get_config() if self.skill_config else {}
         if hasattr(self.skill_config, "sequence_entry"): global_config["skill_sequence"] = self.skill_config.sequence_entry.text()
+        # 保留不在UI中编辑的配置段
         global_config["process_history"] = self._global_config.get("process_history", {})
+        
+        # tesseract_ocr 配置：如果为空则使用默认值
+        tesseract_config = self._global_config.get("tesseract_ocr", {})
+        if not tesseract_config:
+            tesseract_config = {
+                "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+                "lang": "eng",
+                "psm_mode": 7,
+                "char_whitelist": "0123456789/"
+            }
+        global_config["tesseract_ocr"] = tesseract_config
+        
         return {"skills": skills_config, "global": global_config}
 
     def _save_config_file(self):

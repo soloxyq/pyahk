@@ -58,6 +58,16 @@ class ResourceManager:
             global_config = config_manager.load_config("default.json")
             tesseract_config = global_config.get("global", {}).get("tesseract_ocr", {})
             
+            # 如果配置为空，使用默认值
+            if not tesseract_config:
+                tesseract_config = {
+                    "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+                    "lang": "eng",
+                    "psm_mode": 7,
+                    "char_whitelist": "0123456789/"
+                }
+                LOG_INFO("[ResourceManager] 使用默认 Tesseract OCR 配置")
+            
             # 获取全局单例（只会初始化一次）
             self.tesseract_ocr_manager = get_tesseract_ocr_manager(tesseract_config)
             LOG_INFO("[ResourceManager] Tesseract OCR 已预加载")

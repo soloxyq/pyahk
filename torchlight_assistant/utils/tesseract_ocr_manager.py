@@ -15,13 +15,24 @@ class TesseractOcrManager:
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """初始化 Tesseract OCR 管理器"""
+        # 设置默认配置
+        default_config = {
+            'tesseract_cmd': 'D:\\Program Files\\Tesseract-OCR\\tesseract.exe',
+            'lang': 'eng',
+            'psm_mode': 7,
+            'char_whitelist': '0123456789/'
+        }
+        
+        # 合并用户配置和默认配置
         config = config or {}
-        tesseract_cmd = config.get('tesseract_cmd', '')
+        merged_config = {**default_config, **config}
+        
+        tesseract_cmd = merged_config.get('tesseract_cmd', '')
         if tesseract_cmd and os.path.exists(tesseract_cmd):
             pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-        self.lang = config.get('lang', 'eng')
-        psm_mode = config.get('psm_mode', 7)
-        char_whitelist = config.get('char_whitelist', '0123456789/')
+        self.lang = merged_config.get('lang', 'eng')
+        psm_mode = merged_config.get('psm_mode', 7)
+        char_whitelist = merged_config.get('char_whitelist', '0123456789/')
         self.custom_config = f'--psm {psm_mode} -c tessedit_char_whitelist={char_whitelist}'
         print(f"[TesseractOcrManager] 初始化完成，配置: {self.custom_config}")
     
