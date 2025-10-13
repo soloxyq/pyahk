@@ -496,42 +496,6 @@ class BorderFrameManager:
             LOG_ERROR(f"[圆形检测] {resource_type} 检测异常: {e}")
             return 0.0
 
-    def compare_resource_text_ocr(self, frame: np.ndarray, region: Tuple[int, int, int, int], resource_type: str, threshold: float = 0.7, config: Optional[dict] = None) -> float:
-        """
-        使用数字文本识别检测资源百分比
-        
-        Args:
-            frame: 当前帧图像
-            region: 文本区域 (x1, y1, x2, y2)
-            resource_type: 资源类型 'hp' 或 'mp'
-            threshold: 识别置信度阈值（0.0-1.0）
-            config: 额外配置参数
-            
-        Returns:
-            资源百分比 (0.0-100.0)，识别失败返回0.0
-        """
-        try:
-            from .digit_text_recognizer import get_digit_text_recognizer
-            
-            # 获取识别器（单例）
-            recognizer = get_digit_text_recognizer(match_threshold=threshold)
-            
-            # 识别并解析文本
-            text, percentage = recognizer.recognize_and_parse(frame, region, debug=False)
-            
-            if percentage >= 0:
-                LOG_INFO(f"[文本OCR] {resource_type.upper()} 识别结果: {text} = {percentage:.1f}%")
-                return percentage
-            else:
-                LOG_ERROR(f"[文本OCR] {resource_type.upper()} 识别失败")
-                return 0.0
-                
-        except Exception as e:
-            LOG_ERROR(f"[文本OCR] {resource_type} 识别异常: {e}")
-            import traceback
-            traceback.print_exc()
-            return 0.0
-
     def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> Optional[float]:
         """使用HSV容差检测，统一处理技能冷却。
 

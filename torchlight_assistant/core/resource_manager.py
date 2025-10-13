@@ -43,6 +43,27 @@ class ResourceManager:
         # 模板HSV数据存储（每个像素的HSV值）
         self.hp_template_hsv = None
         self.mp_template_hsv = None
+        
+        # Tesseract OCR 管理器（程序启动时预加载）
+        self.tesseract_ocr_manager = None
+        self._initialize_tesseract_ocr()
+    
+    def _initialize_tesseract_ocr(self):
+        """初始化Tesseract OCR管理器（程序启动时加载一次）"""
+        try:
+            from .config_manager import ConfigManager
+            from ..utils.tesseract_ocr_manager import get_tesseract_ocr_manager
+            
+            config_manager = ConfigManager()
+            global_config = config_manager.load_config("default.json")
+            tesseract_config = global_config.get("global", {}).get("tesseract_ocr", {})
+            
+            # 获取全局单例（只会初始化一次）
+            self.tesseract_ocr_manager = get_tesseract_ocr_manager(tesseract_config)
+            LOG_INFO("[ResourceManager] Tesseract OCR 已预加载")
+        except Exception as e:
+            LOG_ERROR(f"[ResourceManager] Tesseract OCR 初始化失败: {e}")
+            self.tesseract_ocr_manager = None
 
     def update_config(self, resource_config: Dict[str, Any]):
         """更新资源配置"""
@@ -128,12 +149,11 @@ class ResourceManager:
             detection_mode = config.get("detection_mode", "rectangle")
 
             if detection_mode == "text_ocr":
-                # 数字文本识别模式
+                # 数字文本识别模式（使用预加载的OCR管理器）
                 text_x1 = config.get("text_x1")
                 text_y1 = config.get("text_y1")
                 text_x2 = config.get("text_x2")
                 text_y2 = config.get("text_y2")
-                match_threshold = config.get("match_threshold", 0.70)
                 
                 if text_x1 is None or text_y1 is None or text_x2 is None or text_y2 is None:
                     raise ValueError(f"{resource_type.upper()} 文本OCR检测配置不完整")
@@ -146,7 +166,7 @@ class ResourceManager:
                     
                 if frame is None: 
                     raise ValueError("无法获取帧数据")
-
+                
                 # 向调试管理器上报检测区域
                 if self.debug_display_manager:
                     self.debug_display_manager.update_detection_region(
@@ -163,11 +183,15 @@ class ResourceManager:
                     )
 
                 text_region = (text_x1, text_y1, text_x2, text_y2)
-                match_percentage = self.border_frame_manager.compare_resource_text_ocr(
-                    frame, text_region, resource_type, match_threshold, config
-                )
                 
-            elif detection_mode == "circle":
+                # 使用预加载的OCR管理器（避免重复初始化）
+                if self.tesseract_ocr_manager is None:
+                    LOG_ERROR(f"[ResourceManager] Tesseract OCR 未初始化，无法进行{resource_type.upper()}文本识别")
+                    match_percentage = 100.0
+                else:
+                    _, match_percentage = self.tesseract_ocr_manager.recognize_and_parse(frame, text_region)
+                    if match_percentage < 0:  # 识别失败
+                        match_percentage = 100.0  # 避免误触发            elif detection_mode == "circle":
                 center_x, center_y, radius = config.get("center_x"), config.get("center_y"), config.get("radius")
                 LOG_INFO(f"[DEBUG] Circle coords: x={center_x}, y={center_y}, r={radius}, types: {type(center_x)}, {type(center_y)}, {type(radius)}")
                 if center_x is None or center_y is None or radius is None:

@@ -148,19 +148,31 @@ Text OCR模式提供专门的测试按钮，用于验证配置是否正确：
 - 如果测试成功但实际运行失败，可能是游戏分辨率或UI缩放改变
 
 #### 技术特性
-- **多尺度匹配**: 默认启用95%-105%范围，容忍字体大小变化
-- **自适应阈值**: 可选功能，适应不同光照环境
-- **性能优化**: 平均识别时间<8ms，不影响游戏性能
+- **Tesseract OCR引擎**: 开源OCR引擎，识别准确率高
+- **图像预处理优化**: 3倍放大 + OTSU二值化，提升识别精度
+- **实时性能**: 平均识别时间约240ms（HP+MP），适合游戏场景
+- **配置灵活**: 支持自定义PSM模式和字符白名单
+
+#### 配置说明
+在 `default.json` 中配置：
+```json
+"global": {
+  "tesseract_ocr": {
+    "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "lang": "eng",
+    "psm_mode": 7,
+    "char_whitelist": "0123456789/"
+  }
+}
+```
 
 #### 故障排查
 如果识别失败：
-1. **首先检查**: 游戏分辨率/UI缩放是否改变
-2. **重新生成模板**: 
-   ```bash
-   python torchlight_assistant/utils/digit_template_generator.py
-   ```
-3. **调整坐标**: 使用"选择区域"重新框选数字区域
-4. **查看详细文档**: `wiki/08-故障排查手册.md`
+1. **检查Tesseract安装**: 运行 `tesseract --version` 验证
+2. **验证配置路径**: 确认 `tesseract_cmd` 路径正确
+3. **性能测试**: 运行 `python benchmark_ocr_performance.py`
+4. **使用测试按钮**: 在界面点击"🧪 测试识别"验证
+5. **查看详细文档**: `wiki/08-故障排查手册.md`
 
 ### 矩形/圆形HSV检测模式
 

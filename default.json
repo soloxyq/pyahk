@@ -126,6 +126,12 @@
         "debug_mode": {
             "enabled": false
         },
+        "tesseract_ocr": {
+            "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            "lang": "eng",
+            "psm_mode": 7,
+            "char_whitelist": "0123456789/"
+        },
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,

@@ -1860,15 +1860,24 @@ class ResourceManagementWidget(QWidget):
                                   f"图片尺寸: {w}x{h}")
                 return
             
-            # 导入识别器
-            from torchlight_assistant.utils.digit_text_recognizer import get_digit_text_recognizer
+            # 导入Tesseract OCR识别器
+            from ..core.config_manager import ConfigManager
+            from ..utils.tesseract_ocr_manager import get_tesseract_ocr_manager
+            
+            # 获取Tesseract OCR配置
+            config_manager = ConfigManager()
+            try:
+                global_config = config_manager.load_config("default.json")
+                tesseract_config = global_config.get("global", {}).get("tesseract_ocr", {})
+            except Exception:
+                tesseract_config = {}
             
             # 创建识别器
-            recognizer = get_digit_text_recognizer(match_threshold=0.70, enable_multiscale=True)
+            ocr_manager = get_tesseract_ocr_manager(tesseract_config)
             
             # 执行识别
             region = (x1, y1, x2, y2)
-            text, percentage = recognizer.recognize_and_parse(img, region, debug=True)
+            text, percentage = ocr_manager.recognize_and_parse(img, region, debug=True)
             
             # 显示结果
             if text:
@@ -1907,13 +1916,12 @@ class ResourceManagementWidget(QWidget):
 🔍 可能原因:
 1. 坐标区域没有包含数字文本
 2. 图片分辨率与预期不符
-3. 字体模板需要重新生成
+3. 数字字体不清晰或被遮挡
 
 💡 建议:
 1. 使用"选择区域"按钮重新框选数字区域
 2. 确保区域完整包含HP/MP数字（如 540/540）
-3. 如果字体大小改变，请重新生成模板:
-   python torchlight_assistant/utils/digit_template_generator.py"""
+3. 检查Tesseract是否正确安装"""
                 
                 QMessageBox.warning(self, "Text OCR 测试失败", result_msg)
                 
