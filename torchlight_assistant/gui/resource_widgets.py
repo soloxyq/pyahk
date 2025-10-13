@@ -152,6 +152,22 @@ class ResourceManagementWidget(QWidget):
         region_layout.setContentsMargins(8, 8, 8, 6)
         region_layout.setSpacing(6)
 
+        # 检测模式选择
+        mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(6)
+        mode_layout.addWidget(QLabel("检测模式:"))
+        
+        mode_combo = ConfigComboBox()
+        mode_combo.addItem("矩形对比 (Rectangle)", "rectangle")
+        mode_combo.addItem("圆形对比 (Circle)", "circle")
+        mode_combo.addItem("数字匹配 (Text OCR)", "text_ocr")
+        mode_combo.setCurrentIndex(0)  # 默认矩形模式
+        mode_combo.currentIndexChanged.connect(lambda: self._on_detection_mode_changed(prefix))
+        mode_layout.addWidget(mode_combo)
+        mode_layout.addStretch()
+        
+        region_layout.addLayout(mode_layout)
+
         # 第一行：坐标输入 - 单行文本框
         coords_layout = QHBoxLayout()
         coords_layout.setSpacing(6)
@@ -160,7 +176,7 @@ class ResourceManagementWidget(QWidget):
         
         # 创建单个坐标输入框
         coord_input = QLineEdit()
-        coord_input.setPlaceholderText("x1,y1,x2,y2 或 x,y,r")
+        coord_input.setPlaceholderText("矩形: x1,y1,x2,y2 | 圆形: x,y,r | 文本: x1,y1,x2,y2")
         coord_input.setStyleSheet("QLineEdit { padding: 5px; }")
         
         # 从默认值设置初始坐标
@@ -175,11 +191,12 @@ class ResourceManagementWidget(QWidget):
         region_layout.addLayout(coords_layout)
 
 
-        # 第二行：容差设置 - 单行文本框
+        # 第二行：容差设置 - 单行文本框（仅在非 text_ocr 模式显示）
         tolerance_layout = QHBoxLayout()
         tolerance_layout.setSpacing(6)
         
-        tolerance_layout.addWidget(QLabel("容差HSV:"))
+        tolerance_label = QLabel("容差HSV:")
+        tolerance_layout.addWidget(tolerance_label)
         
         # 创建单个容差输入框
         tolerance_input = QLineEdit()
@@ -192,9 +209,11 @@ class ResourceManagementWidget(QWidget):
         
         region_layout.addLayout(tolerance_layout)
 
-        # 保存控件引用
+        # 保存控件引用（包括容差标签和输入框）
         setattr(self, f"{prefix}_coord_input", coord_input)
+        setattr(self, f"{prefix}_tolerance_label", tolerance_label)
         setattr(self, f"{prefix}_tolerance_input", tolerance_input)
+        setattr(self, f"{prefix}_tolerance_layout", tolerance_layout)
 
         # 当前检测模式显示
         mode_label = QLabel()
@@ -254,6 +273,27 @@ class ResourceManagementWidget(QWidget):
         detect_btn.clicked.connect(lambda: self._start_auto_detect_orbs(prefix))
         buttons_layout.addWidget(detect_btn)
         
+        # Text OCR测试按钮（初始隐藏，仅在text_ocr模式显示）
+        test_ocr_btn = QPushButton("🧪 测试识别")
+        test_ocr_btn.setStyleSheet(
+            """
+            QPushButton {
+                font-size: 11px;
+                padding: 6px 12px;
+                background-color: #ffc107;
+                color: #000;
+                border: none;
+                border-radius: 3px;
+            }
+            QPushButton:hover {
+                background-color: #e0a800;
+            }
+        """
+        )
+        test_ocr_btn.clicked.connect(lambda: self._test_text_ocr(prefix))
+        test_ocr_btn.setVisible(False)  # 默认隐藏
+        buttons_layout.addWidget(test_ocr_btn)
+        
         buttons_layout.addStretch()
         region_layout.addLayout(buttons_layout)
 
@@ -277,14 +317,23 @@ class ResourceManagementWidget(QWidget):
             "coord_input": coord_input,
             "tolerance_input": tolerance_input,
             "mode_label": mode_label,
+            "mode_combo": mode_combo,
             "select_region_btn": select_btn,
             "detect_orbs_btn": detect_btn,
+            "test_ocr_btn": test_ocr_btn,
         }
 
         if prefix == "hp":
             self.hp_widgets = widgets
         else:
             self.mp_widgets = widgets
+        
+        # 初始化按钮显示状态（默认rectangle模式）
+        current_mode = self.hp_detection_mode if prefix == "hp" else self.mp_detection_mode
+        if current_mode == "rectangle":
+            select_btn.setVisible(True)
+            detect_btn.setVisible(False)
+            test_ocr_btn.setVisible(False)
 
         return group
 
@@ -810,15 +859,74 @@ class ResourceManagementWidget(QWidget):
         })
 
         # 根据检测模式保存相应配置
-        if self.hp_detection_mode == "circle" and self.hp_circle_config:
-            # 使用圆形配置
+        if self.hp_detection_mode == "text_ocr":
+            # 使用文本OCR配置
+            coord_input = self.hp_widgets.get("coord_input")
+            if coord_input:
+                coord_text = coord_input.text().strip()
+                try:
+                    coords = [int(x.strip()) for x in coord_text.split(',')]
+                    if len(coords) >= 4:
+                        text_x1, text_y1, text_x2, text_y2 = coords[0], coords[1], coords[2], coords[3]
+                    else:
+                        # 默认文本坐标
+                        text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
+                except:
+                    # 解析失败，使用默认坐标
+                    text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
+            else:
+                text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
+            
             hp_config.update({
-                "detection_mode": "circle",
-                "center_x": self.hp_circle_config.get("hp", {}).get("center_x"),
-                "center_y": self.hp_circle_config.get("hp", {}).get("center_y"),
-                "radius": self.hp_circle_config.get("hp", {}).get("radius"),
+                "detection_mode": "text_ocr",
+                "text_x1": text_x1,
+                "text_y1": text_y1,
+                "text_x2": text_x2,
+                "text_y2": text_y2,
+                "match_threshold": 0.70,
+                # 保留矩形配置作为备份
+                "region_x1": 136,
+                "region_y1": 910,
+                "region_x2": 213,
+                "region_y2": 1004,
             })
-            print(f"[配置构建] HP使用圆形配置: 圆心({hp_config['center_x']},{hp_config['center_y']}), 半径{hp_config['radius']}")
+            print(f"[配置构建] HP使用文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})")
+        elif self.hp_detection_mode == "circle":
+            # 圆形配置：优先使用自动检测的配置，否则从输入框解析
+            if self.hp_circle_config:
+                # 使用自动检测的圆形配置
+                hp_config.update({
+                    "detection_mode": "circle",
+                    "center_x": self.hp_circle_config.get("hp", {}).get("center_x"),
+                    "center_y": self.hp_circle_config.get("hp", {}).get("center_y"),
+                    "radius": self.hp_circle_config.get("hp", {}).get("radius"),
+                })
+                print(f"[配置构建] HP使用圆形配置(自动检测): 圆心({hp_config['center_x']},{hp_config['center_y']}), 半径{hp_config['radius']}")
+            else:
+                # 从输入框解析手动输入的圆形坐标 (x,y,r)
+                coord_input = self.hp_widgets.get("coord_input")
+                if coord_input:
+                    coord_text = coord_input.text().strip()
+                    try:
+                        coords = [int(x.strip()) for x in coord_text.split(',')]
+                        if len(coords) == 3:
+                            center_x, center_y, radius = coords[0], coords[1], coords[2]
+                        else:
+                            # 默认圆形坐标
+                            center_x, center_y, radius = 174, 957, 47
+                    except:
+                        # 解析失败，使用默认坐标
+                        center_x, center_y, radius = 174, 957, 47
+                else:
+                    center_x, center_y, radius = 174, 957, 47
+                
+                hp_config.update({
+                    "detection_mode": "circle",
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "radius": radius,
+                })
+                print(f"[配置构建] HP使用圆形配置(手动输入): 圆心({center_x},{center_y}), 半径{radius}")
         else:
             # 使用矩形配置，从单行文本框解析坐标
             coord_input = self.hp_widgets.get("coord_input")
@@ -921,15 +1029,74 @@ class ResourceManagementWidget(QWidget):
         })
 
         # 根据检测模式保存相应配置
-        if self.mp_detection_mode == "circle" and self.mp_circle_config:
-            # 使用圆形配置
+        if self.mp_detection_mode == "text_ocr":
+            # 使用文本OCR配置
+            coord_input = self.mp_widgets.get("coord_input")
+            if coord_input:
+                coord_text = coord_input.text().strip()
+                try:
+                    coords = [int(x.strip()) for x in coord_text.split(',')]
+                    if len(coords) >= 4:
+                        text_x1, text_y1, text_x2, text_y2 = coords[0], coords[1], coords[2], coords[3]
+                    else:
+                        # 默认文本坐标
+                        text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
+                except:
+                    # 解析失败，使用默认坐标
+                    text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
+            else:
+                text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
+            
             mp_config.update({
-                "detection_mode": "circle",
-                "center_x": self.mp_circle_config.get("mp", {}).get("center_x"),
-                "center_y": self.mp_circle_config.get("mp", {}).get("center_y"),
-                "radius": self.mp_circle_config.get("mp", {}).get("radius"),
+                "detection_mode": "text_ocr",
+                "text_x1": text_x1,
+                "text_y1": text_y1,
+                "text_x2": text_x2,
+                "text_y2": text_y2,
+                "match_threshold": 0.70,
+                # 保留矩形配置作为备份
+                "region_x1": 1552,
+                "region_y1": 910,
+                "region_x2": 1560,
+                "region_y2": 1004,
             })
-            print(f"[配置构建] MP使用圆形配置: 圆心({mp_config['center_x']},{mp_config['center_y']}), 半径{mp_config['radius']}")
+            print(f"[配置构建] MP使用文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})")
+        elif self.mp_detection_mode == "circle":
+            # 圆形配置：优先使用自动检测的配置，否则从输入框解析
+            if self.mp_circle_config:
+                # 使用自动检测的圆形配置
+                mp_config.update({
+                    "detection_mode": "circle",
+                    "center_x": self.mp_circle_config.get("mp", {}).get("center_x"),
+                    "center_y": self.mp_circle_config.get("mp", {}).get("center_y"),
+                    "radius": self.mp_circle_config.get("mp", {}).get("radius"),
+                })
+                print(f"[配置构建] MP使用圆形配置(自动检测): 圆心({mp_config['center_x']},{mp_config['center_y']}), 半径{mp_config['radius']}")
+            else:
+                # 从输入框解析手动输入的圆形坐标 (x,y,r)
+                coord_input = self.mp_widgets.get("coord_input")
+                if coord_input:
+                    coord_text = coord_input.text().strip()
+                    try:
+                        coords = [int(x.strip()) for x in coord_text.split(',')]
+                        if len(coords) == 3:
+                            center_x, center_y, radius = coords[0], coords[1], coords[2]
+                        else:
+                            # 默认圆形坐标
+                            center_x, center_y, radius = 1746, 957, 47
+                    except:
+                        # 解析失败，使用默认坐标
+                        center_x, center_y, radius = 1746, 957, 47
+                else:
+                    center_x, center_y, radius = 1746, 957, 47
+                
+                mp_config.update({
+                    "detection_mode": "circle",
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "radius": radius,
+                })
+                print(f"[配置构建] MP使用圆形配置(手动输入): 圆心({center_x},{center_y}), 半径{radius}")
         else:
             # 使用矩形配置，从单行文本框解析坐标
             coord_input = self.mp_widgets.get("coord_input")
@@ -994,17 +1161,45 @@ class ResourceManagementWidget(QWidget):
             center_x = hp_config.get("center_x")
             center_y = hp_config.get("center_y")
             radius = hp_config.get("radius")
+            text_x1 = hp_config.get("text_x1")
+            text_y1 = hp_config.get("text_y1")
+            text_x2 = hp_config.get("text_x2")
+            text_y2 = hp_config.get("text_y2")
 
-            if detection_mode == "circle" and center_x is not None and center_y is not None and radius is not None:
+            # 设置模式下拉框
+            mode_combo = self.hp_widgets.get("mode_combo")
+            if mode_combo:
+                if detection_mode == "text_ocr":
+                    mode_combo.setCurrentIndex(2)  # Text OCR
+                elif detection_mode == "circle":
+                    mode_combo.setCurrentIndex(1)  # Circle
+                else:
+                    mode_combo.setCurrentIndex(0)  # Rectangle
+
+            if detection_mode == "text_ocr" and text_x1 is not None and text_y1 is not None and text_x2 is not None and text_y2 is not None:
+                # 加载文本OCR配置
+                self.hp_detection_mode = "text_ocr"
+                coord_input = self.hp_widgets.get("coord_input")
+                if coord_input:
+                    coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
+                self._update_detection_mode_display("hp")
+                # 隐藏容差控件
+                self._toggle_tolerance_visibility("hp", False)
+                print(f"[配置加载] HP文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})")
+            elif detection_mode == "circle" and center_x is not None and center_y is not None and radius is not None:
                 # 加载圆形配置
                 self.hp_detection_mode = "circle"
                 circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
                 self.hp_circle_config = {"hp": circle_data}
                 self._update_detection_mode_display("hp", circle_data)
+                # 显示容差控件
+                self._toggle_tolerance_visibility("hp", True)
             else:
                 # 如果没有有效坐标或不是圆形模式，切换回矩形模式
                 self.hp_detection_mode = "rectangle"
                 self._update_detection_mode_display("hp")
+                # 显示容差控件
+                self._toggle_tolerance_visibility("hp", True)
 
                 # 加载矩形配置到单行文本框
                 x1 = hp_config.get("region_x1", 136)  # 1080P血药区域
@@ -1042,17 +1237,45 @@ class ResourceManagementWidget(QWidget):
             center_x = mp_config.get("center_x")
             center_y = mp_config.get("center_y")
             radius = mp_config.get("radius")
+            text_x1 = mp_config.get("text_x1")
+            text_y1 = mp_config.get("text_y1")
+            text_x2 = mp_config.get("text_x2")
+            text_y2 = mp_config.get("text_y2")
 
-            if detection_mode == "circle" and center_x is not None and center_y is not None and radius is not None:
+            # 设置模式下拉框
+            mode_combo = self.mp_widgets.get("mode_combo")
+            if mode_combo:
+                if detection_mode == "text_ocr":
+                    mode_combo.setCurrentIndex(2)  # Text OCR
+                elif detection_mode == "circle":
+                    mode_combo.setCurrentIndex(1)  # Circle
+                else:
+                    mode_combo.setCurrentIndex(0)  # Rectangle
+
+            if detection_mode == "text_ocr" and text_x1 is not None and text_y1 is not None and text_x2 is not None and text_y2 is not None:
+                # 加载文本OCR配置
+                self.mp_detection_mode = "text_ocr"
+                coord_input = self.mp_widgets.get("coord_input")
+                if coord_input:
+                    coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
+                self._update_detection_mode_display("mp")
+                # 隐藏容差控件
+                self._toggle_tolerance_visibility("mp", False)
+                print(f"[配置加载] MP文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})")
+            elif detection_mode == "circle" and center_x is not None and center_y is not None and radius is not None:
                 # 加载圆形配置
                 self.mp_detection_mode = "circle"
                 circle_data = {"center_x": center_x, "center_y": center_y, "radius": radius}
                 self.mp_circle_config = {"mp": circle_data}
                 self._update_detection_mode_display("mp", circle_data)
+                # 显示容差控件
+                self._toggle_tolerance_visibility("mp", True)
             else:
                 # 如果没有有效坐标或不是圆形模式，切换回矩形模式
                 self.mp_detection_mode = "rectangle"
                 self._update_detection_mode_display("mp")
+                # 显示容差控件
+                self._toggle_tolerance_visibility("mp", True)
 
                 # 加载矩形配置到单行文本框
                 x1 = mp_config.get("region_x1", 1552)  # 1080P蓝药区域
@@ -1255,7 +1478,173 @@ class ResourceManagementWidget(QWidget):
         # 延迟200ms执行对话框显示，确保主窗口完全隐藏
         QTimer.singleShot(200, show_dialog)
 
+    def _toggle_tolerance_visibility(self, prefix: str, visible: bool):
+        """根据检测模式显示/隐藏容差控件"""
+        tolerance_label = getattr(self, f"{prefix}_tolerance_label", None)
+        tolerance_input = getattr(self, f"{prefix}_tolerance_input", None)
+        
+        if tolerance_label and tolerance_input:
+            if visible:
+                tolerance_label.show()
+                tolerance_input.show()
+            else:
+                tolerance_label.hide()
+                tolerance_input.hide()
 
+    def _get_coords_from_config(self, prefix: str, mode: str) -> Optional[str]:
+        """从配置中获取指定模式的坐标
+        
+        Args:
+            prefix: 资源前缀 ("hp" 或 "mp")
+            mode: 检测模式 ("rectangle", "circle", "text_ocr")
+            
+        Returns:
+            坐标字符串,如果配置中不存在则返回None
+            - rectangle/text_ocr: "x1,y1,x2,y2"
+            - circle: "x,y,r"
+        """
+        if not self.main_window or not hasattr(self.main_window, '_global_config'):
+            return None
+            
+        config = self.main_window._global_config
+        res_config = config.get("resource_management", {})
+        resource_config = res_config.get(f"{prefix}_config", {})
+        
+        if mode == "circle":
+            # 圆形模式: center_x, center_y, radius
+            center_x = resource_config.get("center_x")
+            center_y = resource_config.get("center_y")
+            radius = resource_config.get("radius")
+            if center_x is not None and center_y is not None and radius is not None:
+                return f"{center_x},{center_y},{radius}"
+        elif mode == "text_ocr":
+            # Text OCR模式: text_x1, text_y1, text_x2, text_y2
+            text_x1 = resource_config.get("text_x1")
+            text_y1 = resource_config.get("text_y1")
+            text_x2 = resource_config.get("text_x2")
+            text_y2 = resource_config.get("text_y2")
+            if all([text_x1 is not None, text_y1 is not None, text_x2 is not None, text_y2 is not None]):
+                return f"{text_x1},{text_y1},{text_x2},{text_y2}"
+        else:  # rectangle
+            # 矩形模式: region_x1, region_y1, region_x2, region_y2
+            region_x1 = resource_config.get("region_x1")
+            region_y1 = resource_config.get("region_y1")
+            region_x2 = resource_config.get("region_x2")
+            region_y2 = resource_config.get("region_y2")
+            if all([region_x1 is not None, region_y1 is not None, region_x2 is not None, region_y2 is not None]):
+                return f"{region_x1},{region_y1},{region_x2},{region_y2}"
+        
+        return None
+
+    def _on_detection_mode_changed(self, prefix: str):
+        """检测模式切换回调"""
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+        mode_combo = widgets.get("mode_combo")
+        if not mode_combo:
+            return
+            
+        selected_mode = mode_combo.currentData()
+        
+        if prefix == "hp":
+            self.hp_detection_mode = selected_mode
+        else:
+            self.mp_detection_mode = selected_mode
+        
+        # 更新显示
+        self._update_detection_mode_display(prefix)
+        
+        # 根据模式显示/隐藏容差控件
+        # text_ocr模式不需要容差，其他模式需要
+        show_tolerance = (selected_mode != "text_ocr")
+        self._toggle_tolerance_visibility(prefix, show_tolerance)
+        
+        # 根据模式控制按钮显示/隐藏
+        select_btn = widgets.get("select_region_btn")  # 选择区域按钮
+        detect_btn = widgets.get("detect_orbs_btn")    # Detect Orbs按钮
+        test_ocr_btn = widgets.get("test_ocr_btn")     # 测试识别按钮
+        
+        if selected_mode == "rectangle":
+            # 矩形对比：显示 选择区域
+            if select_btn:
+                select_btn.setVisible(True)
+            if detect_btn:
+                detect_btn.setVisible(False)
+            if test_ocr_btn:
+                test_ocr_btn.setVisible(False)
+                
+        elif selected_mode == "circle":
+            # 圆形对比：显示 Detect Orbs
+            if select_btn:
+                select_btn.setVisible(False)
+            if detect_btn:
+                detect_btn.setVisible(True)
+            if test_ocr_btn:
+                test_ocr_btn.setVisible(False)
+                
+        elif selected_mode == "text_ocr":
+            # 数字对比：显示 选择区域 和 测试识别
+            if select_btn:
+                select_btn.setVisible(True)
+            if detect_btn:
+                detect_btn.setVisible(False)
+            if test_ocr_btn:
+                test_ocr_btn.setVisible(True)
+        
+        # 根据模式更新坐标输入框的提示和默认值
+        coord_input = widgets.get("coord_input")
+        if coord_input:
+            # 尝试从配置中获取对应模式的坐标
+            coords_from_config = self._get_coords_from_config(prefix, selected_mode)
+            
+            # 优先使用配置坐标，如果没有则使用默认坐标
+            coords_to_use = None
+            
+            if selected_mode == "circle":
+                coord_input.setPlaceholderText("x,y,r (圆心X,圆心Y,半径)")
+                if coords_from_config:
+                    coords_to_use = coords_from_config
+                    print(f"[坐标更新] {prefix.upper()} 圆形模式使用配置坐标: {coords_from_config}")
+                else:
+                    coords_to_use = "174,957,47" if prefix == "hp" else "1738,957,47"
+                    print(f"[坐标更新] {prefix.upper()} 圆形模式使用默认坐标: {coords_to_use}")
+                    
+            elif selected_mode == "text_ocr":
+                coord_input.setPlaceholderText("x1,y1,x2,y2 (文本区域)")
+                if coords_from_config:
+                    coords_to_use = coords_from_config
+                    print(f"[坐标更新] {prefix.upper()} Text OCR模式使用配置坐标: {coords_from_config}")
+                else:
+                    coords_to_use = "97,814,218,835" if prefix == "hp" else "1767,814,1894,835"
+                    print(f"[坐标更新] {prefix.upper()} Text OCR模式使用默认坐标: {coords_to_use}")
+                    
+            else:  # rectangle
+                coord_input.setPlaceholderText("x1,y1,x2,y2 (矩形区域)")
+                if coords_from_config:
+                    coords_to_use = coords_from_config
+                    print(f"[坐标更新] {prefix.upper()} 矩形模式使用配置坐标: {coords_from_config}")
+                else:
+                    coords_to_use = "136,910,213,1004" if prefix == "hp" else "1552,910,1560,1004"
+                    print(f"[坐标更新] {prefix.upper()} 矩形模式使用默认坐标: {coords_to_use}")
+            
+            # 更新坐标输入框
+            if coords_to_use:
+                coord_input.setText(coords_to_use)
+        
+        print(f"[检测模式] {prefix.upper()} 切换到 {selected_mode} 模式")
+        
+        # 根据模式显示/隐藏容差控件
+        tolerance_label = getattr(self, f"{prefix}_tolerance_label", None)
+        tolerance_input = getattr(self, f"{prefix}_tolerance_input", None)
+        
+        if tolerance_label and tolerance_input:
+            if selected_mode == "text_ocr":
+                # Text OCR 模式：隐藏容差控件
+                tolerance_label.hide()
+                tolerance_input.hide()
+            else:
+                # 其他模式：显示容差控件
+                tolerance_label.show()
+                tolerance_input.show()
 
     def _update_detection_mode_display(self, prefix: str, circle_config: Optional[Dict] = None):
         """更新检测模式显示，并附带坐标信息"""
@@ -1271,26 +1660,38 @@ class ResourceManagementWidget(QWidget):
             else:
                 label.setText("🔵 当前模式：圆形检测 (无具体坐标)")
             label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #28a745;")
+        elif mode == "text_ocr":
+            label.setText("🔤 当前模式：数字文本识别 (OCR)")
+            label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #ffc107;")
         else:
             label.setText("⬛ 当前模式：矩形检测（手动选择区域）")
             label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #17a2b8;")
 
     def _on_orbs_detected(self, prefix: str, detection_result: Dict[str, Dict[str, Any]]):
-        """球体检测完成回调 - 设置为圆形检测模式"""
+        """球体检测完成回调 - 仅更新坐标和颜色"""
         orb_count = len(detection_result)
         print(f"[球体检测] 检测完成，共找到 {orb_count} 个球体")
 
-        # 设置检测模式为圆形
+        # 保存检测结果供后续使用
         if prefix == "hp":
-            self.hp_detection_mode = "circle"
             self.hp_circle_config = detection_result.copy()
         else:
-            self.mp_detection_mode = "circle"
             self.mp_circle_config = detection_result.copy()
 
-        # 更新UI显示，并传入检测到的坐标
+        # 获取widget并更新坐标
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+        
+        # 更新坐标输入框
         orb_data_for_prefix = detection_result.get(prefix)
-        self._update_detection_mode_display(prefix, orb_data_for_prefix)
+        if orb_data_for_prefix:
+            center_x = orb_data_for_prefix["center_x"]
+            center_y = orb_data_for_prefix["center_y"]
+            radius = orb_data_for_prefix["radius"]
+            
+            coord_input = widgets.get("coord_input")
+            if coord_input:
+                coord_input.setText(f"{center_x},{center_y},{radius}")
+                print(f"[球体检测] {prefix.upper()}坐标已更新: {center_x},{center_y},{radius}")
 
         for orb_key, orb_data in detection_result.items():
             center_x = orb_data["center_x"]
@@ -1313,8 +1714,6 @@ class ResourceManagementWidget(QWidget):
                     if hasattr(self, 'global_colors_edit'):
                         self._add_color_to_list(int(h), int(s), int(v), h_tol, s_tol, v_tol)
                         print(f"[球体检测] 添加{orb_key}颜色到列表: HSV({h},{s},{v}) 容差(±{h_tol},±{s_tol},±{v_tol})")
-
-        print(f"[球体检测] {prefix.upper()}已设置为圆形检测模式")
 
     def _on_color_analysis_result(
         self, prefix: str, x1: int, y1: int, x2: int, y2: int, analysis: dict
@@ -1342,40 +1741,29 @@ class ResourceManagementWidget(QWidget):
         print(f"  建议容差: H±{suggested_tolerances.get('h', 10)}, S±{suggested_tolerances.get('s', 20)}, V±{suggested_tolerances.get('v', 30)}")
 
     def _on_region_selected(self, prefix: str, x1: int, y1: int, x2: int, y2: int):
-        """区域选择完成回调"""
-        # 设置检测模式为矩形
-        if prefix == "hp":
-            self.hp_detection_mode = "rectangle"
-        else:
-            self.mp_detection_mode = "rectangle"
-
+        """区域选择完成回调 - 仅更新坐标，不改变模式"""
         widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
         
         # 设置坐标到单行文本框
         coord_input = widgets.get("coord_input")
         if coord_input:
             coord_input.setText(f"{x1},{y1},{x2},{y2}")
-            print(f"[区域选择] {prefix.upper()}区域设置为: ({x1},{y1}) -> ({x2},{y2})")
-
-        # 更新UI显示
-        self._update_detection_mode_display(prefix)
-
-        print(f"[区域更新] {prefix.upper()}已设置为矩形检测模式: ({x1},{y1}) -> ({x2},{y2})")
+            print(f"[区域选择] {prefix.upper()}区域坐标已更新: ({x1},{y1}) -> ({x2},{y2})")
 
     def _on_region_analyzed(
         self, prefix: str, x1: int, y1: int, x2: int, y2: int, analysis: dict
     ):
-        """智能颜色分析完成回调"""
+        """智能颜色分析完成回调 - 更新坐标和颜色"""
         if not analysis or not analysis.get("analysis_success"):
             return
 
         widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
 
-        # 🎯 关键修复：更新检测区域坐标为用户最后选择的区域到单行文本框
+        # 更新检测区域坐标为用户最后选择的区域
         coord_input = widgets.get("coord_input")
         if coord_input:
             coord_input.setText(f"{x1},{y1},{x2},{y2}")
-            print(f"[区域更新] {prefix.upper()}检测区域已更新为: ({x1},{y1}) -> ({x2},{y2})")
+            print(f"[区域更新] {prefix.upper()}区域坐标已更新: ({x1},{y1}) -> ({x2},{y2})")
 
         # 获取分析结果
         mean_h, mean_s, mean_v = analysis["mean_hsv"]
@@ -1416,3 +1804,129 @@ class ResourceManagementWidget(QWidget):
         print(f"⚙️  智能容差: ±({tolerance_h}, {tolerance_s}, {tolerance_v})")
         print(f"✅ 已追加到颜色配置")
         print("=" * 50)
+    
+    def _test_text_ocr(self, prefix: str):
+        """测试Text OCR识别功能"""
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from PySide6.QtCore import QTimer
+        import cv2
+        import os
+        
+        # 获取当前配置的坐标
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+        coord_input = widgets.get("coord_input")
+        
+        if not coord_input:
+            QMessageBox.warning(self, "错误", "无法获取坐标配置")
+            return
+        
+        # 解析坐标
+        coord_text = coord_input.text().strip()
+        try:
+            coords = [int(x.strip()) for x in coord_text.split(',')]
+            if len(coords) != 4:
+                QMessageBox.warning(self, "坐标格式错误", 
+                                  f"请输入4个坐标值 (x1,y1,x2,y2)\n当前输入: {coord_text}")
+                return
+            x1, y1, x2, y2 = coords
+        except:
+            QMessageBox.warning(self, "坐标解析失败", 
+                              f"无法解析坐标，请检查格式\n当前输入: {coord_text}")
+            return
+        
+        # 选择测试图片
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择游戏截图进行测试",
+            "",
+            "图片文件 (*.png *.jpg *.jpeg *.bmp);;所有文件 (*.*)"
+        )
+        
+        if not file_path or not os.path.exists(file_path):
+            return
+        
+        try:
+            # 读取图片
+            img = cv2.imread(file_path)
+            if img is None:
+                QMessageBox.warning(self, "读取失败", f"无法读取图片: {file_path}")
+                return
+            
+            # 检查坐标是否在图片范围内
+            h, w = img.shape[:2]
+            if x1 < 0 or y1 < 0 or x2 > w or y2 > h:
+                QMessageBox.warning(self, "坐标超出范围", 
+                                  f"坐标 ({x1},{y1},{x2},{y2}) 超出图片范围\n"
+                                  f"图片尺寸: {w}x{h}")
+                return
+            
+            # 导入识别器
+            from torchlight_assistant.utils.digit_text_recognizer import get_digit_text_recognizer
+            
+            # 创建识别器
+            recognizer = get_digit_text_recognizer(match_threshold=0.70, enable_multiscale=True)
+            
+            # 执行识别
+            region = (x1, y1, x2, y2)
+            text, percentage = recognizer.recognize_and_parse(img, region, debug=True)
+            
+            # 显示结果
+            if text:
+                result_msg = f"""✅ 识别成功！
+
+📊 测试配置:
+• 资源类型: {prefix.upper()}
+• 测试图片: {os.path.basename(file_path)}
+• 识别区域: ({x1},{y1}) → ({x2},{y2})
+
+🎯 识别结果:
+• 识别文本: {text}
+• 资源百分比: {percentage:.1f}%
+
+💡 提示:
+识别成功！可以正常使用Text OCR模式。
+如果实际游戏中识别失败，请检查:
+1. 游戏分辨率是否与测试图片一致
+2. 坐标是否准确框选了数字区域"""
+                
+                QMessageBox.information(self, "Text OCR 测试成功", result_msg)
+                
+                print("=" * 60)
+                print(f"[Text OCR测试] {prefix.upper()} 识别成功")
+                print(f"  文本: {text}")
+                print(f"  百分比: {percentage:.1f}%")
+                print("=" * 60)
+            else:
+                result_msg = f"""❌ 识别失败
+
+📊 测试配置:
+• 资源类型: {prefix.upper()}
+• 测试图片: {os.path.basename(file_path)}
+• 识别区域: ({x1},{y1}) → ({x2},{y2})
+
+🔍 可能原因:
+1. 坐标区域没有包含数字文本
+2. 图片分辨率与预期不符
+3. 字体模板需要重新生成
+
+💡 建议:
+1. 使用"选择区域"按钮重新框选数字区域
+2. 确保区域完整包含HP/MP数字（如 540/540）
+3. 如果字体大小改变，请重新生成模板:
+   python torchlight_assistant/utils/digit_template_generator.py"""
+                
+                QMessageBox.warning(self, "Text OCR 测试失败", result_msg)
+                
+                print("=" * 60)
+                print(f"[Text OCR测试] {prefix.upper()} 识别失败")
+                print(f"  区域: ({x1},{y1}) → ({x2},{y2})")
+                print("=" * 60)
+                
+        except Exception as e:
+            import traceback
+            error_trace = traceback.format_exc()
+            QMessageBox.critical(self, "测试出错", 
+                               f"Text OCR测试过程中出错:\n{str(e)}\n\n{error_trace}")
+            print(f"[Text OCR测试] 错误: {e}")
+            print(error_trace)
+

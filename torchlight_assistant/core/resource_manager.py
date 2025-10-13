@@ -127,7 +127,47 @@ class ResourceManager:
             # 根据检测模式选择检测方法
             detection_mode = config.get("detection_mode", "rectangle")
 
-            if detection_mode == "circle":
+            if detection_mode == "text_ocr":
+                # 数字文本识别模式
+                text_x1 = config.get("text_x1")
+                text_y1 = config.get("text_y1")
+                text_x2 = config.get("text_x2")
+                text_y2 = config.get("text_y2")
+                match_threshold = config.get("match_threshold", 0.70)
+                
+                if text_x1 is None or text_y1 is None or text_x2 is None or text_y2 is None:
+                    raise ValueError(f"{resource_type.upper()} 文本OCR检测配置不完整")
+                
+                # 获取帧数据
+                if cached_frame is None:
+                    frame = self.border_frame_manager.get_current_frame()
+                else:
+                    frame = cached_frame
+                    
+                if frame is None: 
+                    raise ValueError("无法获取帧数据")
+
+                # 向调试管理器上报检测区域
+                if self.debug_display_manager:
+                    self.debug_display_manager.update_detection_region(
+                        f"{resource_type}_text_ocr",
+                        {
+                            "type": "rectangle",
+                            "x1": text_x1,
+                            "y1": text_y1,
+                            "x2": text_x2,
+                            "y2": text_y2,
+                            "color": "yellow" if resource_type == "hp" else "magenta",
+                            "threshold": threshold
+                        }
+                    )
+
+                text_region = (text_x1, text_y1, text_x2, text_y2)
+                match_percentage = self.border_frame_manager.compare_resource_text_ocr(
+                    frame, text_region, resource_type, match_threshold, config
+                )
+                
+            elif detection_mode == "circle":
                 center_x, center_y, radius = config.get("center_x"), config.get("center_y"), config.get("radius")
                 LOG_INFO(f"[DEBUG] Circle coords: x={center_x}, y={center_y}, r={radius}, types: {type(center_x)}, {type(center_y)}, {type(radius)}")
                 if center_x is None or center_y is None or radius is None:

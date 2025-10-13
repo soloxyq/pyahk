@@ -179,6 +179,11 @@
                 "region_y1": 910,
                 "region_x2": 213,
                 "region_y2": 1004,
+                "text_x1": 97,
+                "text_y1": 814,
+                "text_x2": 218,
+                "text_y2": 835,
+                "match_threshold": 0.70,
                 "colors": [
                     {
                         "name": "Color1",
@@ -213,6 +218,11 @@
                 "region_y1": 910,
                 "region_x2": 1560,
                 "region_y2": 1004,
+                "text_x1": 1767,
+                "text_y1": 814,
+                "text_x2": 1894,
+                "text_y2": 835,
+                "match_threshold": 0.70,
                 "colors": [
                     {
                         "name": "Color1",
