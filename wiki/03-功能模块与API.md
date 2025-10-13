@@ -91,11 +91,11 @@ def _start_priority_listeners(self):
 
 ### 三种检测模式对比
 
-| 模式 | 技术 | 性能 | 准确率 | 适用场景 |
-|------|------|------|--------|----------|
-| **矩形检测** | HSV颜色匹配 | ~5ms | 90%+ | 传统模式，依赖颜色 |
-| **圆形检测** | HSV颜色匹配 | ~5ms | 95%+ | 球形资源条，更精确 |
-| **Text OCR** | 模板匹配 | <10ms | 99%+ | **推荐**，直接识别数字 |
+| 模式 | 技术 | 性能 | 准确率 | 适用场景 | 配置复杂度 |
+|------|------|------|--------|----------|------------|
+| **矩形检测** | HSV颜色匹配 | ~5ms | 90%+ | 传统模式，依赖颜色 | 简单 |
+| **圆形检测** | HSV颜色匹配 | ~5ms | 95%+ | 球形资源条，更精确 | 中等 |
+| **Text OCR** | 模板匹配 | <10ms | 99%+ | **推荐**，直接识别数字 | 中等 |
 
 ### Text OCR模式（推荐）
 
@@ -105,14 +105,18 @@ def _start_priority_listeners(self):
 #### 配置方法
 ```json
 {
-  "hp": {
-    "detection_mode": "text_ocr",
-    "text_x1": 97,
-    "text_y1": 814,
-    "text_x2": 218,
-    "text_y2": 835,
-    "match_threshold": 0.70,
-    "threshold": 50  // 低于50%时触发
+  "resource_management": {
+    "hp_config": {
+      "enabled": true,
+      "key": "1",
+      "threshold": 50,
+      "detection_mode": "text_ocr",
+      "text_x1": 97,
+      "text_y1": 814,
+      "text_x2": 218,
+      "text_y2": 835,
+      "match_threshold": 0.70
+    }
   }
 }
 ```
