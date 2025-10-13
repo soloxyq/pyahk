@@ -1,0 +1,21 @@
+# DeepAI CNN训练方案 - CPU版本依赖
+
+# TensorFlow CPU版本（轻量级，无需GPU）
+tensorflow>=2.12.0,<2.16.0
+
+# 数据处理
+numpy>=1.23.0
+opencv-python>=4.8.0
+
+# 机器学习工具
+scikit-learn>=1.3.0
+
+# 可视化
+matplotlib>=3.7.0
+seaborn>=0.12.0
+
+# GUI工具
+Pillow>=10.0.0
+
+# OCR（用于自动标注）
+pytesseract>=0.3.10

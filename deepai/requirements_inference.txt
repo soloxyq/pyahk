@@ -1,0 +1,11 @@
+# DeepAI 推理依赖（仅用于运行预训练模型）
+
+# TensorFlow Lite Runtime（轻量级推理引擎）
+tflite-runtime>=2.14.0
+
+# 图像处理
+opencv-python>=4.8.0
+numpy>=1.23.0
+
+# OCR（用于对比测试）
+pytesseract>=0.3.10

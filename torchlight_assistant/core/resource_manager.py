@@ -73,57 +73,22 @@ class ResourceManager:
         LOG_INFO(f"[ResourceManager] 配置已更新 - HP: {self.hp_config.get('enabled', False)}, MP: {self.mp_config.get('enabled', False)}")
 
     def check_and_execute_resources(self, cached_frame: Optional[np.ndarray] = None) -> bool:
-        """
-        检查并执行资源管理（被动调用）
-
-        Args:
-            cached_frame: 缓存的屏幕帧数据
-
-        Returns:
-            bool: 是否执行了任何资源操作
-        """
+        """检查并执行资源管理（被动调用）"""
         if not self._is_running or self._is_paused:
             return False
 
         executed = False
-
-        # 检查HP
         if self.hp_config.get("enabled", False):
-            if self._should_use_hp_resource(cached_frame):
+            if self._is_resource_low("hp", cached_frame):
                 self._execute_resource("hp", self.hp_config)
                 executed = True
 
-        # 检查MP
         if self.mp_config.get("enabled", False):
-            if self._should_use_mp_resource(cached_frame):
+            if self._is_resource_low("mp", cached_frame):
                 self._execute_resource("mp", self.mp_config)
                 executed = True
 
         return executed
-
-    def _should_use_hp_resource(self, cached_frame: Optional[np.ndarray]) -> bool:
-        """判断是否应该使用HP资源"""
-        if not self.hp_config.get("enabled", False):
-            return False
-
-        # 检查内部冷却
-        if not self._check_internal_cooldown("hp"):
-            return False
-
-        # 检查HP是否低于阈值
-        return self._is_resource_low("hp", cached_frame)
-
-    def _should_use_mp_resource(self, cached_frame: Optional[np.ndarray]) -> bool:
-        """判断是否应该使用MP资源"""
-        if not self.mp_config.get("enabled", False):
-            return False
-
-        # 检查内部冷却
-        if not self._check_internal_cooldown("mp"):
-            return False
-
-        # 检查MP是否低于阈值
-        return self._is_resource_low("mp", cached_frame)
 
     def _check_internal_cooldown(self, resource_type: str) -> bool:
         """检查内部冷却是否就绪"""
@@ -140,105 +105,121 @@ class ResourceManager:
         """检查资源是否低于阈值（使用统一的百分比检测接口）"""
         config = self.hp_config if resource_type == "hp" else self.mp_config
 
-        # 获取检测参数
+        # 检查内部冷却
+        if not self._check_internal_cooldown(resource_type):
+            return False
+
         threshold = config.get("threshold", 50)
         match_percentage = 100.0
 
         try:
-            # 根据检测模式选择检测方法
             detection_mode = config.get("detection_mode", "rectangle")
+            frame = cached_frame if cached_frame is not None else self.border_frame_manager.get_current_frame()
+            if frame is None:
+                raise ValueError("无法获取帧数据")
 
             if detection_mode == "text_ocr":
-                # 数字文本识别模式（使用预加载的OCR管理器）
-                text_x1 = config.get("text_x1")
-                text_y1 = config.get("text_y1")
-                text_x2 = config.get("text_x2")
-                text_y2 = config.get("text_y2")
-                
-                if text_x1 is None or text_y1 is None or text_x2 is None or text_y2 is None:
+                # 文本OCR
+                x1_raw = config.get("text_x1")
+                y1_raw = config.get("text_y1")
+                x2_raw = config.get("text_x2")
+                y2_raw = config.get("text_y2")
+                if x1_raw is None or y1_raw is None or x2_raw is None or y2_raw is None:
                     raise ValueError(f"{resource_type.upper()} 文本OCR检测配置不完整")
-                
-                # 获取帧数据
-                if cached_frame is None:
-                    frame = self.border_frame_manager.get_current_frame()
-                else:
-                    frame = cached_frame
-                    
-                if frame is None: 
-                    raise ValueError("无法获取帧数据")
-                
-                # 向调试管理器上报检测区域
+                x1, y1, x2, y2 = int(x1_raw), int(y1_raw), int(x2_raw), int(y2_raw)
+
                 if self.debug_display_manager:
                     self.debug_display_manager.update_detection_region(
                         f"{resource_type}_text_ocr",
                         {
                             "type": "rectangle",
-                            "x1": text_x1,
-                            "y1": text_y1,
-                            "x2": text_x2,
-                            "y2": text_y2,
+                            "x1": x1,
+                            "y1": y1,
+                            "x2": x2,
+                            "y2": y2,
                             "color": "yellow" if resource_type == "hp" else "magenta",
-                            "threshold": threshold
-                        }
+                            "threshold": threshold,
+                        },
                     )
 
-                text_region = (text_x1, text_y1, text_x2, text_y2)
-                
-                # 使用预加载的OCR管理器（避免重复初始化）
-                if self.tesseract_ocr_manager is None:
-                    LOG_ERROR(f"[ResourceManager] Tesseract OCR 未初始化，无法进行{resource_type.upper()}文本识别")
-                    match_percentage = 100.0
+                roi = frame[y1:y2, x1:x2]
+                engine = config.get("ocr_engine", "tesseract")
+                if engine == "tflite":
+                    try:
+                        from deepai import get_recognizer
+                    except Exception as e:
+                        LOG_ERROR(f"[ResourceManager] 导入deepai失败: {e}")
+                        match_percentage = 100.0
+                    else:
+                        recognizer = get_recognizer("tflite")
+                        if recognizer is None or roi is None or roi.size == 0:
+                            match_percentage = 100.0
+                        else:
+                            current, maximum = recognizer.recognize_and_parse(roi)
+                            if current is not None and maximum and maximum > 0:
+                                match_percentage = (current / maximum) * 100.0
+                            else:
+                                match_percentage = 100.0
+                elif engine == "template":
+                    try:
+                        from deepai import get_recognizer
+                    except Exception as e:
+                        LOG_ERROR(f"[ResourceManager] 导入deepai失败: {e}")
+                        match_percentage = 100.0
+                    else:
+                        recognizer = get_recognizer("template")
+                        if recognizer is None or roi is None or roi.size == 0:
+                            match_percentage = 100.0
+                        else:
+                            current, maximum = recognizer.recognize_and_parse(roi)
+                            if current is not None and maximum and maximum > 0:
+                                match_percentage = (current / maximum) * 100.0
+                            else:
+                                match_percentage = 100.0
                 else:
-                    _, match_percentage = self.tesseract_ocr_manager.recognize_and_parse(frame, text_region)
-                    if match_percentage < 0:  # 识别失败
-                        match_percentage = 100.0  # 避免误触发            elif detection_mode == "circle":
-                center_x, center_y, radius = config.get("center_x"), config.get("center_y"), config.get("radius")
-                LOG_INFO(f"[DEBUG] Circle coords: x={center_x}, y={center_y}, r={radius}, types: {type(center_x)}, {type(center_y)}, {type(radius)}")
-                if center_x is None or center_y is None or radius is None:
-                    raise ValueError(f"{resource_type.upper()} 圆形检测配置不完整")
-                
-                # 修复数组比较问题：明确检查帧数据
-                if cached_frame is None:
-                    frame = self.border_frame_manager.get_current_frame()
-                else:
-                    frame = cached_frame
-                    
-                if frame is None: 
-                    raise ValueError("无法获取帧数据")
+                    # Tesseract 默认
+                    if self.tesseract_ocr_manager is None:
+                        LOG_ERROR(f"[ResourceManager] Tesseract OCR 未初始化，无法进行{resource_type.upper()}文本识别")
+                        match_percentage = 100.0
+                    else:
+                        _, match_percentage = self.tesseract_ocr_manager.recognize_and_parse(frame, (x1, y1, x2, y2))
+                        if match_percentage < 0:
+                            match_percentage = 100.0
 
-                # 向调试管理器上报检测区域
+            elif detection_mode == "circle":
+                cx_raw = config.get("center_x")
+                cy_raw = config.get("center_y")
+                r_raw = config.get("radius")
+                if cx_raw is None or cy_raw is None or r_raw is None:
+                    raise ValueError(f"{resource_type.upper()} 圆形检测配置不完整")
+                cx, cy, r = int(cx_raw), int(cy_raw), int(r_raw)
+
                 if self.debug_display_manager:
                     self.debug_display_manager.update_detection_region(
                         f"{resource_type}_circle",
                         {
                             "type": "circle",
-                            "center_x": center_x,
-                            "center_y": center_y,
-                            "radius": radius,
+                            "center_x": cx,
+                            "center_y": cy,
+                            "radius": r,
                             "color": "green" if resource_type == "hp" else "cyan",
-                            "threshold": threshold
-                        }
+                            "threshold": threshold,
+                        },
                     )
 
                 match_percentage = self.border_frame_manager.compare_resource_circle(
-                    frame, center_x, center_y, radius, resource_type, threshold, config
+                    frame, cx, cy, r, resource_type, threshold, config
                 )
-            else:  # rectangle
-                x1, y1, x2, y2 = config.get("region_x1", 0), config.get("region_y1", 0), config.get("region_x2", 0), config.get("region_y2", 0)
-                LOG(f"[DEBUG] Rect coords: x1={x1}, y1={y1}, x2={x2}, y2={y2}, types: {type(x1)}, {type(y1)}, {type(x2)}, {type(y2)}")
+
+            else:
+                # rectangle
+                x1 = int(config.get("region_x1", 0))
+                y1 = int(config.get("region_y1", 0))
+                x2 = int(config.get("region_x2", 0))
+                y2 = int(config.get("region_y2", 0))
                 if not (x1 < x2 and y1 < y2):
                     raise ValueError(f"{resource_type.upper()} 未配置有效检测区域")
 
-                # 修复数组比较问题：明确检查帧数据
-                if cached_frame is None:
-                    frame = self.border_frame_manager.get_current_frame()
-                else:
-                    frame = cached_frame
-                    
-                if frame is None: 
-                    raise ValueError("无法获取帧数据")
-
-                # 向调试管理器上报检测区域
                 if self.debug_display_manager:
                     self.debug_display_manager.update_detection_region(
                         f"{resource_type}_rectangle",
@@ -249,8 +230,8 @@ class ResourceManager:
                             "x2": x2,
                             "y2": y2,
                             "color": "blue" if resource_type == "hp" else "red",
-                            "threshold": threshold
-                        }
+                            "threshold": threshold,
+                        },
                     )
 
                 region_name = f"{resource_type}_region"
@@ -258,24 +239,21 @@ class ResourceManager:
                 match_percentage = self.border_frame_manager._compare_resource_hsv(
                     frame, x1, y1, max(width, height), region_name, threshold
                 )
+
         except Exception as e:
             LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 检测失败: {e}")
             import traceback
             LOG_ERROR(f"[ResourceManager] 详细错误信息: {traceback.format_exc()}")
-            # 发生错误时，不触发资源补充，并报告100%以避免误触发
             match_percentage = 100.0
 
-        # 无论成功与否，都向Debug Manager报告最新状态
+        # 上报OSD
         if self.debug_display_manager:
-            if resource_type == 'hp':
+            if resource_type == "hp":
                 self.debug_display_manager.update_health(match_percentage)
-            elif resource_type == 'mp':
+            elif resource_type == "mp":
                 self.debug_display_manager.update_mana(match_percentage)
 
-        # 判断是否需要补充资源（百分比低于阈值）
-        # 使用明确的比较避免数组比较错误
-        needs_resource = bool(match_percentage < threshold) if isinstance(match_percentage, (int, float)) else False
-        return needs_resource
+        return bool(isinstance(match_percentage, (int, float)) and match_percentage < threshold)
 
     def capture_template_hsv(self, frame: np.ndarray):
         """在F8准备阶段截取并保存模板区域的HSV数据"""
@@ -378,9 +356,7 @@ class ResourceManager:
             self.input_handler.execute_hp_potion(key)
         elif resource_type == "mp":
             self.input_handler.execute_mp_potion(key)
-        else:
-            # 兼容其他类型，使用普通接口
-            self.input_handler.execute_key(key)
+        # 其他类型不处理
 
         # 记录按键时间
         self._flask_cooldowns[resource_type] = time.time()

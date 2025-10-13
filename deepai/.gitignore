@@ -1,0 +1,43 @@
+# DeepAI 训练数据和模型文件
+
+# 原始视频（太大，不上传）
+data/raw/*.mp4
+data/raw/*.avi
+data/raw/*.mkv
+
+# 处理后的数据
+data/processed/
+data/digits/
+
+# 标注数据（包含大量图像路径，可选择性上传）
+data/labels.json
+
+# TensorFlow训练的原始模型（较大）
+models/digit_cnn.h5
+
+# 用户自己训练的TFLite模型（可选择性上传）
+models/digit_cnn.tflite
+
+# 训练结果
+models/training_history.png
+models/confusion_matrix.png
+models/errors/
+models/model_info.json
+
+# 保留预训练模型和标签映射（需要上传）
+!models/digit_pretrained.tflite
+!models/label_map.json
+!models/README.md
+
+# Python缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# 虚拟环境
+venv_train/
+
+# IDE
+.vscode/
+.idea/

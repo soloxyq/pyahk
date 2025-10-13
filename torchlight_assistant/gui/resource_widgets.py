@@ -131,7 +131,7 @@ class ResourceManagementWidget(QWidget):
         key_edit = ConfigLineEdit()
         key_edit.setText("1" if prefix == "hp" else "2")
         key_edit.setMaximumWidth(50)
-        key_edit.setAlignment(Qt.AlignCenter)
+        key_edit.setAlignment(Qt.AlignmentFlag.AlignCenter)
         basic_layout.addWidget(key_edit, 0, 1)
 
         # 触发阈值
@@ -167,6 +167,27 @@ class ResourceManagementWidget(QWidget):
         mode_layout.addStretch()
         
         region_layout.addLayout(mode_layout)
+        
+        # OCR引擎选择（仅在text_ocr模式显示）
+        ocr_engine_layout = QHBoxLayout()
+        ocr_engine_layout.setSpacing(6)
+        ocr_engine_layout.addWidget(QLabel("OCR引擎:"))
+        
+        ocr_engine_combo = ConfigComboBox()
+        ocr_engine_combo.addItem("Tesseract (默认)", "tesseract")
+        ocr_engine_combo.addItem("TFLite模型 (高性能)", "tflite")
+        ocr_engine_combo.addItem("模板匹配 (Template)", "template")
+        ocr_engine_combo.setCurrentIndex(0)  # 默认Tesseract
+        ocr_engine_combo.setToolTip("Tesseract: 无需训练, 通用性强\nTFLite: 速度快, 需要一次训练\nTemplate: 中等速度, 无额外依赖")
+        ocr_engine_layout.addWidget(ocr_engine_combo)
+        ocr_engine_layout.addStretch()
+        
+        # 默认隐藏，只在text_ocr模式显示
+        ocr_engine_label = ocr_engine_layout.itemAt(0).widget()
+        ocr_engine_label.setVisible(False)
+        ocr_engine_combo.setVisible(False)
+        
+        region_layout.addLayout(ocr_engine_layout)
 
         # 第一行：坐标输入 - 单行文本框
         coords_layout = QHBoxLayout()
@@ -318,9 +339,12 @@ class ResourceManagementWidget(QWidget):
             "tolerance_input": tolerance_input,
             "mode_label": mode_label,
             "mode_combo": mode_combo,
+            "ocr_engine_combo": ocr_engine_combo,
+            "ocr_engine_label": ocr_engine_label,
             "select_region_btn": select_btn,
             "detect_orbs_btn": detect_btn,
             "test_ocr_btn": test_ocr_btn,
+            "status_label": status_label,
         }
 
         if prefix == "hp":
@@ -454,7 +478,8 @@ class ResourceManagementWidget(QWidget):
             "font-size: 9pt; padding: 5px; background-color: #f5f5f5; border-radius: 3px; min-height: 40px;"
         )
         self.global_colors_result.setWordWrap(True)
-        self.global_colors_result.setTextFormat(Qt.RichText)
+        # 使用枚举类以兼容PySide6类型提示
+        self.global_colors_result.setTextFormat(Qt.TextFormat.RichText)
         colors_layout.addWidget(self.global_colors_result)
 
         # 连接颜色配置变化事件
@@ -589,7 +614,7 @@ class ResourceManagementWidget(QWidget):
         def show_dialog():
             # 创建区域选择对话框
             from .region_selection_dialog import RegionSelectionDialog
-            dialog = RegionSelectionDialog(None, enable_color_analysis=True)
+            dialog = RegionSelectionDialog(None)
             dialog.region_analyzed.connect(
                 lambda x1, y1, x2, y2, analysis: self._handle_region_analysis(
                     x1, y1, x2, y2, analysis
@@ -636,7 +661,7 @@ class ResourceManagementWidget(QWidget):
                 # 转换为HSV并添加到颜色列表
                 import cv2
                 import numpy as np
-                rgb_array = np.uint8([[[r, g, b]]])
+                rgb_array = np.array([[[r, g, b]]], dtype=np.uint8)
                 hsv_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2HSV)
                 h, s, v = hsv_array[0][0]
                 
@@ -707,47 +732,7 @@ class ResourceManagementWidget(QWidget):
 
         return int(r), int(g), int(b)
 
-    def _get_contrast_color(self, r: int, g: int, b: int) -> str:
-        """根据背景色亮度返回合适的文字颜色"""
-        # 计算亮度 (使用相对亮度公式)
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-        return "#ffffff" if luminance < 0.5 else "#000000"
-
-    def _parse_colors_to_list(self, colors_text: str) -> list:
-        """解析颜色文本为颜色列表（纯颜色格式，使用全局容差）"""
-        try:
-            if not colors_text.strip():
-                return []
-
-            # 解析纯颜色列表格式 (每行一个颜色 H,S,V)
-            lines = [line.strip() for line in colors_text.split('\n') if line.strip()]
-            colors = []
-            
-            for line in lines:
-                # 解析单行颜色值 H,S,V
-                values = [int(x.strip()) for x in line.split(',') if x.strip()]
-                
-                if len(values) != 3:
-                    continue  # 跳过格式错误的行
-                
-                h, s, v = values
-                
-                # 获取全局容差设置
-                h_tolerance, s_tolerance, v_tolerance = self._get_current_tolerance()
-                
-                colors.append({
-                    "h": h, "s": s, "v": v,
-                    "h_tolerance": h_tolerance,
-                    "s_tolerance": s_tolerance,
-                    "v_tolerance": v_tolerance
-                })
-            
-            return colors
-            
-        except ValueError:
-            return []
-        except Exception:
-            return []
+    # NOTE: 移除重复定义，保留下面的单一定义以供全局使用
 
     def _get_contrast_color(self, r: int, g: int, b: int) -> str:
         """根据背景色亮度返回合适的文字颜色"""
@@ -877,12 +862,23 @@ class ResourceManagementWidget(QWidget):
             else:
                 text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
             
+            # OCR 引擎选择
+            ocr_engine_value = "tesseract"
+            try:
+                ocr_combo = self.hp_widgets.get("ocr_engine_combo")
+                if ocr_combo is not None:
+                    ocr_engine_value = ocr_combo.currentData() or "tesseract"
+            except Exception:
+                ocr_engine_value = "tesseract"
+
             hp_config.update({
                 "detection_mode": "text_ocr",
                 "text_x1": text_x1,
                 "text_y1": text_y1,
                 "text_x2": text_x2,
                 "text_y2": text_y2,
+                # OCR 引擎（tesseract | tflite | template）
+                "ocr_engine": ocr_engine_value,
                 "match_threshold": 0.70,
                 # 保留矩形配置作为备份
                 "region_x1": 136,
@@ -1047,12 +1043,23 @@ class ResourceManagementWidget(QWidget):
             else:
                 text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
             
+            # OCR 引擎选择
+            ocr_engine_value = "tesseract"
+            try:
+                ocr_combo = self.mp_widgets.get("ocr_engine_combo")
+                if ocr_combo is not None:
+                    ocr_engine_value = ocr_combo.currentData() or "tesseract"
+            except Exception:
+                ocr_engine_value = "tesseract"
+
             mp_config.update({
                 "detection_mode": "text_ocr",
                 "text_x1": text_x1,
                 "text_y1": text_y1,
                 "text_x2": text_x2,
                 "text_y2": text_y2,
+                # OCR 引擎（tesseract | tflite | template）
+                "ocr_engine": ocr_engine_value,
                 "match_threshold": 0.70,
                 # 保留矩形配置作为备份
                 "region_x1": 1552,
@@ -1182,6 +1189,15 @@ class ResourceManagementWidget(QWidget):
                 coord_input = self.hp_widgets.get("coord_input")
                 if coord_input:
                     coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
+                # 设置OCR引擎
+                ocr_engine = hp_config.get("ocr_engine", "tesseract")
+                ocr_combo = self.hp_widgets.get("ocr_engine_combo")
+                if ocr_combo is not None:
+                    # 根据data匹配
+                    for i in range(ocr_combo.count()):
+                        if ocr_combo.itemData(i) == ocr_engine:
+                            ocr_combo.setCurrentIndex(i)
+                            break
                 self._update_detection_mode_display("hp")
                 # 隐藏容差控件
                 self._toggle_tolerance_visibility("hp", False)
@@ -1258,6 +1274,14 @@ class ResourceManagementWidget(QWidget):
                 coord_input = self.mp_widgets.get("coord_input")
                 if coord_input:
                     coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
+                # 设置OCR引擎
+                ocr_engine = mp_config.get("ocr_engine", "tesseract")
+                ocr_combo = self.mp_widgets.get("ocr_engine_combo")
+                if ocr_combo is not None:
+                    for i in range(ocr_combo.count()):
+                        if ocr_combo.itemData(i) == ocr_engine:
+                            ocr_combo.setCurrentIndex(i)
+                            break
                 self._update_detection_mode_display("mp")
                 # 隐藏容差控件
                 self._toggle_tolerance_visibility("mp", False)
@@ -1338,7 +1362,7 @@ class ResourceManagementWidget(QWidget):
         if self.main_window:
             self.main_window.hide()
             self.main_window.setWindowState(
-                self.main_window.windowState() | Qt.WindowMinimized
+                self.main_window.windowState() | Qt.WindowState.WindowMinimized
             )
 
         # 延迟一下确保窗口完全隐藏
@@ -1355,7 +1379,7 @@ class ResourceManagementWidget(QWidget):
                 import cv2
                 import numpy as np
 
-                rgb_array = np.uint8([[[r, g, b]]])
+                rgb_array = np.array([[[r, g, b]]], dtype=np.uint8)
                 hsv_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2HSV)
                 h, s, v = hsv_array[0][0]
 
@@ -1386,7 +1410,7 @@ class ResourceManagementWidget(QWidget):
                 # 恢复显示主窗口
                 if self.main_window:
                     self.main_window.setWindowState(
-                        self.main_window.windowState() & ~Qt.WindowMinimized
+                        self.main_window.windowState() & ~Qt.WindowState.WindowMinimized
                     )
                     self.main_window.show()
                     self.main_window.raise_()
@@ -1650,6 +1674,7 @@ class ResourceManagementWidget(QWidget):
         """更新检测模式显示，并附带坐标信息"""
         mode = self.hp_detection_mode if prefix == "hp" else self.mp_detection_mode
         label = self.hp_mode_label if prefix == "hp" else self.mp_mode_label
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
 
         if mode == "circle":
             if circle_config:
@@ -1660,12 +1685,24 @@ class ResourceManagementWidget(QWidget):
             else:
                 label.setText("🔵 当前模式：圆形检测 (无具体坐标)")
             label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #28a745;")
+            # 隐藏OCR引擎选择
+            if "ocr_engine_combo" in widgets:
+                widgets["ocr_engine_combo"].setVisible(False)
+                widgets["ocr_engine_label"].setVisible(False)
         elif mode == "text_ocr":
             label.setText("🔤 当前模式：数字文本识别 (OCR)")
             label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #ffc107;")
+            # 显示OCR引擎选择
+            if "ocr_engine_combo" in widgets:
+                widgets["ocr_engine_combo"].setVisible(True)
+                widgets["ocr_engine_label"].setVisible(True)
         else:
             label.setText("⬛ 当前模式：矩形检测（手动选择区域）")
             label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #17a2b8;")
+            # 隐藏OCR引擎选择
+            if "ocr_engine_combo" in widgets:
+                widgets["ocr_engine_combo"].setVisible(False)
+                widgets["ocr_engine_label"].setVisible(False)
 
     def _on_orbs_detected(self, prefix: str, detection_result: Dict[str, Dict[str, Any]]):
         """球体检测完成回调 - 仅更新坐标和颜色"""
