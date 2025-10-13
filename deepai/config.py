@@ -12,7 +12,7 @@ from pathlib import Path
 VIDEO_PATH = "deepai/data/raw/game_capture.mp4"
 
 # HP区域坐标 (x1, y1, x2, y2)
-HP_REGION = (97, 814, 218, 835)
+HP_REGION = (97, 814, 228, 835)
 
 # MP区域坐标 (x1, y1, x2, y2)
 MP_REGION = (1767, 814, 1894, 835)
@@ -36,7 +36,7 @@ MIN_DIGIT_HEIGHT = 10
 # ============================================================================
 
 # Tesseract可执行文件路径（用于自动标注）
-TESSERACT_CMD = r"D:\Program Files\Tesseract-OCR\tesseract.exe"
+TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
 
 # Tesseract配置
 TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist=0123456789/'

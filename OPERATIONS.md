@@ -55,6 +55,7 @@ deepai/data/raw/game_capture.mp4
 
 ```powershell
 # 步骤1：数据准备（抽帧/裁剪/分割/自动标注）
+python -m deepai.scripts.01_prepare_data
 python deepai/scripts/01_prepare_data.py
 
 # 步骤2：标注校验（可选，推荐对低置信度样本核对）
@@ -95,6 +96,7 @@ if recognizer:
 ```
 
 说明：
+
 - 识别器会自动优先使用用户训练模型 `deepai/models/digit_cnn.tflite`；
 - 若无该文件，可放置 `deepai/models/digit_pretrained.tflite` 作为后备；
 - 模板引擎识别器将于后续集成，模板已生成可用于调优对照。
