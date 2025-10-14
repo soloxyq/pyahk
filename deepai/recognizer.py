@@ -242,14 +242,15 @@ class KerasDigitRecognizer:
 
             # 使用批量识别（性能优化）
             results = self.recognize_digits_batch(digit_images)
-            result = "".join([label for label, _ in results if label])
+            # 过滤掉逗号，只保留数字和斜杠
+            result = "".join([label for label, _ in results if label and label != ","])
 
             if "/" in result:
                 parts = result.split("/", 1)
                 if len(parts) == 2:
                     try:
-                        current = int(parts[0].replace(",", ""))
-                        maximum = int(parts[1].replace(",", ""))
+                        current = int(parts[0])
+                        maximum = int(parts[1])
                         return current, maximum
                     except ValueError:
                         pass
@@ -402,11 +403,12 @@ class TemplateDigitRecognizer:
             if not digit_images:
                 return None, None
 
+            # 识别所有字符，过滤掉逗号
             result = "".join(
                 [
                     label
                     for digit_img in digit_images
-                    if (label := self.recognize_digit(digit_img)[0])
+                    if (label := self.recognize_digit(digit_img)[0]) and label != ","
                 ]
             )
 
@@ -414,8 +416,8 @@ class TemplateDigitRecognizer:
                 parts = result.split("/", 1)
                 if len(parts) == 2:
                     try:
-                        current = int(parts[0].replace(",", ""))
-                        maximum = int(parts[1].replace(",", ""))
+                        current = int(parts[0])
+                        maximum = int(parts[1])
                         return current, maximum
                     except ValueError:
                         pass

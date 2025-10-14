@@ -14,7 +14,7 @@ from pathlib import Path
 # 添加项目根目录到路径
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from deepai.config import DATA_DIR
+from deepai.config import DATA_DIR, CLASS_NAMES
 
 
 class LabelVerifier:
@@ -114,21 +114,18 @@ class LabelVerifier:
             btn_frame, text="保存退出 (Ctrl+S)", command=self._save_and_quit
         ).pack(side=tk.RIGHT, padx=5)
 
-        # 快速标注按钮
+        # 快速标注按钮（从config.py读取支持的字符）
         quick_frame = ttk.LabelFrame(self.root, text="快速标注")
         quick_frame.pack(fill=tk.X, padx=10, pady=5)
 
-        for i in range(10):
+        # 动态创建按钮，支持所有CLASS_NAMES中的字符
+        for char in CLASS_NAMES:
             ttk.Button(
                 quick_frame,
-                text=str(i),
+                text=char,
                 width=3,
-                command=lambda n=str(i): self._quick_label(n),
+                command=lambda c=char: self._quick_label(c),
             ).pack(side=tk.LEFT, padx=2)
-
-        ttk.Button(
-            quick_frame, text="/", width=3, command=lambda: self._quick_label("/")
-        ).pack(side=tk.LEFT, padx=2)
 
         # 键盘快捷键
         self.root.bind("<Left>", lambda e: self._prev())
@@ -137,10 +134,9 @@ class LabelVerifier:
         self.root.bind("<Delete>", lambda e: self._delete())
         self.root.bind("<Control-s>", lambda e: self._save_and_quit())
 
-        # 数字键快速标注
-        for i in range(10):
-            self.root.bind(str(i), lambda e, n=str(i): self._quick_label(n))
-        self.root.bind("/", lambda e: self._quick_label("/"))
+        # 动态绑定所有字符的快捷键
+        for char in CLASS_NAMES:
+            self.root.bind(char, lambda e, c=char: self._quick_label(c))
 
     def _show_current(self):
         """显示当前图像"""
