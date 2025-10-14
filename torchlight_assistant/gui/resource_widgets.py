@@ -1848,14 +1848,29 @@ class ResourceManagementWidget(QWidget):
         from PySide6.QtCore import QTimer
         import cv2
         import os
+        import time
         
-        # 获取当前配置的坐标
+        # 获取当前配置的坐标和OCR引擎
         widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
         coord_input = widgets.get("coord_input")
+        ocr_engine_combo = widgets.get("ocr_engine_combo")
         
         if not coord_input:
             QMessageBox.warning(self, "错误", "无法获取坐标配置")
             return
+        
+        # 获取选择的OCR引擎
+        ocr_engine = "template"  # 默认
+        if ocr_engine_combo:
+            ocr_engine = ocr_engine_combo.currentData() or "template"
+        
+        # 引擎名称映射
+        engine_names = {
+            "template": "模板匹配",
+            "keras": "Keras模型",
+            "tesseract": "Tesseract"
+        }
+        engine_name = engine_names.get(ocr_engine, ocr_engine)
         
         # 解析坐标
         coord_text = coord_input.text().strip()
@@ -1897,56 +1912,104 @@ class ResourceManagementWidget(QWidget):
                                   f"图片尺寸: {w}x{h}")
                 return
             
-            # 导入Tesseract OCR识别器
-            from ..core.config_manager import ConfigManager
-            from ..utils.tesseract_ocr_manager import get_tesseract_ocr_manager
+            # 裁剪ROI
+            roi = img[y1:y2, x1:x2]
             
-            # 获取Tesseract OCR配置
-            config_manager = ConfigManager()
-            try:
-                global_config = config_manager.load_config("default.json")
-                tesseract_config = global_config.get("global", {}).get("tesseract_ocr", {})
-            except Exception:
-                tesseract_config = {}
+            # 根据选择的引擎进行识别
+            text = None
+            percentage = -1
+            recognition_time = 0
             
-            # 创建识别器
-            ocr_manager = get_tesseract_ocr_manager(tesseract_config)
-            
-            # 执行识别
-            region = (x1, y1, x2, y2)
-            text, percentage = ocr_manager.recognize_and_parse(img, region, debug=True)
+            if ocr_engine in ("template", "keras"):
+                # 使用deepai引擎
+                try:
+                    from deepai import get_recognizer
+                    
+                    start_time = time.time()
+                    recognizer = get_recognizer(ocr_engine)
+                    
+                    if recognizer is None:
+                        QMessageBox.warning(self, "引擎初始化失败", 
+                                          f"{engine_name}引擎初始化失败\n"
+                                          f"请确保已运行训练流程生成模型/模板")
+                        return
+                    
+                    current, maximum = recognizer.recognize_and_parse(roi)
+                    recognition_time = (time.time() - start_time) * 1000
+                    
+                    if current is not None and maximum is not None and maximum > 0:
+                        text = f"{current}/{maximum}"
+                        percentage = (current / maximum) * 100.0
+                    
+                except Exception as e:
+                    QMessageBox.warning(self, "识别失败", 
+                                      f"{engine_name}引擎识别失败\n错误: {str(e)}")
+                    return
+            else:
+                # 使用Tesseract引擎
+                try:
+                    from ..core.config_manager import ConfigManager
+                    from ..utils.tesseract_ocr_manager import get_tesseract_ocr_manager
+                    
+                    # 获取Tesseract OCR配置
+                    config_manager = ConfigManager()
+                    try:
+                        global_config = config_manager.load_config("default.json")
+                        tesseract_config = global_config.get("global", {}).get("tesseract_ocr", {})
+                    except Exception:
+                        tesseract_config = {}
+                    
+                    # 创建识别器
+                    ocr_manager = get_tesseract_ocr_manager(tesseract_config)
+                    
+                    # 执行识别
+                    start_time = time.time()
+                    region = (x1, y1, x2, y2)
+                    text, percentage = ocr_manager.recognize_and_parse(img, region, debug=True)
+                    recognition_time = (time.time() - start_time) * 1000
+                    
+                except Exception as e:
+                    QMessageBox.warning(self, "识别失败", 
+                                      f"Tesseract引擎识别失败\n错误: {str(e)}")
+                    return
             
             # 显示结果
-            if text:
+            if text and percentage >= 0:
                 result_msg = f"""✅ 识别成功！
 
 📊 测试配置:
 • 资源类型: {prefix.upper()}
+• OCR引擎: {engine_name}
 • 测试图片: {os.path.basename(file_path)}
 • 识别区域: ({x1},{y1}) → ({x2},{y2})
 
 🎯 识别结果:
 • 识别文本: {text}
 • 资源百分比: {percentage:.1f}%
+• 识别耗时: {recognition_time:.1f} ms
 
 💡 提示:
-识别成功！可以正常使用Text OCR模式。
+识别成功！可以正常使用 {engine_name} 引擎。
 如果实际游戏中识别失败，请检查:
 1. 游戏分辨率是否与测试图片一致
-2. 坐标是否准确框选了数字区域"""
+2. 坐标是否准确框选了数字区域
+3. 是否已运行训练流程（模板匹配/Keras需要）"""
                 
-                QMessageBox.information(self, "Text OCR 测试成功", result_msg)
+                QMessageBox.information(self, f"Text OCR 测试成功 ({engine_name})", result_msg)
                 
                 print("=" * 60)
                 print(f"[Text OCR测试] {prefix.upper()} 识别成功")
+                print(f"  引擎: {engine_name}")
                 print(f"  文本: {text}")
                 print(f"  百分比: {percentage:.1f}%")
+                print(f"  耗时: {recognition_time:.1f} ms")
                 print("=" * 60)
             else:
                 result_msg = f"""❌ 识别失败
 
 📊 测试配置:
 • 资源类型: {prefix.upper()}
+• OCR引擎: {engine_name}
 • 测试图片: {os.path.basename(file_path)}
 • 识别区域: ({x1},{y1}) → ({x2},{y2})
 
