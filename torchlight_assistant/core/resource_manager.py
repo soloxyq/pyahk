@@ -40,10 +40,6 @@ class ResourceManager:
         self._is_running = False
         self._is_paused = False
 
-        # 模板HSV数据存储（每个像素的HSV值）
-        self.hp_template_hsv = None
-        self.mp_template_hsv = None
-        
         # Tesseract OCR 管理器（程序启动时预加载）
         self.tesseract_ocr_manager = None
         self._initialize_tesseract_ocr()
@@ -246,9 +242,15 @@ class ResourceManager:
 
                 region_name = f"{resource_type}_region"
                 width, height = x2 - x1, y2 - y1
-                match_percentage = self.border_frame_manager._compare_resource_hsv(
-                    frame, x1, y1, max(width, height), region_name, threshold
-                )
+                
+                # 确保模板缓存存在
+                if not self.border_frame_manager.has_template_cache(region_name):
+                    LOG_ERROR(f"[ResourceManager] 未找到模板缓存: {region_name}，请先按F8初始化")
+                    match_percentage = 100.0
+                else:
+                    match_percentage = self.border_frame_manager._compare_resource_hsv(
+                        frame, x1, y1, width, height, region_name, threshold
+                    )
 
         except Exception as e:
             LOG_ERROR(f"[ResourceManager] {resource_type.upper()} 检测失败: {e}")
@@ -266,13 +268,14 @@ class ResourceManager:
         return bool(isinstance(match_percentage, (int, float)) and match_percentage < threshold)
 
     def capture_template_hsv(self, frame: np.ndarray):
-        """在F8准备阶段截取并保存模板区域的HSV数据"""
+        """在F8准备阶段截取并保存模板区域的HSV数据到border_frame_manager的缓存"""
         if frame is None:
             LOG_ERROR("[ResourceManager] 无法获取帧数据用于模板截取")
             return
 
         try:
             import cv2
+            import time
 
             # 截取HP区域模板
             if self.hp_config.get("enabled", False):
@@ -286,8 +289,24 @@ class ResourceManager:
                         if hp_region_img.shape[2] == 4:  # BGRA
                             hp_region_img = cv2.cvtColor(hp_region_img, cv2.COLOR_BGRA2BGR)
                         hp_hsv = cv2.cvtColor(hp_region_img, cv2.COLOR_BGR2HSV)
-                        self.hp_template_hsv = hp_hsv.copy()
-                        LOG_INFO(f"[ResourceManager] 已保存HP模板HSV数据，尺寸: {hp_hsv.shape}")
+                        
+                        # 从配置读取容差参数
+                        h_tolerance = self.hp_config.get("tolerance_h", 10)
+                        s_tolerance = self.hp_config.get("tolerance_s", 30)
+                        v_tolerance = self.hp_config.get("tolerance_v", 50)
+                        
+                        # 保存到border_frame_manager的缓存
+                        self.border_frame_manager.set_template_cache("hp_region", {
+                            "image": hp_hsv.copy(),
+                            "width": x2 - x1,
+                            "height": y2 - y1,
+                            "timestamp": time.time(),
+                            "type": "resource_region",
+                            "h_tolerance": h_tolerance,
+                            "s_tolerance": s_tolerance,
+                            "v_tolerance": v_tolerance
+                        })
+                        LOG_INFO(f"[ResourceManager] 已保存HP模板HSV数据到缓存，尺寸: {hp_hsv.shape}, 容差: H±{h_tolerance}, S±{s_tolerance}, V±{v_tolerance}")
 
             # 截取MP区域模板
             if self.mp_config.get("enabled", False):
@@ -301,8 +320,24 @@ class ResourceManager:
                         if mp_region_img.shape[2] == 4:  # BGRA
                             mp_region_img = cv2.cvtColor(mp_region_img, cv2.COLOR_BGRA2BGR)
                         mp_hsv = cv2.cvtColor(mp_region_img, cv2.COLOR_BGR2HSV)
-                        self.mp_template_hsv = mp_hsv.copy()
-                        LOG_INFO(f"[ResourceManager] 已保存MP模板HSV数据，尺寸: {mp_hsv.shape}")
+                        
+                        # 从配置读取容差参数
+                        h_tolerance = self.mp_config.get("tolerance_h", 10)
+                        s_tolerance = self.mp_config.get("tolerance_s", 30)
+                        v_tolerance = self.mp_config.get("tolerance_v", 50)
+                        
+                        # 保存到border_frame_manager的缓存
+                        self.border_frame_manager.set_template_cache("mp_region", {
+                            "image": mp_hsv.copy(),
+                            "width": x2 - x1,
+                            "height": y2 - y1,
+                            "timestamp": time.time(),
+                            "type": "resource_region",
+                            "h_tolerance": h_tolerance,
+                            "s_tolerance": s_tolerance,
+                            "v_tolerance": v_tolerance
+                        })
+                        LOG_INFO(f"[ResourceManager] 已保存MP模板HSV数据到缓存，尺寸: {mp_hsv.shape}, 容差: H±{h_tolerance}, S±{s_tolerance}, V±{v_tolerance}")
 
         except Exception as e:
             LOG_ERROR(f"[ResourceManager] 模板HSV数据截取失败: {e}")
@@ -442,7 +477,7 @@ class ResourceManager:
 
             # 调用矩形资源检测接口，返回匹配百分比
             match_percentage = self.border_frame_manager._compare_resource_hsv(
-                frame, region_x1, region_y1, max(region_width, region_height), region_name, 0.0
+                frame, region_x1, region_y1, region_width, region_height, region_name, 0.0
             )
 
         # 确保返回值是数值类型
