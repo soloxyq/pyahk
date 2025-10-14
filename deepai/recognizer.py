@@ -9,14 +9,6 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-try:
-    import tensorflow as tf
-    from tensorflow import keras
-
-    TENSORFLOW_AVAILABLE = True
-except ImportError:
-    TENSORFLOW_AVAILABLE = False
-
 
 class KerasDigitRecognizer:
     """Keras数字识别器（单例模式）"""
@@ -64,7 +56,11 @@ class KerasDigitRecognizer:
         if force_reload:
             self._initialized = False
 
-        if not TENSORFLOW_AVAILABLE:
+        # 延迟导入TensorFlow，只在实际使用时导入
+        try:
+            import tensorflow as tf
+            from tensorflow import keras
+        except ImportError:
             print("❌ TensorFlow未安装，请运行: pip install tensorflow")
             return False
 
