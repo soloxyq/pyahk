@@ -570,7 +570,18 @@ class BorderFrameManager:
             LOG_ERROR(f"[HSV冷却检测] 详细错误信息: {traceback.format_exc()}")
             return None
 
-    def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, size: int, resource_name: str, threshold: float) -> Optional[float]:
+    def has_template_cache(self, template_name: str) -> bool:
+        """检查模板缓存是否存在"""
+        with self._cache_lock:
+            return template_name in self._template_cache
+    
+    def set_template_cache(self, template_name: str, template_data: dict):
+        """设置模板缓存"""
+        with self._cache_lock:
+            self._template_cache[template_name] = template_data
+            LOG_INFO(f"[模板缓存] 已设置模板: {template_name}")
+    
+    def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, width: int, height: int, resource_name: str, threshold: float) -> Optional[float]:
         """使用HSV容差和连续段检测算法。
 
         计算方式说明:
@@ -596,9 +607,9 @@ class BorderFrameManager:
                 LOG_ERROR(f"[HSV检测] 缓存的模板无效: {resource_name}")
                 return None
 
-            # 获取区域图像
-            t_width = cached_template.get("width", size)
-            t_height = cached_template.get("height", size)
+            # 获取区域图像（优先使用传入的width/height，其次使用缓存的）
+            t_width = cached_template.get("width", width)
+            t_height = cached_template.get("height", height)
             region = self.get_region_from_frame(frame, x, y, t_width, t_height)
             if region is None:
                 LOG_ERROR(f"[HSV检测] 无法获取资源区域: {resource_name} 坐标({x}, {y}) 大小{t_width}x{t_height}")
@@ -625,7 +636,7 @@ class BorderFrameManager:
                 hsv_region, template_hsv, resource_type, h_tolerance, s_tolerance, v_tolerance
             )
 
-            # --- 优化的连续段检测算法 ---
+            # --- 优化的填充行检测算法 ---
             # 计算每行的匹配像素数
             vertical_sum = np.sum(pixel_match, axis=1)
 
@@ -633,24 +644,16 @@ class BorderFrameManager:
             row_threshold = t_width * 0.6
             is_filled = vertical_sum > row_threshold
 
-            # 从底部向上找到最长的连续有效行段
-            max_len = 0
-            current_len = 0
-            for i in range(t_height-1, -1, -1):  # 从下往上扫描
-                if is_filled[i]:
-                    current_len += 1
-                    if current_len > max_len:
-                        max_len = current_len
-                else:
-                    current_len = 0
-
-            # 计算百分比：最长连续段 / 总高度
+            # 计算总填充行数（更鲁棒，能抵抗中间的遮挡）
+            filled_rows = np.sum(is_filled)
+            
+            # 计算百分比：总填充行数 / 总高度
             if t_height > 0:
-                match_percentage = (max_len / t_height) * 100.0
+                match_percentage = (filled_rows / t_height) * 100.0
             else:
                 match_percentage = 0.0
 
-            LOG(f"[HSV检测] {resource_name} - 匹配详情: 区域大小={t_width}x{t_height}, 最长连续段={max_len}, 匹配度={match_percentage:.2f}%")
+            LOG(f"[HSV检测] {resource_name} - 匹配详情: 区域大小={t_width}x{t_height}, 填充行数={filled_rows}/{t_height}, 匹配度={match_percentage:.2f}%")
             return match_percentage
 
         except Exception as e:

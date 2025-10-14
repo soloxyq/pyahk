@@ -31,11 +31,11 @@ RECT_REGIONS = {
     "mp": (1787, 894, 1800, 1053)
 }
 
-# HSV容差配置
+# HSV容差配置（与default.json一致）
 HSV_TOLERANCE = {
     "h_tolerance": 10,
-    "s_tolerance": 20,
-    "v_tolerance": 20
+    "s_tolerance": 30,  # 修正：与配置文件一致
+    "v_tolerance": 50   # 修正：与配置文件一致
 }
 
 # 结果统计
@@ -159,21 +159,15 @@ def get_rectangle_percentage(img, resource_type):
             hsv_region, template_hsv, resource_type, h_tolerance, s_tolerance, v_tolerance
         )
         
+        # --- 优化的填充行检测算法（与实际代码一致）---
         vertical_sum = np.sum(pixel_match, axis=1)
         row_threshold = t_width * 0.6
         is_filled = vertical_sum > row_threshold
         
-        max_len = 0
-        current_len = 0
-        for i in range(t_height-1, -1, -1):
-            if is_filled[i]:
-                current_len += 1
-                if current_len > max_len:
-                    max_len = current_len
-            else:
-                current_len = 0
+        # 计算总填充行数（更鲁棒，能抵抗中间的遮挡）
+        filled_rows = np.sum(is_filled)
+        percentage = (filled_rows / t_height) * 100.0 if t_height > 0 else 0.0
         
-        percentage = (max_len / t_height) * 100.0 if t_height > 0 else 0.0
         return percentage
     
     except Exception as e:
