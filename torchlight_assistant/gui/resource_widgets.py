@@ -174,11 +174,11 @@ class ResourceManagementWidget(QWidget):
         ocr_engine_layout.addWidget(QLabel("OCR引擎:"))
         
         ocr_engine_combo = ConfigComboBox()
-        ocr_engine_combo.addItem("Tesseract (默认)", "tesseract")
-        ocr_engine_combo.addItem("TFLite模型 (高性能)", "tflite")
-        ocr_engine_combo.addItem("模板匹配 (Template)", "template")
-        ocr_engine_combo.setCurrentIndex(0)  # 默认Tesseract
-        ocr_engine_combo.setToolTip("Tesseract: 无需训练, 通用性强\nTFLite: 速度快, 需要一次训练\nTemplate: 中等速度, 无额外依赖")
+        ocr_engine_combo.addItem("模板匹配 (推荐)", "template")
+        ocr_engine_combo.addItem("Keras模型 (高准确率)", "keras")
+        ocr_engine_combo.addItem("Tesseract", "tesseract")
+        ocr_engine_combo.setCurrentIndex(0)  # 默认模板匹配
+        ocr_engine_combo.setToolTip("模板匹配: 最快速度(~7ms), 无额外依赖, 推荐\nKeras: 最高准确率(99%), 需要TensorFlow\nTesseract: 通用性强, 需要Tesseract")
         ocr_engine_layout.addWidget(ocr_engine_combo)
         ocr_engine_layout.addStretch()
         
@@ -863,13 +863,13 @@ class ResourceManagementWidget(QWidget):
                 text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
             
             # OCR 引擎选择
-            ocr_engine_value = "tesseract"
+            ocr_engine_value = "template"
             try:
                 ocr_combo = self.hp_widgets.get("ocr_engine_combo")
                 if ocr_combo is not None:
-                    ocr_engine_value = ocr_combo.currentData() or "tesseract"
+                    ocr_engine_value = ocr_combo.currentData() or "template"
             except Exception:
-                ocr_engine_value = "tesseract"
+                ocr_engine_value = "template"
 
             hp_config.update({
                 "detection_mode": "text_ocr",
@@ -877,7 +877,7 @@ class ResourceManagementWidget(QWidget):
                 "text_y1": text_y1,
                 "text_x2": text_x2,
                 "text_y2": text_y2,
-                # OCR 引擎（tesseract | tflite | template）
+                # OCR 引擎（template | keras | tesseract）
                 "ocr_engine": ocr_engine_value,
                 "match_threshold": 0.70,
                 # 保留矩形配置作为备份
@@ -1044,13 +1044,13 @@ class ResourceManagementWidget(QWidget):
                 text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
             
             # OCR 引擎选择
-            ocr_engine_value = "tesseract"
+            ocr_engine_value = "template"
             try:
                 ocr_combo = self.mp_widgets.get("ocr_engine_combo")
                 if ocr_combo is not None:
-                    ocr_engine_value = ocr_combo.currentData() or "tesseract"
+                    ocr_engine_value = ocr_combo.currentData() or "template"
             except Exception:
-                ocr_engine_value = "tesseract"
+                ocr_engine_value = "template"
 
             mp_config.update({
                 "detection_mode": "text_ocr",
@@ -1058,7 +1058,7 @@ class ResourceManagementWidget(QWidget):
                 "text_y1": text_y1,
                 "text_x2": text_x2,
                 "text_y2": text_y2,
-                # OCR 引擎（tesseract | tflite | template）
+                # OCR 引擎（template | keras | tesseract）
                 "ocr_engine": ocr_engine_value,
                 "match_threshold": 0.70,
                 # 保留矩形配置作为备份
@@ -1190,7 +1190,7 @@ class ResourceManagementWidget(QWidget):
                 if coord_input:
                     coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
                 # 设置OCR引擎
-                ocr_engine = hp_config.get("ocr_engine", "tesseract")
+                ocr_engine = hp_config.get("ocr_engine", "template")
                 ocr_combo = self.hp_widgets.get("ocr_engine_combo")
                 if ocr_combo is not None:
                     # 根据data匹配
@@ -1275,7 +1275,7 @@ class ResourceManagementWidget(QWidget):
                 if coord_input:
                     coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
                 # 设置OCR引擎
-                ocr_engine = mp_config.get("ocr_engine", "tesseract")
+                ocr_engine = mp_config.get("ocr_engine", "template")
                 ocr_combo = self.mp_widgets.get("ocr_engine_combo")
                 if ocr_combo is not None:
                     for i in range(ocr_combo.count()):

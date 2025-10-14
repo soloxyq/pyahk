@@ -153,31 +153,15 @@ class ResourceManager:
                     )
 
                 roi = frame[y1:y2, x1:x2]
-                engine = config.get("ocr_engine", "tesseract")
-                if engine == "tflite":
+                engine = config.get("ocr_engine", "template")
+                if engine in ("keras", "template"):
                     try:
                         from deepai import get_recognizer
                     except Exception as e:
                         LOG_ERROR(f"[ResourceManager] 导入deepai失败: {e}")
                         match_percentage = 100.0
                     else:
-                        recognizer = get_recognizer("tflite")
-                        if recognizer is None or roi is None or roi.size == 0:
-                            match_percentage = 100.0
-                        else:
-                            current, maximum = recognizer.recognize_and_parse(roi)
-                            if current is not None and maximum and maximum > 0:
-                                match_percentage = (current / maximum) * 100.0
-                            else:
-                                match_percentage = 100.0
-                elif engine == "template":
-                    try:
-                        from deepai import get_recognizer
-                    except Exception as e:
-                        LOG_ERROR(f"[ResourceManager] 导入deepai失败: {e}")
-                        match_percentage = 100.0
-                    else:
-                        recognizer = get_recognizer("template")
+                        recognizer = get_recognizer(engine)
                         if recognizer is None or roi is None or roi.size == 0:
                             match_percentage = 100.0
                         else:

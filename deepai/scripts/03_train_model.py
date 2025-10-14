@@ -17,9 +17,14 @@ from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLRO
 from sklearn.model_selection import train_test_split
 from collections import Counter
 import matplotlib.pyplot as plt
+import matplotlib
+
+# 配置中文字体
+matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'Arial']  # 微软雅黑、黑体、Arial备用
+matplotlib.rcParams['axes.unicode_minus'] = False  # 解决负号显示问题
 
 # 添加项目根目录到路径
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from deepai.config import *
 
@@ -146,11 +151,14 @@ def create_model(num_classes):
     ], name='data_augmentation')
     
     model = models.Sequential([
+        # 输入层（Keras 3.x 推荐方式）
+        layers.Input(shape=(IMG_HEIGHT, IMG_WIDTH, 1)),
+        
         # 数据增强层（仅在训练时激活）
         data_augmentation,
         
         # 第一层卷积 - 特征提取
-        layers.Conv2D(32, (3, 3), activation='relu', input_shape=(IMG_HEIGHT, IMG_WIDTH, 1)),
+        layers.Conv2D(32, (3, 3), activation='relu'),
         layers.MaxPooling2D((2, 2)),
         layers.Dropout(0.25),
         
@@ -172,6 +180,9 @@ def create_model(num_classes):
         loss='sparse_categorical_crossentropy',
         metrics=['accuracy']
     )
+    
+    # 先build模型（Keras 3.x要求）
+    model.build(input_shape=(None, 28, 28, 1))
     
     model.summary()
     

@@ -31,14 +31,18 @@ MAX_FRAMES = 0
 MIN_DIGIT_WIDTH = 6
 MIN_DIGIT_HEIGHT = 10
 
+# HP/MP采样率配置（HP变化慢，MP变化快）
+HP_SAMPLE_RATIO = 0.1  # HP区域采样率：10%（每10帧采样1次）
+MP_SAMPLE_RATIO = 1.0  # MP区域采样率：100%（每帧都采样）
+
 # ============================================================================
 # 🔤 OCR自动标注配置
 # ============================================================================
 
 # Tesseract可执行文件路径（用于自动标注）
-TESSERACT_CMD = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+TESSERACT_CMD = r"D:\Program Files\Tesseract-OCR\tesseract.exe"
 
-# Tesseract配置
+# Tesseract配置（白名单不包含逗号）
 TESSERACT_CONFIG = '--psm 7 -c tessedit_char_whitelist=0123456789/'
 
 # 自动标注置信度阈值（低于此值的需要人工验证）
@@ -49,7 +53,7 @@ AUTO_LABEL_CONFIDENCE = 0.9
 # ============================================================================
 
 # 模型保存路径
-MODEL_SAVE_PATH = "deepai/models/digit_cnn.h5"
+MODEL_SAVE_PATH = "deepai/models/digit_cnn.keras"
 
 # 训练参数
 BATCH_SIZE = 32
@@ -75,10 +79,6 @@ EARLY_STOPPING_PATIENCE = 5
 # 图像尺寸（训练时统一调整到此尺寸）
 IMG_WIDTH = 28
 IMG_HEIGHT = 28
-
-# 图像尺寸（统一缩放到此尺寸）
-IMAGE_WIDTH = 28
-IMAGE_HEIGHT = 28
 
 # 类别数量（0-9 + /）
 NUM_CLASSES = 11

@@ -11,14 +11,15 @@ import cv2
 from collections import defaultdict
 
 # 添加项目根目录到路径
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from deepai.config import DATA_DIR
 
 
 # 模板配置
 TEMPLATE_DIR = "game_char_templates/hp_mp_digits"
-SAMPLES_PER_CHAR = 5  # 每个字符保留的样本数
+FINAL_TEMPLATE_DIR = "game_char_templates"  # 最终单模板目录
+SAMPLES_PER_CHAR = 5  # 每个字符保留的样本数（用于hp_mp_digits目录）
 MIN_CONFIDENCE = 0.95  # 最低置信度阈值
 
 
@@ -310,6 +311,43 @@ def visualize_templates(selected_samples, output_dir):
     print(f"✅ 模板预览已保存: {preview_path}")
 
 
+def generate_final_templates(selected_samples, output_dir):
+    """生成最终单模板文件（每个字符一个最佳模板）"""
+    print(f"\n{'='*80}")
+    print(f"⭐ 生成最终单模板")
+    print(f"{'='*80}")
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    for label, samples in sorted(selected_samples.items()):
+        # 选择置信度最高的样本
+        best_sample = samples[0]
+        img_path = best_sample['image_path']
+        img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+        
+        if img is None:
+            print(f"  ⚠️ '{label}': 无法加载图像")
+            continue
+        
+        # 获取图像尺寸
+        h, w = img.shape
+        
+        # 生成文件名
+        if label == '/':
+            filename = f"template_slash_{w}x{h}.png"
+        else:
+            filename = f"template_{label}_{w}x{h}.png"
+        
+        # 保存最终模板
+        template_path = os.path.join(output_dir, filename)
+        cv2.imwrite(template_path, img)
+        
+        confidence = best_sample['confidence']
+        print(f"  '{label}': {filename} (置信度: {confidence:.2%}, 尺寸: {w}x{h})")
+    
+    print(f"\n✅ 最终模板已保存到: {output_dir}")
+
+
 def main():
     """主函数"""
     print(f"\n{'='*80}")
@@ -349,8 +387,11 @@ def main():
     # 选择最佳样本
     selected_samples = select_best_samples(grouped_data, SAMPLES_PER_CHAR)
     
-    # 保存模板
+    # 保存多模板到 hp_mp_digits 目录
     save_templates(selected_samples, TEMPLATE_DIR)
+    
+    # 生成最终单模板到 game_char_templates 根目录
+    generate_final_templates(selected_samples, FINAL_TEMPLATE_DIR)
     
     # 创建模板信息
     create_template_info(selected_samples, TEMPLATE_DIR)
@@ -368,7 +409,8 @@ def main():
     print(f"✅ 模板生成完成!")
     print(f"{'='*80}")
     print(f"\n生成的文件:")
-    print(f"  模板目录: {TEMPLATE_DIR}")
+    print(f"  多模板目录: {TEMPLATE_DIR} (每字符{SAMPLES_PER_CHAR}个)")
+    print(f"  最终模板目录: {FINAL_TEMPLATE_DIR} (每字符1个最佳)")
     print(f"  模板信息: {os.path.join(TEMPLATE_DIR, 'template_info.json')}")
     print(f"  说明文档: {os.path.join(TEMPLATE_DIR, 'README.md')}")
     print(f"  预览图像: {os.path.join(TEMPLATE_DIR, 'templates_preview.png')}")

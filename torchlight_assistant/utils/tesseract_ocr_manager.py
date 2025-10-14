@@ -69,6 +69,7 @@ class TesseractOcrManager:
                 return text, -1.0
             parts = text.split('/')
             if len(parts) == 2:
+                # 移除逗号和其他非数字字符
                 current_str = "".join(filter(str.isdigit, parts[0]))
                 max_str = "".join(filter(str.isdigit, parts[1]))
                 if current_str and max_str:

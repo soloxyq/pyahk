@@ -14,11 +14,21 @@ import tensorflow as tf
 from tensorflow import keras
 from sklearn.metrics import confusion_matrix, classification_report
 import matplotlib.pyplot as plt
-import seaborn as sns
+import matplotlib
+matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei']  # 设置中文字体为微软雅黑
+matplotlib.rcParams['axes.unicode_minus'] = False  # 正常显示负号
 import time
 
+# Seaborn是可选的，用于更美观的混淆矩阵
+try:
+    import seaborn as sns
+    SEABORN_AVAILABLE = True
+except ImportError:
+    SEABORN_AVAILABLE = False
+    print("⚠️  警告: seaborn未安装，将使用matplotlib绘制混淆矩阵")
+
 # 添加项目根目录到路径
-sys.path.insert(0, str(Path(__file__).parent.parent))
+sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from deepai.config import *
 
@@ -137,8 +147,28 @@ def plot_confusion_matrix(y_test, y_pred_classes, idx_to_label, save_path):
     labels = [idx_to_label[i] for i in sorted(idx_to_label.keys())]
     
     plt.figure(figsize=(10, 8))
-    sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
-                xticklabels=labels, yticklabels=labels)
+    
+    if SEABORN_AVAILABLE:
+        # 使用seaborn绘制更美观的热图
+        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+                    xticklabels=labels, yticklabels=labels)
+    else:
+        # 使用matplotlib绘制基本热图
+        plt.imshow(cm, interpolation='nearest', cmap='Blues')
+        plt.colorbar()
+        
+        # 添加数值标注
+        for i in range(cm.shape[0]):
+            for j in range(cm.shape[1]):
+                plt.text(j, i, str(cm[i, j]),
+                        ha="center", va="center",
+                        color="white" if cm[i, j] > cm.max() / 2 else "black")
+        
+        # 设置刻度标签
+        tick_marks = np.arange(len(labels))
+        plt.xticks(tick_marks, labels)
+        plt.yticks(tick_marks, labels)
+    
     plt.title('混淆矩阵')
     plt.ylabel('真实标签')
     plt.xlabel('预测标签')
@@ -217,6 +247,8 @@ def test_inference_speed(model, idx_to_label):
     
     print(f"测试不同批次大小的推理速度:\n")
     
+    batch_5_time = None
+    
     for size in test_sizes:
         dummy_input = np.random.rand(size, IMG_HEIGHT, IMG_WIDTH, 1).astype(np.float32)
         
@@ -237,8 +269,15 @@ def test_inference_speed(model, idx_to_label):
         
         print(f"  批次大小 {size:3d}: {avg_time:6.2f} ± {std_time:5.2f} ms "
               f"(单个: {per_sample:.2f} ms, {1000/per_sample:.0f} 次/秒)")
+        
+        # 记录批次大小为5的时间（用于HP/MP识别）
+        if size == 5:
+            batch_5_time = avg_time
     
     print(f"\n✅ 速度测试完成!\n")
+    
+    # 返回批次大小为5的推理时间（更接近实际使用场景）
+    return batch_5_time if batch_5_time else avg_time
 
 
 def main():
@@ -270,16 +309,61 @@ def main():
     analyze_errors(X_test, y_test, y_pred_classes, y_pred, idx_to_label, MODELS_DIR)
     
     # 推理速度测试
-    test_inference_speed(model, idx_to_label)
+    avg_time = test_inference_speed(model, idx_to_label)
     
+    # 计算准确率
+    accuracy = np.mean(y_pred_classes == y_test)
+    error_count = np.sum(y_pred_classes != y_test)
+    
+    # 输出评估结论
     print(f"\n{'='*80}")
+    print(f"📊 评估结论")
+    print(f"{'='*80}\n")
+    
+    print(f"🎯 模型性能:")
+    print(f"   准确率: {accuracy:.2%}")
+    print(f"   测试样本数: {len(y_test)}")
+    print(f"   正确识别: {len(y_test) - error_count}")
+    print(f"   错误识别: {error_count}")
+    print()
+    
+    print(f"⚡ 推理速度:")
+    print(f"   批量识别(5个字符): ~{avg_time:.2f} ms")
+    print(f"   单个字符平均: ~{avg_time / 5:.2f} ms")
+    print(f"   识别速度: ~{1000 / (avg_time / 5):.0f} 次/秒")
+    print()
+    
+    # 评估等级
+    if accuracy >= 0.99:
+        grade = "🌟 优秀"
+        comment = "模型表现出色，可以投入使用！"
+    elif accuracy >= 0.95:
+        grade = "✅ 良好"
+        comment = "模型表现良好，建议继续优化。"
+    elif accuracy >= 0.90:
+        grade = "⚠️  一般"
+        comment = "模型需要更多训练数据或调整参数。"
+    else:
+        grade = "❌ 较差"
+        comment = "模型需要重新训练，检查数据质量。"
+    
+    print(f"📈 评估等级: {grade}")
+    print(f"   {comment}")
+    print()
+    
+    print(f"{'='*80}")
     print(f"✅ 评估完成!")
     print(f"{'='*80}")
     print(f"\n生成的文件:")
     print(f"  混淆矩阵: {cm_path}")
     print(f"  错误样本: {os.path.join(MODELS_DIR, 'errors/error_samples.png')}")
-    print(f"\n下一步: 集成到应用中")
-    print(f"  使用 torchlight_assistant/utils/cnn_digit_recognizer.py")
+    print(f"\n下一步:")
+    if accuracy >= 0.95:
+        print(f"  ✅ 模型已达到可用标准，可以集成到应用中")
+        print(f"  ✅ 在主程序UI中选择 'Keras' 引擎")
+    else:
+        print(f"  ⚠️  建议继续迭代训练（运行步骤 4 → 2 → 3）")
+        print(f"  ⚠️  或增加更多训练数据（运行步骤 1a → 1b）")
     print(f"{'='*80}\n")
 
 
