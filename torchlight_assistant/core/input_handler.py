@@ -127,6 +127,10 @@ class InputHandler:
         self._priority_keys_config = {}  # {source_key: {"target": target_key, "delay": ms, "type": "managed"|"monitoring"}}
         self._registered_priority_keys = set()  # 已注册到热键管理器的按键
         self._priority_mode_enabled = True  # 是否启用优先级模式
+        
+        # --- 缓存的紧急按键配置（性能优化）---
+        self._hp_potion_key = ""  # HP药剂按键
+        self._mp_potion_key = ""  # MP药剂按键
 
         self._ahk_enabled = True
         self._ahk_window_title = "HoldServer_Window_UniqueName_12345"
@@ -390,6 +394,13 @@ class InputHandler:
             self.window_activation_config["ahk_class"] = window_activation.get("ahk_class", "")
             self.window_activation_config["ahk_exe"] = window_activation.get("ahk_exe", "")
             LOG_INFO(f"[输入处理器] 窗口激活配置已更新: enabled={self.window_activation_config['enabled']}, class={self.window_activation_config['ahk_class']}, exe={self.window_activation_config['ahk_exe']}")
+        
+        # 缓存紧急按键配置（性能优化）
+        resource_config = global_config.get('resource_management', {})
+        self._hp_potion_key = resource_config.get('hp_config', {}).get('key', '').lower()
+        self._mp_potion_key = resource_config.get('mp_config', {}).get('key', '').lower()
+        if self._hp_potion_key or self._mp_potion_key:
+            LOG_INFO(f"[输入处理器] 紧急按键已缓存: HP={self._hp_potion_key}, MP={self._mp_potion_key}")
 
     def _on_status_updated(self, status_info: Dict[str, Any]):
         """响应状态更新，更新缓存的状态信息"""
@@ -476,29 +487,12 @@ class InputHandler:
         紧急按键的特征：
         1. 通过 execute_hp_potion 或 execute_mp_potion 入队（使用 emergency 优先级）
         2. 即使在优先级模式激活时也应该执行
+        
+        性能优化：使用缓存的按键配置，避免重复读取配置文件
         """
-        # 这里可以根据实际情况扩展判断逻辑
-        # 目前简单判断：由于HP/MP使用emergency优先级，
-        # 而普通技能使用normal优先级，我们可以通过队列优先级来区分
-        # 但由于这里已经从队列中取出，我们需要另一种方式
-        
-        # 暂时使用简单策略：所有按键都可能是紧急的
-        # 更好的方式是在入队时打标记，或者维护一个紧急按键列表
-        # 由于HP/MP使用单独的方法入队，我们可以检查配置
-        
-        # 获取资源配置中的HP/MP按键
-        if hasattr(self, 'config_manager') and self.config_manager:
-            global_config = self.config_manager.get_global_config()
-            resource_config = global_config.get('resource_management', {})
-            
-            hp_key = resource_config.get('hp_config', {}).get('key', '')
-            mp_key = resource_config.get('mp_config', {}).get('key', '')
-            
-            # 如果是HP或MP按键，认为是紧急按键
-            if key.lower() in [hp_key.lower(), mp_key.lower()]:
-                return True
-        
-        return False
+        # 使用缓存的紧急按键配置（在 _on_config_updated 中更新）
+        key_lower = key.lower()
+        return key_lower in (self._hp_potion_key, self._mp_potion_key)
 
 
     def _handle_delay_command(self, key: str) -> bool:

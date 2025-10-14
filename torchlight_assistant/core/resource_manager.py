@@ -47,6 +47,11 @@ class ResourceManager:
         # Tesseract OCR 管理器（程序启动时预加载）
         self.tesseract_ocr_manager = None
         self._initialize_tesseract_ocr()
+        
+        # DeepAI 模块可用性检查（程序启动时检查一次）
+        self.deepai_available = False
+        self._deepai_get_recognizer = None
+        self._check_deepai_availability()
     
     def _initialize_tesseract_ocr(self):
         """初始化Tesseract OCR管理器（程序启动时加载一次）"""
@@ -73,6 +78,18 @@ class ResourceManager:
             LOG_INFO("[ResourceManager] Tesseract OCR 已预加载")
         except Exception as e:
             LOG_ERROR(f"[ResourceManager] Tesseract OCR 初始化失败: {e}")
+    
+    def _check_deepai_availability(self):
+        """检查 DeepAI 模块可用性（程序启动时检查一次）"""
+        try:
+            from deepai import get_recognizer
+            self.deepai_available = True
+            self._deepai_get_recognizer = get_recognizer
+            LOG_INFO("[ResourceManager] DeepAI 模块可用")
+        except ImportError as e:
+            self.deepai_available = False
+            self._deepai_get_recognizer = None
+            LOG("[ResourceManager] DeepAI 模块不可用，Keras/Template引擎将无法使用")
             self.tesseract_ocr_manager = None
 
     def update_config(self, resource_config: Dict[str, Any]):
@@ -155,13 +172,12 @@ class ResourceManager:
                 roi = frame[y1:y2, x1:x2]
                 engine = config.get("ocr_engine", "template")
                 if engine in ("keras", "template"):
-                    try:
-                        from deepai import get_recognizer
-                    except Exception as e:
-                        LOG_ERROR(f"[ResourceManager] 导入deepai失败: {e}")
+                    # 使用启动时检查的标志位，避免重复导入
+                    if not self.deepai_available:
+                        LOG_ERROR(f"[ResourceManager] DeepAI模块不可用，无法使用{engine}引擎")
                         match_percentage = 100.0
                     else:
-                        recognizer = get_recognizer(engine)
+                        recognizer = self._deepai_get_recognizer(engine)
                         if recognizer is None or roi is None or roi.size == 0:
                             match_percentage = 100.0
                         else:
