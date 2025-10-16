@@ -20,10 +20,13 @@ class AHKCommandSender:
     - 将动作加入AHK队列
     - 管理Hook注册
     - 控制队列暂停/恢复
+    - 处理原地模式的shift修饰符
     """
     
     def __init__(self, window_title: str = "HoldServer_Window_UniqueName_12345"):
         self.window_title = window_title
+        self._stationary_mode_active = False
+        self._stationary_mode_type = "shift_modifier"
         self._check_connection()
     
     def _check_connection(self):
@@ -48,6 +51,35 @@ class AHKCommandSender:
         return send_ahk_cmd(self.window_title, CMD_ACTIVATE)
 
     # ========================================================================
+    # 原地模式管理
+    # ========================================================================
+    
+    def set_stationary_mode(self, active: bool, mode_type: str = "shift_modifier"):
+        """设置原地模式状态"""
+        self._stationary_mode_active = active
+        self._stationary_mode_type = mode_type
+        
+        # 发送命令到AHK
+        from torchlight_assistant.config.ahk_commands import CMD_SET_STATIONARY
+        param = f"{'true' if active else 'false'}:{mode_type}"
+        return send_ahk_cmd(self.window_title, CMD_SET_STATIONARY, param)
+    
+    def set_force_move_key(self, key: str):
+        """设置强制移动键"""
+        from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_KEY
+        return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_KEY, key)
+    
+    def set_force_move_state(self, active: bool):
+        """设置强制移动状态"""
+        from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_STATE
+        param = "true" if active else "false"
+        return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_STATE, param)
+        
+    def is_stationary_mode_active(self) -> bool:
+        """检查原地模式是否激活"""
+        return self._stationary_mode_active
+
+    # ========================================================================
     # 队列操作
     # ========================================================================
     
@@ -62,9 +94,8 @@ class AHKCommandSender:
         Returns:
             是否成功
         """
-        cmd = f"enqueue:{priority}:{action}"
-        print(f"[AHK命令发送器][DEBUG] Enqueueing command: {cmd}") # 添加日志
-        return send_ahk_cmd(self.window_title, cmd)
+        param = f"{priority}:{action}"
+        return send_ahk_cmd(self.window_title, CMD_ENQUEUE, param)
     
     def send_key(self, key: str, priority: int = 2) -> bool:
         """
@@ -74,8 +105,9 @@ class AHKCommandSender:
             key: 按键名称 (如 "1", "q", "space")
             priority: 优先级
         """
-        print(f"[AHK命令发送器][DEBUG] Sending key: {key} with priority {priority}") # 添加日志
         return self.enqueue(f"press:{key}", priority)
+    
+
     
     def send_sequence(self, sequence: str, priority: int = 2) -> bool:
         """
@@ -123,11 +155,11 @@ class AHKCommandSender:
     
     def pause(self) -> bool:
         """暂停队列处理"""
-        return send_ahk_cmd(self.window_title, "pause")
+        return send_ahk_cmd(self.window_title, CMD_PAUSE)
     
     def resume(self) -> bool:
         """恢复队列处理"""
-        return send_ahk_cmd(self.window_title, "resume")
+        return send_ahk_cmd(self.window_title, CMD_RESUME)
     
     def clear_queue(self, priority: int = -1) -> bool:
         """
@@ -136,7 +168,7 @@ class AHKCommandSender:
         Args:
             priority: 要清空的队列 (-1=全部, 0-3=指定队列)
         """
-        return send_ahk_cmd(self.window_title, f"clear_queue:{priority}")
+        return send_ahk_cmd(self.window_title, CMD_CLEAR_QUEUE, str(priority))
     
     # ========================================================================
     # Hook管理
@@ -150,7 +182,8 @@ class AHKCommandSender:
             key: 按键名称
             mode: 模式 ("intercept"=拦截, "monitor"=监控, "block"=阻止)
         """
-        return send_ahk_cmd(self.window_title, f"hook_register:{key}:{mode}")
+        param = f"{key}:{mode}"
+        return send_ahk_cmd(self.window_title, CMD_HOOK_REGISTER, param)
     
     def unregister_hook(self, key: str) -> bool:
         """
@@ -159,7 +192,7 @@ class AHKCommandSender:
         Args:
             key: 按键名称
         """
-        return send_ahk_cmd(self.window_title, f"hook_unregister:{key}")
+        return send_ahk_cmd(self.window_title, CMD_HOOK_UNREGISTER, key)
     
     # ========================================================================
     # 统计信息

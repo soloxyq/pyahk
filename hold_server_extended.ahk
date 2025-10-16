@@ -14,6 +14,9 @@
 Persistent
 #WinActivateForce ; 强制激活窗口
 
+; 包含命令定义
+#Include ahk_commands.ahk
+
 ; ===============================================================================
 ; 全局状态
 ; ===============================================================================
@@ -26,6 +29,14 @@ global IsPaused := false
 global PriorityKeysActive := Map()
 global RegisteredHooks := Map()
 global TargetWin := "" ; 目标窗口标识符
+
+; 原地模式状态
+global StationaryModeActive := false
+global StationaryModeType := "shift_modifier"
+
+; 强制移动键
+global ForceMoveKey := "a"  ; 默认为a键
+global ForceMoveActive := false  ; 强制移动键是否处于按下状态
 
 ; 统计信息
 global QueueStats := Map(
@@ -59,12 +70,12 @@ ProcessQueue() {
         QueueStats["processed"] := QueueStats["processed"] + 1
         return
     }
-    
+
     ; 暂停时不处理其他队列
     if (IsPaused) {
         return
     }
-    
+
     ; 按优先级处理
     if (HighQueue.Length > 0) {
         action := HighQueue.RemoveAt(1)
@@ -89,125 +100,133 @@ SetTimer(ProcessQueue, 10)
 ; ===============================================================================
 WM_COPYDATA(wParam, lParam, msg, hwnd) {
     ; 解析COPYDATASTRUCT
-    str := StrGet(NumGet(lParam + A_PtrSize*2, "UPtr"), "UTF-8")
-    if !str {
-        return 0
-    }
-    
-    ; 记录所有收到的命令
-    FileAppend("收到命令: " . str . "`n", "ahk_debug.txt")
+    ; dwData = 命令ID
+    ; lpData = 参数字符串（可选）
+    cmdId := NumGet(lParam, "UPtr")
+    dataSize := NumGet(lParam + A_PtrSize, "UPtr")
 
-    ; 解析命令
-    parts := StrSplit(str, ":")
-    if parts.Length < 1 {
-        return 0
+    ; 读取参数（如果有）
+    param := ""
+    if (dataSize > 0) {
+        dataPtr := NumGet(lParam + A_PtrSize * 2, "UPtr")
+        param := StrGet(dataPtr, dataSize, "UTF-8")
     }
-    
-    cmd := parts[1]
-    FileAppend("解析后的cmd: " . cmd . "`n", "ahk_debug.txt")
-    
+
+    ; 调试日志（可选）
+    ; FileAppend("收到命令ID: " . cmdId . ", 参数: '" . param . "'`n", "ahk_debug.txt")
+
     ; 处理命令
-    switch cmd {
-        case "set_target":
-            ; set_target:ahk_exe notepad++.exe
+    switch cmdId {
+        case CMD_PING:
+            ; PING - 测试连接
+            return 1
+
+        case CMD_SET_TARGET:
+            ; SET_TARGET - 设置目标窗口
             global TargetWin
-            if parts.Length > 1 {
-                TargetWin := parts[2]
-                OutputDebug("[AHK] 目标窗口已设置: '" . TargetWin . "'")
-                
-                ; 写入调试文件
-                try {
-                    FileDelete("ahk_debug.txt")
-                } catch {
-                }
-                FileAppend("set_target收到: " . TargetWin . "`n", "ahk_debug.txt")
+            if (param != "") {
+                TargetWin := param
+                ; FileAppend("目标窗口已设置: '" . TargetWin . "'`n", "ahk_debug.txt")
             }
             return 1
 
-        case "activate":
-            ; activate - 激活已设置的目标窗口
+        case CMD_ACTIVATE:
+            ; ACTIVATE - 激活目标窗口
             global TargetWin
-            
-            ; 写入调试文件
-            FileAppend("activate命令收到`n", "ahk_debug.txt")
-            FileAppend("TargetWin值: '" . TargetWin . "'`n", "ahk_debug.txt")
-            FileAppend("TargetWin长度: " . StrLen(TargetWin) . "`n", "ahk_debug.txt")
-            
+
+            ; FileAppend("激活命令收到，TargetWin='" . TargetWin . "'`n", "ahk_debug.txt")
+
             if (TargetWin != "") {
-                FileAppend("尝试查找窗口...`n", "ahk_debug.txt")
                 if WinExist(TargetWin) {
-                    FileAppend("窗口存在，开始激活`n", "ahk_debug.txt")
                     WinActivate(TargetWin)
-                    FileAppend("WinActivate执行完成`n", "ahk_debug.txt")
+                    ; FileAppend("窗口已激活`n", "ahk_debug.txt")
                     return 1
                 } else {
-                    FileAppend("窗口不存在`n", "ahk_debug.txt")
+                    ; FileAppend("窗口不存在`n", "ahk_debug.txt")
                     return 0
                 }
             } else {
-                FileAppend("TargetWin为空`n", "ahk_debug.txt")
+                ; FileAppend("TargetWin为空`n", "ahk_debug.txt")
                 return 0
             }
 
-        case "enqueue":
-            ; enqueue:priority:action
-            if parts.Length < 3 {
-                return 0
+        case CMD_ENQUEUE:
+            ; ENQUEUE - 添加到队列
+            ; 参数格式: "priority:action"
+            parts := StrSplit(param, ":", , 2)
+            if (parts.Length >= 2) {
+                priority := Integer(parts[1])
+                action := parts[2]
+                EnqueueAction(priority, action)
+                return 1
             }
-            priority := Integer(parts[2])
-            action := parts[3]
-            EnqueueAction(priority, action)
-            return 1
-            
-        case "press":
-            ; press:key - 立即发送
-            SendPress(parts[2])
-            return 1
-            
-        case "sequence":
-            ; sequence:key1,delay50,key2
-            ExecuteSequence(parts[2])
-            return 1
-            
-        case "pause":
-            ; pause - 暂停队列处理
+            return 0
+
+        case CMD_PAUSE:
+            ; PAUSE - 暂停队列处理
             IsPaused := true
             return 1
-            
-        case "resume":
-            ; resume - 恢复队列处理
+
+        case CMD_RESUME:
+            ; RESUME - 恢复队列处理
             IsPaused := false
             return 1
-            
-        case "hook_register":
-            ; hook_register:key:mode
-            if parts.Length < 3 {
-                return 0
+
+        case CMD_HOOK_REGISTER:
+            ; HOOK_REGISTER - 注册Hook
+            ; 参数格式: "key:mode"
+            parts := StrSplit(param, ":")
+            if (parts.Length >= 2) {
+                RegisterHook(parts[1], parts[2])
+                return 1
             }
-            RegisterHook(parts[2], parts[3])
+            return 0
+
+        case CMD_HOOK_UNREGISTER:
+            ; HOOK_UNREGISTER - 取消Hook
+            UnregisterHook(param)
             return 1
-            
-        case "hook_unregister":
-            ; hook_unregister:key
-            UnregisterHook(parts[2])
-            return 1
-            
-        case "clear_queue":
-            ; clear_queue:priority
-            priority := Integer(parts[2])
+
+        case CMD_CLEAR_QUEUE:
+            ; CLEAR_QUEUE - 清空队列
+            priority := Integer(param)
             ClearQueue(priority)
             return 1
-            
-        case "get_stats":
-            ; get_stats - 返回统计信息
-            SendStatsToPython()
-            return 1
-            
-        case "ping":
-            ; ping - 连接测试
+
+        case CMD_SET_STATIONARY:
+            ; SET_STATIONARY - 设置原地模式
+            ; 参数格式: "active:mode_type" 例如: "true:shift_modifier"
+            parts := StrSplit(param, ":")
+            if (parts.Length >= 2) {
+                global StationaryModeActive, StationaryModeType
+                StationaryModeActive := (parts[1] = "true")
+                StationaryModeType := parts[2]
+                FileAppend("原地模式已设置: active=" . StationaryModeActive . ", type=" . StationaryModeType . "`n",
+                    "ahk_debug.txt")
+                return 1
+            }
+            return 0
+
+        case CMD_SET_FORCE_MOVE_KEY:
+            ; SET_FORCE_MOVE_KEY - 设置强制移动键
+            ; 参数格式: "key" 例如: "a"
+            if (param != "") {
+                global ForceMoveKey
+                ForceMoveKey := param
+                ; FileAppend("强制移动键已设置: " . ForceMoveKey . "`n", "ahk_debug.txt")
+                return 1
+            }
+            return 0
+
+        case CMD_SET_FORCE_MOVE_STATE:
+            ; SET_FORCE_MOVE_STATE - 设置强制移动状态
+            ; 参数格式: "true" 或 "false"
+            global ForceMoveActive
+            ForceMoveActive := (param = "true")
+            ; FileAppend("强制移动状态已设置: " . ForceMoveActive . "`n", "ahk_debug.txt")
             return 1
     }
-    
+
     ; 未识别的命令
     return 0
 }
@@ -261,10 +280,10 @@ ExecuteAction(action) {
         SendPress(action) ; 兼容旧的直接发送key的模式
         return
     }
-    
+
     actionType := parts[1]
     actionData := parts[2]
-    
+
     ; 执行动作
     switch actionType {
         case "press":
@@ -284,7 +303,25 @@ ExecuteAction(action) {
 
 SendPress(key) {
     ; 发送按键 (按下并释放)
-    Send "{" key "}"
+    global ForceMoveActive
+
+    ; 如果强制移动键按下，技能键需要替换为f键
+    if (ForceMoveActive) {
+        ; 技能键在强制移动时替换为f键
+        if (key = "9" or key = "8" or key = "7" or key = "6" or key = "5" or key = "4" or key = "3" or key = "2" or key =
+            "1") {
+            ; 直接发送f键替换原始技能键
+            Send "{f}"
+            return  ; 已经处理完毕，直接返回
+        }
+    }
+
+    ; 正常按键处理（没有强制移动或不是技能键）
+    if (ShouldAddShiftModifier(key)) {
+        Send "+{" key "}"  ; 带shift修饰符
+    } else {
+        Send "{" key "}"   ; 普通按键
+    }
 }
 
 SendDown(key) {
@@ -295,6 +332,37 @@ SendDown(key) {
 SendUp(key) {
     ; 释放按键
     Send "{" key " up}"
+}
+
+ShouldAddShiftModifier(key) {
+    ; 检查是否应该添加shift修饰符
+    global StationaryModeActive, StationaryModeType
+
+    ; 如果原地模式未激活，不添加shift修饰符
+    if (!StationaryModeActive) {
+        return false
+    }
+
+    ; 如果不是shift_modifier模式，不添加shift修饰符
+    if (StationaryModeType != "shift_modifier") {
+        return false
+    }
+
+    ; 定义需要添加shift修饰符的技能键
+    skillKeys := ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
+        "q", "w", "e", "r", "t", "y", "u", "i", "o", "p",
+        "a", "s", "d", "f", "g", "h", "j", "k", "l", "z", "x", "c", "v", "b", "n", "m"]
+
+    keyLower := StrLower(key)
+
+    ; 检查是否是技能键
+    for _, skillKey in skillKeys {
+        if (keyLower == skillKey) {
+            return true
+        }
+    }
+
+    return false
 }
 
 ExecuteSequence(sequence) {
@@ -327,27 +395,48 @@ ExecuteMouseClick(data) {
 RegisterHook(key, mode) {
     ; 检查是否已注册
     if (RegisteredHooks.Has(key)) {
-        return
+        existing_mode := RegisteredHooks[key]
+        if (existing_mode = mode) {
+            ; FileAppend("Hook已存在且模式相同，跳过注册: " . key . " (" . mode . ")`n", "ahk_debug.txt")
+            return
+        } else {
+            ; FileAppend("Hook已存在但模式不同，先取消旧Hook: " . key . " 旧模式:" . existing_mode . " 新模式:" . mode . "`n", "ahk_debug.txt")
+            UnregisterHook(key)
+        }
     }
-    
+
     ; 记录Hook
     RegisteredHooks[key] := mode
-    
+
+    ; 调试信息（可选）
+    ; FileAppend("开始注册Hook: " . key . " 模式: " . mode . "`n", "ahk_debug.txt")
+
     ; 根据模式注册Hotkey（直接使用AHK按键名称）
-    switch mode {
-        case "intercept":
-            ; 拦截模式 - 使用$前缀避免自拦截
-            Hotkey("$" key, (*) => HandleInterceptKey(key))
-            Hotkey("$" key " up", (*) => HandleInterceptKeyUp(key))
-            
-        case "monitor":
-            ; 监控模式 - 使用~前缀不拦截
-            Hotkey("~" key, (*) => HandleMonitorKey(key))
-            Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key))
-            
-        case "block":
-            ; 阻止模式 - 完全阻止按键
-            Hotkey("$" key, (*) => {})
+    try {
+        switch mode {
+            case "intercept":
+                ; 拦截模式 - 使用$前缀避免自拦截，只监听按下事件
+                Hotkey("$" key, (*) => HandleInterceptKey(key))
+                ; FileAppend("成功注册拦截Hook: $" . key . " (仅按下)`n", "ahk_debug.txt")
+
+            case "priority":
+                ; 优先级模式 - 发送priority_key事件，只监听按下事件
+                Hotkey("$" key, (*) => HandlePriorityKey(key))
+                ; FileAppend("成功注册优先级Hook: $" . key . " (仅按下)`n", "ahk_debug.txt")
+
+            case "monitor":
+                ; 监控模式 - 使用~前缀不拦截，监听按下和释放事件
+                Hotkey("~" key, (*) => HandleMonitorKey(key))
+                Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key))
+                ; FileAppend("成功注册监控Hook: ~" . key . " (按下+释放)`n", "ahk_debug.txt")
+
+            case "block":
+                ; 阻止模式 - 完全阻止按键
+                Hotkey("$" key, (*) => {})
+                ; FileAppend("成功注册阻止Hook: $" . key . " (完全阻止)`n", "ahk_debug.txt")
+        }
+    } catch as err {
+        ; FileAppend("Hook注册失败: " . key . " 错误: " . err.message . "`n", "ahk_debug.txt")
     }
 }
 
@@ -356,22 +445,23 @@ UnregisterHook(key) {
     if (!RegisteredHooks.Has(key)) {
         return
     }
-    
+
     ; 获取模式
     mode := RegisteredHooks[key]
-    
+
     ; 取消Hotkey（直接使用AHK按键名称）
     switch mode {
         case "intercept":
             Hotkey("$" key, "Off")
-            Hotkey("$" key " up", "Off")
+        case "priority":
+            Hotkey("$" key, "Off")
         case "monitor":
             Hotkey("~" key, "Off")
             Hotkey("~" key " up", "Off")
         case "block":
             Hotkey("$" key, "Off")
     }
-    
+
     ; 删除记录
     RegisteredHooks.Delete(key)
 }
@@ -380,71 +470,58 @@ UnregisterHook(key) {
 ; Hook处理器
 ; ===============================================================================
 HandleInterceptKey(key) {
-    ; 拦截模式 - 按键按下
+    ; 拦截模式 - 按键按下（简化版本，只处理按下事件）
     key_lower := StrLower(key)
-    ; 判断是否是优先级按键（使用AHK按键名称）
-    ; space, RButton, e 等
-    is_priority_key := (key_lower = "space" or key_lower = "rbutton" or key_lower = "e")
 
-    if (is_priority_key) {
-        ; 优先级按键 - 需要暂停队列
-        ; 1. 通知Python暂停调度
-        SendEventToPython("priority_key_down:" key)
+    ; 调试信息（可选）
+    ; FileAppend("HandleInterceptKey被调用: " . key . " (小写: " . key_lower . ")`n", "ahk_debug.txt")
 
-        ; 2. 设置暂停标志
-        IsPaused := true
-        PriorityKeysActive[key] := true
+    ; 所有拦截按键都完全拦截，只通知Python
+    SendEventToPython("intercept_key_down:" key)
+    ; FileAppend("按键已拦截并通知Python: " . key . "`n", "ahk_debug.txt")
 
-        ; 3. 前置延迟 (确保游戏响应)
-        Sleep 50
-
-        ; 4. 发送按键到游戏
-        Send "{" key "}"
-    } else {
-        ; 系统热键（F8/F7/F9/Z等）- 不暂停队列，只通知Python
-        ; 1. 通知Python
-        SendEventToPython("intercept_key_down:" key)
-
-        ; 2. 不发送到游戏（由Python处理逻辑）
-    }
+    ; 不发送到目标应用程序（完全拦截）
 }
 
-HandleInterceptKeyUp(key) {
-    ; 拦截模式 - 按键释放
+HandlePriorityKey(key) {
+    ; 优先级模式 - 按键按下（简化版本，使用定时器自动恢复）
     key_lower := StrLower(key)
-    
-    ; 判断是否是优先级按键（使用AHK按键名称）
-    is_priority_key := (key_lower = "space" or key_lower = "rbutton" or key_lower = "e")
-    
-    if (is_priority_key) {
-        ; 优先级按键释放
-        ; 1. 通知Python
-        SendEventToPython("priority_key_up:" key)
-        
-        ; 2. 清除标志
-        PriorityKeysActive.Delete(key)
-        
-        ; 3. 如果没有其他优先级按键，恢复队列处理
-        if (PriorityKeysActive.Count = 0) {
-            IsPaused := false
-        }
-        
-        ; 4. 发送释放到游戏
-        Send "{" key " up}"
-    } else {
-        ; 系统热键释放
-        SendEventToPython("intercept_key_up:" key)
-    }
+
+    ; FileAppend("HandlePriorityKey被调用: " . key . "`n", "ahk_debug.txt")
+
+    ; 通知Python暂停调度
+    SendEventToPython("priority_key_down:" key)
+
+    ; 设置暂停标志
+    IsPaused := true
+
+    ; 发送按键到游戏
+    Send "{" key "}"
+
+    ; 设置定时器，500ms后自动恢复队列处理
+    SetTimer(RestorePriorityKey.Bind(key), -500)  ; -500表示只执行一次
+
+    ; FileAppend("优先级按键已处理: " . key . "`n", "ahk_debug.txt")
 }
 
 HandleMonitorKey(key) {
     ; 监控模式 - 按键按下 (不拦截)
+    ; FileAppend("HandleMonitorKey被调用: " . key . "`n", "ahk_debug.txt")
     SendEventToPython("monitor_key_down:" key)
 }
 
 HandleMonitorKeyUp(key) {
     ; 监控模式 - 按键释放 (不拦截)
+    ; FileAppend("HandleMonitorKeyUp被调用: " . key . "`n", "ahk_debug.txt")
     SendEventToPython("monitor_key_up:" key)
+}
+
+RestorePriorityKey(key) {
+    ; 恢复优先级按键后的队列处理
+    global IsPaused
+    IsPaused := false
+    SendEventToPython("priority_key_up:" key)
+    ; FileAppend("优先级按键自动恢复: " . key . "`n", "ahk_debug.txt")
 }
 
 ; ===============================================================================
@@ -452,11 +529,18 @@ HandleMonitorKeyUp(key) {
 ; ===============================================================================
 SendEventToPython(event) {
     ; 使用文件通信 (简单可靠)
-    try {
-        ; 追加事件到文件
-        FileAppend(event "`n", "ahk_events.txt")
-    } catch as err {
-        ; 忽略错误
+    ; 优化：减少重试次数，提高性能
+    loop 2 {
+        try {
+            ; 追加事件到文件
+            FileAppend(event "`n", "ahk_events.txt")
+            return ; 成功写入，退出
+        } catch as err {
+            ; 如果不是最后一次尝试，等待一小段时间
+            if (A_Index < 2) {
+                Sleep(1) ; 等待1ms
+            }
+        }
     }
 }
 

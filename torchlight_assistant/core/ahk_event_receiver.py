@@ -29,6 +29,9 @@ class AHKEventReceiver:
         self.events_received = 0
         self.events_processed = 0
         self.events_failed = 0
+        
+        # 确保事件文件目录存在且可写
+        self._ensure_file_access()
     
     def start(self):
         """启动事件接收器"""
@@ -62,18 +65,42 @@ class AHKEventReceiver:
             try:
                 # 检查事件文件是否存在
                 if os.path.exists(self.event_file):
-                    # 读取所有事件
-                    with open(self.event_file, "r", encoding="utf-8") as f:
-                        events = f.readlines()
+                    events = []
+                    
+                    # 尝试读取文件，带重试机制
+                    for attempt in range(3):
+                        try:
+                            with open(self.event_file, "r", encoding="utf-8") as f:
+                                events = f.readlines()
+                            break
+                        except PermissionError:
+                            if attempt < 2:
+                                time.sleep(0.005)  # 等待5ms后重试
+                                continue
+                            else:
+                                # 最后一次尝试失败，跳过这次处理
+                                break
+                        except Exception as e:
+                            print(f"[AHK事件] 读取文件错误: {e}")
+                            break
 
-                    # 删除文件
-                    try:
-                        os.remove(self.event_file)
-                    except Exception:
-                        pass
-
-                    # 处理事件
+                    # 尝试删除文件，带重试机制
                     if events:
+                        for attempt in range(3):
+                            try:
+                                os.remove(self.event_file)
+                                break
+                            except PermissionError:
+                                if attempt < 2:
+                                    time.sleep(0.005)  # 等待5ms后重试
+                                    continue
+                                else:
+                                    # 删除失败，但不影响事件处理
+                                    break
+                            except Exception:
+                                break
+
+                        # 处理事件
                         self.events_received += len(events)
                         for event in events:
                             event = event.strip()
@@ -90,6 +117,27 @@ class AHKEventReceiver:
                 self.events_failed += 1
                 time.sleep(0.1)
     
+    def _ensure_file_access(self):
+        """确保事件文件可以正常访问"""
+        try:
+            # 如果文件存在且被锁定，尝试删除
+            if os.path.exists(self.event_file):
+                try:
+                    # 尝试打开文件进行写入测试
+                    with open(self.event_file, "a", encoding="utf-8") as f:
+                        pass
+                except PermissionError:
+                    # 文件被锁定，尝试重命名后删除
+                    import time
+                    backup_name = f"{self.event_file}.backup_{int(time.time())}"
+                    try:
+                        os.rename(self.event_file, backup_name)
+                        os.remove(backup_name)
+                    except Exception:
+                        pass
+        except Exception as e:
+            print(f"[AHK事件] 文件访问检查失败: {e}")
+
     def get_stats(self) -> dict:
         """获取接收器统计信息"""
         return {

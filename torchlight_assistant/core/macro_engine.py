@@ -40,6 +40,9 @@ class MacroEngine:
         self._stationary_mode_active = False
         # 强制移动状态（按住模式）
         self._force_move_active = False
+        # 当前配置的按键
+        self._current_stationary_key = ""
+        self._current_force_move_key = ""
 
         self.config_manager = ConfigManager()
 
@@ -135,16 +138,18 @@ class MacroEngine:
         event_bus.subscribe("priority_key_down", self._handle_ahk_priority_key_down)
         event_bus.subscribe("priority_key_up", self._handle_ahk_priority_key_up)
 
+        # 订阅AHK监控事件（交互键A等）
+        event_bus.subscribe("monitor_key_down", self._handle_ahk_monitor_key_down)
+        event_bus.subscribe("monitor_key_up", self._handle_ahk_monitor_key_up)
+
         LOG_INFO("[热键管理] AHK热键系统设置完成")
 
     def _handle_ahk_intercept_key(self, key: str, **kwargs):
-        """处理AHK拦截的系统热键（F8/F7/F9/Z）"""
+        """处理AHK拦截的系统热键（F8/F7/F9/Z）和原地模式按键"""
         key_lower = key.lower()
         LOG_INFO(f"[热键管理] 收到AHK拦截按键: {key}")
-        print(f"[热键管理] [DEBUG] 收到AHK拦截按键: {key}, kwargs={kwargs}")
 
         if key_lower == "f8":
-            print(f"[热键管理] [DEBUG] 执行F8逻辑")
             self._handle_f8_press()
         elif key_lower == "f7":
             self._on_f7_key_press()
@@ -152,21 +157,39 @@ class MacroEngine:
             self._on_f9_key_press()
         elif key_lower == "z":
             self._on_z_key_press()
+        elif key_lower == self._current_stationary_key:
+            # 原地模式按键（X键）- 按一下切换状态
+            self._on_stationary_key_press()
         else:
             LOG_INFO(f"[热键管理] 未处理的按键: {key}")
-            print(f"[热键管理] [DEBUG] 未处理的按键: {key}")
 
     def _handle_ahk_priority_key_down(self, key: str):
         """处理AHK优先级按键按下（space/right_mouse/e等）"""
-        # 这些按键会自动暂停调度器
+        # 优先级按键会自动暂停调度器
         # 由SkillManager监听scheduler_pause_requested事件
         pass
 
     def _handle_ahk_priority_key_up(self, key: str):
         """处理AHK优先级按键释放"""
-        # 这些按键会自动恢复调度器
+        # 优先级按键会自动恢复调度器
         # 由SkillManager监听scheduler_resume_requested事件
         pass
+
+    def _handle_ahk_monitor_key_down(self, key: str):
+        """处理AHK监控按键按下（交互键A等）"""
+        key_lower = key.lower()
+
+        # 检查是否是交互/强制移动按键
+        if key_lower == self._current_force_move_key:
+            self._on_force_move_key_press()
+
+    def _handle_ahk_monitor_key_up(self, key: str):
+        """处理AHK监控按键释放"""
+        key_lower = key.lower()
+
+        # 检查是否是交互/强制移动按键
+        if key_lower == self._current_force_move_key:
+            self._on_force_move_key_release()
 
     def _set_state(self, new_state: MacroState) -> bool:
         try:
@@ -475,6 +498,72 @@ class MacroEngine:
             if target_str:
                 self.input_handler.set_target_window(target_str)
 
+        # 设置强制移动键到AHK
+        stationary_config = global_config.get("stationary_mode_config", {})
+        force_move_key = stationary_config.get("force_move_hotkey", "").strip().lower()
+        if force_move_key and hasattr(self.input_handler, "command_sender") and self.input_handler.command_sender:
+            self.input_handler.command_sender.set_force_move_key(force_move_key)
+            LOG_INFO(f"[强制移动键] 已设置到AHK: {force_move_key}")
+
+        # 注册原地模式Hook（不再需要注册交互键Hook）
+        stationary_key = stationary_config.get("hotkey", "").strip().lower()
+
+        # 构建新的Hook配置映射
+        new_hook_config = {}
+        if stationary_key:
+            new_hook_config[stationary_key] = "intercept"  # 原地模式使用拦截
+        if force_move_key:
+            new_hook_config[force_move_key] = "monitor"  # 强制移动键使用监控（不拦截，但能准确检测状态）
+
+        # 获取当前的Hook配置映射
+        current_hook_config = getattr(self, "_current_hook_config", {})
+
+        # 找出需要取消的Hook（旧配置中有，新配置中没有，或者模式发生变化）
+        hooks_to_remove = []
+        for key, mode in current_hook_config.items():
+            if key not in new_hook_config or new_hook_config[key] != mode:
+                hooks_to_remove.append(key)
+
+        # 取消需要移除的Hook
+        for key in hooks_to_remove:
+            try:
+                self.input_handler.unregister_hook(key)
+                LOG_INFO(
+                    f"[Hook管理] 取消旧Hook: {key} (模式: {current_hook_config[key]})"
+                )
+            except Exception as e:
+                LOG_ERROR(f"[Hook管理] 取消Hook失败: {key}, 错误: {e}")
+
+        # 找出需要注册的Hook（新配置中有，旧配置中没有，或者模式发生变化）
+        hooks_to_add = []
+        for key, mode in new_hook_config.items():
+            if key not in current_hook_config or current_hook_config[key] != mode:
+                hooks_to_add.append((key, mode))
+
+        # 注册需要添加的Hook
+        for key, mode in hooks_to_add:
+            try:
+                self.input_handler.register_hook(key, mode)
+                if mode == "intercept":
+                    LOG_INFO(f"[原地模式] 注册Hook成功: {key} ({mode})")
+                elif mode == "monitor":
+                    LOG_INFO(f"[强制移动键] 注册Hook成功: {key} ({mode})")
+                else:
+                    LOG_INFO(f"[Hook管理] 注册Hook成功: {key} ({mode})")
+            except Exception as e:
+                LOG_ERROR(f"[Hook管理] 注册Hook失败: {key} ({mode}), 错误: {e}")
+
+        # 保存当前配置
+        self._current_stationary_key = stationary_key
+        self._current_force_move_key = force_move_key
+        self._current_hook_config = new_hook_config
+
+        # 输出当前Hook配置状态
+        if new_hook_config:
+            LOG_INFO(f"[Hook管理] 当前Hook配置: {new_hook_config}")
+        else:
+            LOG_INFO(f"[Hook管理] 当前无Hook配置")
+
         # 更新OSD可见性
         self._update_osd_visibility()
 
@@ -484,6 +573,24 @@ class MacroEngine:
         """原地模式热键按下事件 - 切换模式"""
         # 无论当前状态如何，都允许切换原地模式
         self._stationary_mode_active = not self._stationary_mode_active
+
+        # 通知AHKCommandSender原地模式状态变化
+        if (
+            hasattr(self.input_handler, "command_sender")
+            and self.input_handler.command_sender
+        ):
+            stationary_config = self._global_config.get("stationary_mode_config", {})
+            mode_type = stationary_config.get("mode_type", "shift_modifier")
+
+            self.input_handler.command_sender.set_stationary_mode(
+                self._stationary_mode_active, mode_type
+            )
+
+            # 添加调试日志
+            LOG_INFO(
+                f"[原地模式] 通知AHK命令发送器: 状态={self._stationary_mode_active}, 类型={mode_type}"
+            )
+
         self._publish_status_update()
         if self._stationary_mode_active:
             LOG_INFO("[原地模式] 已激活")
@@ -497,12 +604,28 @@ class MacroEngine:
     def _on_force_move_key_press(self):
         """交互/强制移动热键按下事件 - 按住激活"""
         self._force_move_active = True
+        
+        # 通知AHK强制移动状态变化
+        if (
+            hasattr(self.input_handler, "command_sender")
+            and self.input_handler.command_sender
+        ):
+            self.input_handler.command_sender.set_force_move_state(True)
+        
         self._publish_status_update()
         LOG_INFO("[交互模式] 已激活")
 
     def _on_force_move_key_release(self):
         """交互/强制移动热键释放事件 - 松开取消"""
         self._force_move_active = False
+        
+        # 通知AHK强制移动状态变化
+        if (
+            hasattr(self.input_handler, "command_sender")
+            and self.input_handler.command_sender
+        ):
+            self.input_handler.command_sender.set_force_move_state(False)
+        
         self._publish_status_update()
         LOG_INFO("[交互模式] 已取消")
 
