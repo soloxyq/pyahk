@@ -201,8 +201,8 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 global StationaryModeActive, StationaryModeType
                 StationaryModeActive := (parts[1] = "true")
                 StationaryModeType := parts[2]
-                FileAppend("原地模式已设置: active=" . StationaryModeActive . ", type=" . StationaryModeType . "`n",
-                    "ahk_debug.txt")
+                ; FileAppend("原地模式已设置: active=" . StationaryModeActive . ", type=" . StationaryModeType . "`n",
+                ;     "ahk_debug.txt")
                 return 1
             }
             return 0
@@ -528,17 +528,16 @@ RestorePriorityKey(key) {
 ; 事件发送到Python
 ; ===============================================================================
 SendEventToPython(event) {
-    ; 优先使用WM_COPYDATA，失败时回退到文件
-    pythonHwnd := WinExist("通用游戏技能配置")
+    ; 优先查找OSD窗口（运行时可见）
+    pythonHwnd := WinExist("TorchLightAssistant_OSD_12345")
+    
+    if (!pythonHwnd) {
+        ; 如果OSD窗口不存在，查找主窗口（停止时可见）
+        pythonHwnd := WinExist("TorchLightAssistant_MainWindow_12345")
+    }
+
     if (pythonHwnd) {
         SendWMCopyDataToPython(pythonHwnd, event)
-    }
-    
-    ; 同时使用文件作为备用（调试期间）
-    try {
-        FileAppend(event "`n", "ahk_events.txt")
-    } catch {
-        ; 忽略文件写入错误
     }
 }
 

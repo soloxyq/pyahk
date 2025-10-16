@@ -9,7 +9,7 @@ import time
 from typing import Optional
 
 from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
-from torchlight_assistant.core.ahk_event_receiver import AHKEventReceiver
+# AHKEventReceiver已移除，使用WM_COPYDATA通信
 from torchlight_assistant.config.ahk_config import AHKConfig
 from torchlight_assistant.core.signal_bridge import ahk_signal_bridge # 导入信号桥
 
@@ -31,7 +31,7 @@ class AHKInputHandler:
         self.server_script = AHKConfig.SERVER_SCRIPT
         
         self.command_sender: Optional[AHKCommandSender] = None
-        self.event_receiver: Optional[AHKEventReceiver] = None
+        # event_receiver已移除，使用WM_COPYDATA通信
         self.ahk_process: Optional[subprocess.Popen] = None
         
         self.dry_run_mode = False
@@ -55,10 +55,7 @@ class AHKInputHandler:
             target_str = f"ahk_exe {AHKConfig.WINDOW_EXE}"
             self.command_sender.set_target_window(target_str)
 
-        # 启动事件接收器（文件监控作为备用）
-        self.event_receiver = AHKEventReceiver()
-        self.event_receiver.start()
-        
+        # 连接AHK事件信号（通过WM_COPYDATA接收）
         ahk_signal_bridge.ahk_event.connect(self._on_ahk_event)
         
         self._register_priority_hooks()
@@ -200,8 +197,6 @@ class AHKInputHandler:
         return 0
     
     def get_queue_stats(self) -> dict:
-        if self.event_receiver:
-            return self.event_receiver.get_stats()
         return {"wm_copydata_mode": True}
     
     def register_hook(self, key: str, mode: str = "intercept"):
@@ -225,8 +220,7 @@ class AHKInputHandler:
     def stop(self):
         print("[AHK输入] 正在停止...")
         
-        if self.event_receiver:
-            self.event_receiver.stop()
+        # 事件接收现在通过主窗口的WM_COPYDATA处理
         
         if self.ahk_process:
             try:

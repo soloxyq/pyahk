@@ -15,9 +15,7 @@ class AHKConfig:
     WINDOW_TITLE = "HoldServer_Window_UniqueName_12345"
     WINDOW_EXE = "notepad++.exe" # 默认目标窗口
     
-    # 事件文件配置
-    EVENT_FILE = "ahk_events.txt"
-    EVENT_CHECK_INTERVAL = 0.01  # 10ms检查一次
+    # WM_COPYDATA通信配置（已移除文件通信）
     
     # 队列配置
     QUEUE_PROCESS_INTERVAL = 10  # AHK队列处理间隔(ms)
@@ -80,7 +78,7 @@ class AHKConfig:
         print(f"AHK路径: {cls.AHK_PATH}")
         print(f"服务器脚本: {cls.SERVER_SCRIPT}")
         print(f"窗口标题: {cls.WINDOW_TITLE}")
-        print(f"事件文件: {cls.EVENT_FILE}")
+        print("通信方式: WM_COPYDATA")
         print(f"队列处理间隔: {cls.QUEUE_PROCESS_INTERVAL}ms")
         print(f"优先级按键: {', '.join(cls.PRIORITY_KEYS)}")
         print(f"前置延迟: {cls.PRIORITY_KEY_DELAY}ms")
