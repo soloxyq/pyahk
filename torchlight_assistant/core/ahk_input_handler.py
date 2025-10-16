@@ -57,8 +57,6 @@ class AHKInputHandler:
 
         # 连接AHK事件信号（通过WM_COPYDATA接收）
         ahk_signal_bridge.ahk_event.connect(self._on_ahk_event)
-        
-        self._register_priority_hooks()
 
     def _on_ahk_event(self, event: str):
         """这个方法现在总是在主GUI线程中被调用"""
@@ -102,27 +100,93 @@ class AHKInputHandler:
             print(f"[AHK输入] 启动AHK失败: {e}")
             return False
     
-    def _register_priority_hooks(self):
-        """注册优先级按键Hook（使用AHK按键名称）"""
-        priority_keys = AHKConfig.PRIORITY_KEYS
+    def _register_f8_hook(self):
+        """注册F8主控键（程序启动时立即注册，永远不变）"""
+        try:
+            result = self.command_sender.register_hook("F8", "intercept")
+            if result:
+                print("[AHK输入] [OK] F8主控键注册成功")
+            else:
+                print("[AHK输入] [FAIL] F8主控键注册失败 (AHK窗口未找到)")
+        except Exception as e:
+            print(f"[AHK输入] [ERROR] F8主控键注册异常: {e}")
+
+    def register_all_hooks_on_f8_ready(self, special_keys=None, managed_keys=None, other_hooks=None):
+        """
+        用户按F8准备时注册所有其他按键
         
-        print(f"[AHK输入] 开始注册 {len(priority_keys)} 个优先级Hook...")
+        Args:
+            special_keys: 特殊按键列表 (special模式) - 如 ["space"]
+            managed_keys: 管理按键字典 (priority模式) - 如 {"e": {"target": "+", "delay": 500}}
+            other_hooks: 其他Hook配置 - 如 {"x": "intercept", "a": "monitor", "RButton": "intercept"}
+        """
+        special_keys = special_keys or []
+        managed_keys = managed_keys or {}
+        other_hooks = other_hooks or {}
         
-        for key in priority_keys:
+        print("[AHK输入] F8准备 - 开始注册所有业务按键...")
+        
+        # 1. 先注册其他系统热键 (z, F7, F9)
+        system_keys = ["z", "F7", "F9"]  # F8已经在启动时注册了
+        print(f"[AHK输入] 注册 {len(system_keys)} 个系统热键...")
+        for key in system_keys:
             try:
-                # 🎯 管理按键将在配置更新时单独注册为priority模式，这里跳过
-                # 只注册特殊按键（如Space, RButton）为intercept模式
-                if key.lower() == "e":  # e键是管理按键，跳过
-                    print(f"[AHK输入] [SKIP] 跳过管理按键: {key} (将在配置更新时注册)")
-                    continue
-                    
                 result = self.command_sender.register_hook(key, "intercept")
                 if result:
-                    print(f"[AHK输入] [OK] 优先级Hook注册成功: {key}")
+                    print(f"[AHK输入] [OK] 系统热键注册成功: {key}")
                 else:
-                    print(f"[AHK输入] [FAIL] 优先级Hook注册失败: {key} (AHK窗口未找到)")
+                    print(f"[AHK输入] [FAIL] 系统热键注册失败: {key}")
             except Exception as e:
-                print(f"[AHK输入] [ERROR] 优先级Hook注册异常 ({key}): {e}")
+                print(f"[AHK输入] [ERROR] 系统热键注册异常 ({key}): {e}")
+        
+        # 2. 注册特殊按键 (special模式)
+        if special_keys:
+            print(f"[AHK输入] 注册 {len(special_keys)} 个特殊按键...")
+            for key in special_keys:
+                try:
+                    result = self.command_sender.register_hook(key, "special")
+                    if result:
+                        print(f"[AHK输入] [OK] 特殊按键注册成功: {key}")
+                    else:
+                        print(f"[AHK输入] [FAIL] 特殊按键注册失败: {key}")
+                except Exception as e:
+                    print(f"[AHK输入] [ERROR] 特殊按键注册异常 ({key}): {e}")
+        
+        # 3. 注册管理按键 (priority模式)
+        if managed_keys:
+            print(f"[AHK输入] 注册 {len(managed_keys)} 个管理按键...")
+            for key, config in managed_keys.items():
+                try:
+                    result = self.command_sender.register_hook(key, "priority")
+                    if result:
+                        target = config.get("target", key) if isinstance(config, dict) else key
+                        delay = config.get("delay", 0) if isinstance(config, dict) else 0
+                        
+                        # 发送管理按键配置到AHK
+                        config_result = self.command_sender.set_managed_key_config(key, target, delay)
+                        if config_result:
+                            print(f"[AHK输入] [OK] 管理按键注册成功: {key} -> {target} (延迟: {delay}ms)")
+                        else:
+                            print(f"[AHK输入] [FAIL] 管理按键配置失败: {key}")
+                    else:
+                        print(f"[AHK输入] [FAIL] 管理按键注册失败: {key}")
+                except Exception as e:
+                    print(f"[AHK输入] [ERROR] 管理按键注册异常 ({key}): {e}")
+        
+        # 4. 注册其他业务按键
+        if other_hooks:
+            print(f"[AHK输入] 注册 {len(other_hooks)} 个其他业务按键...")
+            for key, mode in other_hooks.items():
+                try:
+                    result = self.command_sender.register_hook(key, mode)
+                    if result:
+                        print(f"[AHK输入] [OK] 业务按键注册成功: {key} ({mode}模式)")
+                    else:
+                        print(f"[AHK输入] [FAIL] 业务按键注册失败: {key}")
+                except Exception as e:
+                    print(f"[AHK输入] [ERROR] 业务按键注册异常 ({key}): {e}")
+        
+        print("[AHK输入] F8准备 - 所有业务按键注册完成")
         
         system_hotkeys = AHKConfig.SYSTEM_HOTKEYS
         
@@ -220,6 +284,18 @@ class AHKInputHandler:
     
     def resume_queue(self):
         return self.command_sender.resume()
+    
+    def set_force_move_state(self, active: bool) -> bool:
+        """设置强制移动状态"""
+        return self.command_sender.set_force_move_state(active)
+    
+    def set_force_move_key(self, key: str) -> bool:
+        """设置强制移动键"""
+        return self.command_sender.set_force_move_key(key)
+    
+    def clear_all_configurable_hooks(self) -> bool:
+        """清空所有可配置的Hook（保留F8根热键）"""
+        return self.command_sender.clear_all_configurable_hooks()
     
     def start(self):
         pass

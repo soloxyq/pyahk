@@ -28,11 +28,10 @@ class AHKConfig:
     
     # Hook配置（使用AHK按键名称）
     # 参考: https://www.autohotkey.com/docs/v2/KeyList.htm
-    PRIORITY_KEYS = [
-        "Space",        # 闪避
-        "RButton",      # 右键攻击
-        "e",            # 交互键
-    ]
+    # 🎯 不再使用PRIORITY_KEYS，改为在配置文件中定义：
+    # - special_keys: ["space"] - 特殊按键（不拦截，状态监听）
+    # - managed_keys: {"e": {"target": "+", "delay": 500}} - 管理按键（拦截+延迟+映射）
+    # - RButton等其他按键直接在代码中指定模式
     
     # 系统热键（会被拦截但不暂停队列）
     SYSTEM_HOTKEYS = [

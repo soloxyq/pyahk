@@ -93,7 +93,9 @@ class MacroEngine:
 
         self._setup_event_subscriptions()
         self.load_config(self.current_config_file)  # 先加载配置
-        self._setup_ahk_hotkeys()  # 设置AHK热键
+
+        # 只注册F8根热键
+        self._setup_primary_hotkey()
 
     def _setup_event_subscriptions(self):
         event_bus.subscribe("ui:load_config_requested", self.load_config)
@@ -107,52 +109,168 @@ class MacroEngine:
         event_bus.subscribe("hotkey:z_press", self._handle_z_press)
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
 
-    def _setup_ahk_hotkeys(self):
-        """设置AHK热键 - 使用AHK的Hook系统"""
-        LOG_INFO("[热键管理] 开始注册AHK热键...")
+    def _setup_primary_hotkey(self):
+        """设置F8根热键（唯一的永久热键）"""
+        try:
+            LOG_INFO("[热键管理] 注册F8根热键...")
 
-        # 注册系统热键到AHK（使用AHK按键名称）
-        hotkeys = [
-            ("F8", "主控键"),
-            ("F7", "洗练键"),
-            ("F9", "寻路键"),
-            ("z", "执行/暂停键"),
-        ]
+            # 只注册F8主控键
+            result = self.input_handler.register_hook("F8", "intercept")
+            if result:
+                LOG_INFO("[热键管理] [OK] F8根热键注册成功")
+            else:
+                LOG_ERROR("[热键管理] [FAIL] F8根热键注册失败")
 
-        for key, desc in hotkeys:
-            try:
-                result = self.input_handler.register_hook(key, "intercept")
-                if result:
-                    LOG_INFO(f"[热键管理] [OK] {desc} ({key}) 注册成功")
-                else:
-                    LOG_ERROR(
-                        f"[热键管理] [FAIL] {desc} ({key}) 注册失败 - AHK窗口未找到"
+            # 订阅AHK拦截事件（系统热键）
+            event_bus.subscribe("intercept_key_down", self._handle_ahk_intercept_key)
+
+            # 🎯 订阅新的按键事件系统
+            # 特殊按键事件（如space）- 持续状态检测
+            event_bus.subscribe("special_key_down", self._handle_ahk_special_key_down)
+            event_bus.subscribe("special_key_up", self._handle_ahk_special_key_up)
+            event_bus.subscribe("special_key_pause", self._handle_ahk_special_key_pause)
+
+            # 管理按键事件（如RButton/e）- 拦截+延迟+映射
+            event_bus.subscribe("managed_key_down", self._handle_ahk_managed_key_down)
+            event_bus.subscribe("managed_key_up", self._handle_ahk_managed_key_up)
+
+            # 兼容旧的优先级事件（逐步迁移）
+            event_bus.subscribe("priority_key_down", self._handle_ahk_priority_key_down)
+            event_bus.subscribe("priority_key_up", self._handle_ahk_priority_key_up)
+
+            # 订阅AHK监控事件（交互键A等）
+            event_bus.subscribe("monitor_key_down", self._handle_ahk_monitor_key_down)
+            event_bus.subscribe("monitor_key_up", self._handle_ahk_monitor_key_up)
+
+        except Exception as e:
+            LOG_ERROR(f"[热键管理] 注册F8根热键时发生错误: {e}")
+
+    def _register_secondary_hotkeys(self):
+        """注册所有动态热键（在READY状态时调用）"""
+        try:
+            LOG_INFO("[热键管理] ========== 开始注册动态热键 ==========")
+
+            # 注册洗练键 (F7)
+            LOG_INFO("[热键管理] 准备注册洗练键 (F7)...")
+            if self.input_handler.register_hook("F7", "intercept"):
+                LOG_INFO("[热键管理] [OK] 洗练键 (F7) 注册成功")
+            else:
+                LOG_ERROR("[热键管理] [FAIL] 洗练键 (F7) 注册失败")
+
+            # 注册寻路键 (F9)
+            LOG_INFO("[热键管理] 准备注册寻路键 (F9)...")
+            if self.input_handler.register_hook("F9", "intercept"):
+                LOG_INFO("[热键管理] [OK] 寻路键 (F9) 注册成功")
+            else:
+                LOG_ERROR("[热键管理] [FAIL] 寻路键 (F9) 注册失败")
+
+            # 注册执行/暂停键 (z)
+            LOG_INFO("[热键管理] 准备注册执行/暂停键 (z)...")
+            if self.input_handler.register_hook("z", "intercept"):
+                LOG_INFO("[热键管理] [OK] 执行/暂停键 (z) 注册成功")
+            else:
+                LOG_ERROR("[热键管理] [FAIL] 执行/暂停键 (z) 注册失败")
+
+            # 注册配置相关的动态热键（原地模式、交互模式等）
+            LOG_INFO("[热键管理] 准备注册配置相关热键...")
+            self._register_config_based_hotkeys()
+
+            LOG_INFO("[热键管理] ========== 动态热键注册完成 ==========")
+
+        except Exception as e:
+            LOG_ERROR(f"[热键管理] 注册动态热键时发生错误: {e}")
+            import traceback
+
+            LOG_ERROR(f"[热键管理] 详细错误: {traceback.format_exc()}")
+
+    def _register_config_based_hotkeys(self):
+        """根据当前配置注册热键"""
+        try:
+            LOG_INFO("[热键管理] 开始注册配置相关热键...")
+
+            # 获取当前配置
+            stationary_config = self._global_config.get("stationary_mode_config", {})
+            stationary_key = stationary_config.get("hotkey")
+            LOG_INFO(f"[热键管理] 原地模式配置: {stationary_config}")
+            LOG_INFO(f"[热键管理] 原地模式热键: {stationary_key}")
+
+            # 注册原地模式热键
+            if stationary_key:
+                LOG_INFO(f"[热键管理] 准备注册原地模式热键: {stationary_key}")
+                if self.input_handler.register_hook(stationary_key, "intercept"):
+                    # 更新当前原地模式热键
+                    self._current_stationary_key = stationary_key.lower()
+                    LOG_INFO(f"[原地模式] 注册Hook成功: {stationary_key} (intercept)")
+                    LOG_INFO(
+                        f"[原地模式] 当前原地模式热键已设置为: {self._current_stationary_key}"
                     )
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] [ERROR] {desc} ({key}) 注册异常: {e}")
+                else:
+                    LOG_ERROR(f"[原地模式] 注册Hook失败: {stationary_key}")
+            else:
+                self._current_stationary_key = ""
+                LOG_INFO("[热键管理] 未配置原地模式热键")
 
-        # 订阅AHK拦截事件（系统热键）
-        event_bus.subscribe("intercept_key_down", self._handle_ahk_intercept_key)
+            # 注册强制移动键（monitor模式，不拦截但监控状态）
+            force_move_key = stationary_config.get("force_move_hotkey")
+            if force_move_key:
+                LOG_INFO(f"[热键管理] 准备注册强制移动键: {force_move_key}")
+                if self.input_handler.register_hook(force_move_key, "monitor"):
+                    # 更新当前强制移动键
+                    self._current_force_move_key = force_move_key.lower()
+                    LOG_INFO(f"[强制移动键] 注册Hook成功: {force_move_key} (monitor)")
+                    LOG_INFO(
+                        f"[强制移动键] 当前强制移动键已设置为: {self._current_force_move_key}"
+                    )
+                else:
+                    LOG_ERROR(f"[强制移动键] 注册Hook失败: {force_move_key}")
+            else:
+                self._current_force_move_key = ""
+                LOG_INFO("[热键管理] 未配置强制移动键")
 
-        # 🎯 订阅新的按键事件系统
-        # 特殊按键事件（如space）- 持续状态检测
-        event_bus.subscribe("special_key_down", self._handle_ahk_special_key_down)
-        event_bus.subscribe("special_key_up", self._handle_ahk_special_key_up)
-        event_bus.subscribe("special_key_pause", self._handle_ahk_special_key_pause)
+            # 注册管理按键配置
+            priority_config = self._global_config.get("priority_keys", {})
+            LOG_INFO(f"[热键管理] 优先级配置: {priority_config}")
 
-        # 管理按键事件（如RButton/e）- 拦截+延迟+映射
-        event_bus.subscribe("managed_key_down", self._handle_ahk_managed_key_down)
-        event_bus.subscribe("managed_key_up", self._handle_ahk_managed_key_up)
+            if priority_config.get("enabled", False):
+                LOG_INFO("[热键管理] 优先级配置已启用")
 
-        # 兼容旧的优先级事件（逐步迁移）
-        event_bus.subscribe("priority_key_down", self._handle_ahk_priority_key_down)
-        event_bus.subscribe("priority_key_up", self._handle_ahk_priority_key_up)
+                # 注册特殊按键（如space）
+                special_keys = priority_config.get("special_keys", [])
+                LOG_INFO(f"[热键管理] 特殊按键列表: {special_keys}")
+                for key in special_keys:
+                    LOG_INFO(f"[热键管理] 准备注册特殊按键: {key}")
+                    if self.input_handler.register_hook(key, "special"):
+                        LOG_INFO(f"[特殊按键] 注册成功: {key} (special)")
+                    else:
+                        LOG_ERROR(f"[特殊按键] 注册失败: {key}")
 
-        # 订阅AHK监控事件（交互键A等）
-        event_bus.subscribe("monitor_key_down", self._handle_ahk_monitor_key_down)
-        event_bus.subscribe("monitor_key_up", self._handle_ahk_monitor_key_up)
+                # 注册管理按键（如e键）
+                managed_keys = priority_config.get("managed_keys", {})
+                LOG_INFO(f"[热键管理] 管理按键配置: {managed_keys}")
+                for key, config in managed_keys.items():
+                    LOG_INFO(f"[热键管理] 准备注册管理按键: {key}, 配置: {config}")
+                    if self.input_handler.register_hook(key, "priority"):
+                        target = config.get("target", key)
+                        delay = config.get("delay", 0)
+                        # 发送管理按键配置到AHK
+                        self.input_handler.command_sender.set_managed_key_config(
+                            key, target, delay
+                        )
+                        LOG_INFO(
+                            f"[管理按键] 注册成功: {key} -> {target} (延迟: {delay}ms)"
+                        )
+                    else:
+                        LOG_ERROR(f"[管理按键] 注册失败: {key}")
+            else:
+                LOG_INFO("[热键管理] 优先级配置未启用")
 
-        LOG_INFO("[热键管理] AHK热键系统设置完成")
+            LOG_INFO("[热键管理] 配置相关热键注册完成")
+
+        except Exception as e:
+            LOG_ERROR(f"[热键管理] 注册配置相关热键时发生错误: {e}")
+            import traceback
+
+            LOG_ERROR(f"[热键管理] 详细错误: {traceback.format_exc()}")
 
     def _handle_ahk_intercept_key(self, key: str, **kwargs):
         """处理AHK拦截的系统热键（F8/F7/F9/Z）和原地模式按键"""
@@ -315,19 +433,16 @@ class MacroEngine:
     def _on_state_enter(
         self, state: MacroState, from_state: Optional[MacroState] = None
     ):
-        if state == MacroState.STOPPED:
+        LOG_INFO(f"[状态转换] 进入状态: {state}")
 
-            self.skill_manager.stop()
-            self.pathfinding_manager.stop()
-            self.resource_manager.stop()
-            self.border_manager.stop()
-            self.input_handler.cleanup()
-            self._prepared_mode = "none"
+        if state == MacroState.READY:
+            # 进入READY状态时注册所有动态热键
+            self._register_secondary_hotkeys()
 
-        elif state == MacroState.READY:
             # 激活目标窗口并做准备动作
             self.input_handler.activate_target_window()
             self.input_handler.start()
+
             self.skill_manager.prepare_border_only()  # 预计算边框
             self.border_manager.enable_debug_save()
 
@@ -365,6 +480,24 @@ class MacroEngine:
                 self.pathfinding_manager.pause()
             self.resource_manager.pause()
             self.border_manager.pause_capture()
+
+        elif state == MacroState.STOPPED:
+            # 进入STOPPED状态时清理所有动态热键（保留F8根热键）
+            try:
+                self.input_handler.clear_all_configurable_hooks()
+                LOG_INFO("[热键管理] 已清理所有动态热键（F8根热键保留）")
+                LOG_INFO("[热键管理] AHK进程保持运行，F8根热键保持监听")
+            except Exception as e:
+                LOG_ERROR(f"[热键管理] 清理动态热键失败: {e}")
+
+            self.skill_manager.stop()
+            self.pathfinding_manager.stop()
+            self.resource_manager.stop()
+            self.border_manager.stop()
+            # 注意：不调用 input_handler.cleanup()，保持AHK进程和F8热键运行
+            self._prepared_mode = "none"
+            
+            LOG_INFO("[状态转换] STOPPED状态处理完成，等待F8重新启动")
 
         event_bus.publish(f"engine:macro_{state.name.lower()}")
 
@@ -434,7 +567,9 @@ class MacroEngine:
 
     def _handle_f8_press(self, full_config: Optional[Dict[str, Any]] = None):
         try:
-            LOG_INFO(f"[热键] F8按键处理开始，当前状态: {self._state}")
+            LOG_INFO(f"[热键] ========== F8按键处理开始 ==========")
+            LOG_INFO(f"[热键] 当前状态: {self._state}")
+            LOG_INFO(f"[热键] 是否有配置: {full_config is not None}")
             with self._transition_lock:
                 if self._state == MacroState.STOPPED:
                     LOG_INFO("[热键] F8 - 从STOPPED状态启动")
@@ -530,121 +665,58 @@ class MacroEngine:
     def _on_config_updated(
         self, skills_config: Dict[str, Any], global_config: Dict[str, Any]
     ):
-        """响应配置更新"""
-        LOG_INFO(f"[配置更新] _on_config_updated 被调用")
+        """处理配置更新事件（纯配置更新，不涉及热键管理）"""
+        try:
+            LOG_INFO("[配置更新] _on_config_updated 被调用")
 
-        # 更新资源管理器配置
-        resource_config = global_config.get("resource_management", {})
-        if resource_config:
+            # 更新全局配置
+            self._global_config = global_config
+
+            # 更新技能配置
+            self._skills_config = skills_config
+
+            # 更新资源管理配置
+            resource_config = global_config.get("resource_management", {})
             self.resource_manager.update_config(resource_config)
 
-        # 更新调试模式状态
-        debug_mode_enabled = global_config.get("debug_mode", {}).get("enabled", False)
-        self._is_debug_mode_active = debug_mode_enabled
-        self.input_handler.dry_run_mode = debug_mode_enabled
-        LOG_INFO(
-            f"[DEBUG MODE] _on_config_updated: 干跑模式已设置为 {debug_mode_enabled}"
-        )
-
-        # 更新目标窗口配置
-        window_config = global_config.get("window_activation", {})
-        if window_config and window_config.get("enabled", False):
-            ahk_class = window_config.get("ahk_class", "").strip()
-            ahk_exe = window_config.get("ahk_exe", "").strip()
-
-            # 优先使用ahk_class，如果为空则使用ahk_exe
-            if ahk_class:
-                target_str = f"ahk_class {ahk_class}"
-                LOG_INFO(f"[窗口激活] 设置目标窗口（类名）: {ahk_class}")
-            elif ahk_exe:
-                target_str = f"ahk_exe {ahk_exe}"
-                LOG_INFO(f"[窗口激活] 设置目标窗口（进程名）: {ahk_exe}")
-            else:
-                LOG_INFO("[窗口激活] 未配置目标窗口")
-                target_str = None
-
-            if target_str:
-                self.input_handler.set_target_window(target_str)
-
-        # 🎯 处理优先级按键配置
-        priority_keys_config = global_config.get("priority_keys", {})
-        if priority_keys_config.get("enabled", False):
-            self._update_priority_keys_config(priority_keys_config)
-
-        # 设置强制移动键到AHK
-        stationary_config = global_config.get("stationary_mode_config", {})
-        force_move_key = stationary_config.get("force_move_hotkey", "").strip().lower()
-        if (
-            force_move_key
-            and hasattr(self.input_handler, "command_sender")
-            and self.input_handler.command_sender
-        ):
-            self.input_handler.command_sender.set_force_move_key(force_move_key)
-            LOG_INFO(f"[强制移动键] 已设置到AHK: {force_move_key}")
-
-        # 注册原地模式Hook（不再需要注册交互键Hook）
-        stationary_key = stationary_config.get("hotkey", "").strip().lower()
-
-        # 构建新的Hook配置映射
-        new_hook_config = {}
-        if stationary_key:
-            new_hook_config[stationary_key] = "intercept"  # 原地模式使用拦截
-        if force_move_key:
-            new_hook_config[force_move_key] = (
-                "monitor"  # 强制移动键使用监控（不拦截，但能准确检测状态）
+            # 更新调试模式
+            debug_config = global_config.get("debug_mode", {})
+            debug_enabled = debug_config.get("enabled", False)
+            self._is_debug_mode_active = debug_enabled
+            self.input_handler.set_dry_run_mode(debug_enabled)
+            LOG_INFO(
+                f"[DEBUG MODE] _on_config_updated: 干跑模式已设置为 {debug_enabled}"
             )
 
-        # 获取当前的Hook配置映射
-        current_hook_config = getattr(self, "_current_hook_config", {})
+            # 更新窗口激活配置
+            window_config = global_config.get("window_activation", {})
+            if window_config.get("enabled", False):
+                ahk_class = window_config.get("ahk_class", "")
+                if ahk_class:
+                    LOG_INFO(f"[窗口激活] 设置目标窗口（类名）: {ahk_class}")
+                    self.input_handler.set_target_window(f"ahk_class {ahk_class}")
 
-        # 找出需要取消的Hook（旧配置中有，新配置中没有，或者模式发生变化）
-        hooks_to_remove = []
-        for key, mode in current_hook_config.items():
-            if key not in new_hook_config or new_hook_config[key] != mode:
-                hooks_to_remove.append(key)
+            # 边框管理器不需要配置更新
 
-        # 取消需要移除的Hook
-        for key in hooks_to_remove:
-            try:
-                self.input_handler.unregister_hook(key)
-                LOG_INFO(
-                    f"[Hook管理] 取消旧Hook: {key} (模式: {current_hook_config[key]})"
-                )
-            except Exception as e:
-                LOG_ERROR(f"[Hook管理] 取消Hook失败: {key}, 错误: {e}")
+            # 洗练管理器配置通过事件系统更新，不需要直接调用
 
-        # 找出需要注册的Hook（新配置中有，旧配置中没有，或者模式发生变化）
-        hooks_to_add = []
-        for key, mode in new_hook_config.items():
-            if key not in current_hook_config or current_hook_config[key] != mode:
-                hooks_to_add.append((key, mode))
+            # 设置强制移动键到AHK（仅设置，不注册Hook）
+            stationary_config = global_config.get("stationary_mode_config", {})
+            force_move_key = stationary_config.get("force_move_hotkey")
+            if force_move_key:
+                self.input_handler.set_force_move_key(force_move_key)
+                LOG_INFO(f"[强制移动键] 已设置到AHK: {force_move_key}")
 
-        # 注册需要添加的Hook
-        for key, mode in hooks_to_add:
-            try:
-                self.input_handler.register_hook(key, mode)
-                if mode == "intercept":
-                    LOG_INFO(f"[原地模式] 注册Hook成功: {key} ({mode})")
-                elif mode == "monitor":
-                    LOG_INFO(f"[强制移动键] 注册Hook成功: {key} ({mode})")
-                else:
-                    LOG_INFO(f"[Hook管理] 注册Hook成功: {key} ({mode})")
-            except Exception as e:
-                LOG_ERROR(f"[Hook管理] 注册Hook失败: {key} ({mode}), 错误: {e}")
+            # 注意：热键管理现在由状态机驱动，不在这里处理
 
-        # 保存当前配置
-        self._current_stationary_key = stationary_key
-        self._current_force_move_key = force_move_key
-        self._current_hook_config = new_hook_config
+            # 更新OSD可见性
+            self._update_osd_visibility()
 
-        # 输出当前Hook配置状态
-        if new_hook_config:
-            LOG_INFO(f"[Hook管理] 当前Hook配置: {new_hook_config}")
-        else:
-            LOG_INFO(f"[Hook管理] 当前无Hook配置")
+        except Exception as e:
+            LOG_ERROR(f"[配置更新] 处理配置更新时发生错误: {e}")
+            import traceback
 
-        # 更新OSD可见性
-        self._update_osd_visibility()
+            LOG_ERROR(f"[配置更新] 详细错误: {traceback.format_exc()}")
 
     # 旧的热键管理方法已删除，现在使用AHK处理所有热键
 
@@ -884,15 +956,13 @@ class MacroEngine:
             ),
             # Layer 2: 停止核心服务和IO
             ("核心服务层", [self.border_manager, self.input_handler]),
-            # Layer 3: 关闭事件总线
-            ("事件总线层", [event_bus]),
         ]
 
         # 执行分层清理
         for layer_name, components in cleanup_layers:
             self._cleanup_layer(layer_name, components)
 
-        LOG_INFO("[清理] 所有组件清理完毕。")
+        LOG_INFO("[清理] MacroEngine相关组件清理完毕。")
 
     def _cleanup_layer(self, layer_name: str, components: list):
         """安全地清理指定层级的所有组件，为每个组件设置超时以防假死。"""
@@ -985,7 +1055,9 @@ class MacroEngine:
                                 else 0
                             )
                             # 🎯 发送管理按键配置到AHK
-                            config_result = self.input_handler.command_sender.set_managed_key_config(key, target, delay)
+                            config_result = self.input_handler.command_sender.set_managed_key_config(
+                                key, target, delay
+                            )
                             if config_result:
                                 LOG_INFO(
                                     f"[优先级按键] 管理按键注册成功: {key} -> {target} (延迟: {delay}ms)"
@@ -1006,3 +1078,49 @@ class MacroEngine:
             import traceback
 
             LOG_ERROR(f"[优先级按键] 详细错误: {traceback.format_exc()}")
+
+    def _register_business_hooks_on_ready(self):
+        """F8准备时注册所有业务按键"""
+        try:
+            # 从当前配置中提取按键信息
+            priority_keys_config = self._global_config.get("priority_keys", {})
+            if not priority_keys_config.get("enabled", False):
+                LOG_INFO("[F8准备] 优先级按键功能未启用，跳过业务按键注册")
+                return
+
+            special_keys = priority_keys_config.get("special_keys", [])
+            managed_keys = priority_keys_config.get("managed_keys", {})
+
+            # 收集其他业务按键配置
+            stationary_config = self._global_config.get("stationary_mode_config", {})
+            stationary_key = stationary_config.get("hotkey", "").lower()
+            force_move_key = stationary_config.get("force_move_hotkey", "").lower()
+
+            other_hooks = {}
+
+            # 添加固定的业务按键
+            other_hooks["RButton"] = "intercept"  # 右键攻击
+
+            # 添加原地模式和强制移动按键
+            if stationary_key:
+                other_hooks[stationary_key] = "intercept"
+            if force_move_key:
+                other_hooks[force_move_key] = "monitor"
+
+            # 调用AHK输入处理器的方法注册所有业务按键
+            if hasattr(self.input_handler, "register_all_hooks_on_f8_ready"):
+                self.input_handler.register_all_hooks_on_f8_ready(
+                    special_keys=special_keys,
+                    managed_keys=managed_keys,
+                    other_hooks=other_hooks,
+                )
+            else:
+                LOG_ERROR(
+                    "[F8准备] AHK输入处理器不支持register_all_hooks_on_f8_ready方法"
+                )
+
+        except Exception as e:
+            LOG_ERROR(f"[F8准备] 业务按键注册失败: {e}")
+            import traceback
+
+            LOG_ERROR(f"[F8准备] 详细错误: {traceback.format_exc()}")

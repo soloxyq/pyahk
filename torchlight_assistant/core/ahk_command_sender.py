@@ -74,6 +74,11 @@ class AHKCommandSender:
         from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_STATE
         param = "true" if active else "false"
         return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_STATE, param)
+    
+    def clear_all_configurable_hooks(self) -> bool:
+        """清空所有可配置的Hook（保留F8根热键）"""
+        from torchlight_assistant.config.ahk_commands import CMD_CLEAR_HOOKS
+        return send_ahk_cmd(self.window_title, CMD_CLEAR_HOOKS, "")
         
     def is_stationary_mode_active(self) -> bool:
         """检查原地模式是否激活"""

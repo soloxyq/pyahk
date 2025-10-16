@@ -247,6 +247,11 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 return 1
             }
             return 0
+
+        case CMD_CLEAR_HOOKS:
+            ; CLEAR_HOOKS - 清空所有可配置的Hook（保留F8根热键）
+            ClearAllConfigurableHooks()
+            return 1
     }
 
     ; 未识别的命令
@@ -680,6 +685,44 @@ Trim(str) {
 ; 启动信息
 ; ===============================================================================
 ; TrayTip("AHK输入系统已启动", "hold_server_extended.ahk", 1)  ; 已禁用系统通知
+
+; ===============================================================================
+; Hook清理函数
+; ===============================================================================
+ClearAllConfigurableHooks() {
+    ; 清空所有可配置的Hook（只保留F8这个根热键）
+    ; 先收集所有要删除的键，然后再删除（避免遍历时修改Map的问题）
+    FileAppend("=== ClearAllConfigurableHooks 被调用 ===" . "`n", "ahk_debug.txt")
+    FileAppend("当前注册的Hook数量: " . RegisteredHooks.Count . "`n", "ahk_debug.txt")
+    
+    ; 第一步：收集所有要删除的键
+    keysToRemove := []
+    for key, mode in RegisteredHooks {
+        FileAppend("检查Hook: " . key . " (模式: " . mode . ")`n", "ahk_debug.txt")
+        
+        ; 只保留F8根热键，清除所有其他动态热键
+        if (key = "F8") {
+            FileAppend("跳过F8根热键`n", "ahk_debug.txt")
+            continue
+        }
+        
+        FileAppend("标记为待删除: " . key . "`n", "ahk_debug.txt")
+        keysToRemove.Push(key)
+    }
+    
+    ; 第二步：删除所有标记的键
+    for index, key in keysToRemove {
+        FileAppend("准备取消Hook: " . key . "`n", "ahk_debug.txt")
+        UnregisterHook(key)
+        FileAppend("已取消Hook: " . key . "`n", "ahk_debug.txt")
+    }
+    
+    FileAppend("清理完成后，剩余Hook数量: " . RegisteredHooks.Count . "`n", "ahk_debug.txt")
+    for key, mode in RegisteredHooks {
+        FileAppend("剩余Hook: " . key . " (模式: " . mode . ")`n", "ahk_debug.txt")
+    }
+    FileAppend("=== ClearAllConfigurableHooks 完成 ===" . "`n", "ahk_debug.txt")
+}
 
 ; ===============================================================================
 ; 保持运行
