@@ -22,21 +22,41 @@ class COPYDATASTRUCT(ctypes.Structure):
         ("lpData", ctypes.c_void_p)
     ]
 
-def send_ahk_cmd(window_title: str, text: str) -> bool:
-    """给 AHk 常驻窗口发送 WM_COPYDATA。text 应为 UTF-8 字符串，如 "hold:w" 或 "release:w""""
+def send_ahk_cmd(window_title: str, cmd_id: int, param: str = "") -> bool:
+    """
+    发送命令到AHK服务器
+    
+    Args:
+        window_title: AHK窗口标题
+        cmd_id: 命令ID
+        param: 命令参数（可选）
+    
+    Returns:
+        命令执行结果（True/False）
+    """
     hwnd = FindWindowW(None, window_title)
     if not hwnd:
+        print(f"[AHK客户端][ERROR] Window not found: {window_title}")
         return False
-    # 编码为 UTF-8 bytes，C端要传指针
-    data_bytes = text.encode('utf-8')
-    buf = ctypes.create_string_buffer(data_bytes)  # buffer 包含 bytes 内容
+    
+    # 准备数据
     cds = COPYDATASTRUCT()
-    cds.dwData = 1  # 用户自定义，可不使用
-    cds.cbData = len(data_bytes)
-    cds.lpData = ctypes.cast(buf, ctypes.c_void_p)
-    # 传递 POINTER(COPYDATASTRUCT)
-    res = SendMessageW(hwnd, WM_COPYDATA, 0, ctypes.byref(cds))
-    return True
+    cds.dwData = cmd_id  # 命令ID
+    
+    if param:
+        # 有参数时，传递UTF-8编码的字符串
+        data_bytes = param.encode('utf-8')
+        buf = ctypes.create_string_buffer(data_bytes, len(data_bytes) + 1)
+        cds.cbData = len(data_bytes)
+        cds.lpData = ctypes.cast(buf, ctypes.c_void_p)
+    else:
+        # 无参数时，传递空数据
+        cds.cbData = 0
+        cds.lpData = None
+    
+    # 发送消息
+    res = SendMessageW(hwnd, WM_COPYDATA, 0, ctypes.addressof(cds))
+    return res == 1  # AHK返回1表示成功
 
 # 示例调用
 if __name__ == "__main__":

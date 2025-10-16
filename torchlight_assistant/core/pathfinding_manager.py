@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from .event_bus import event_bus
-from .input_handler import InputHandler
+from .ahk_input_handler import AHKInputHandler
 from ..utils.border_frame_manager import BorderFrameManager
 from ..utils.debug_log import LOG_INFO, LOG_ERROR, LOG
 from ..utils.a_star import astar
@@ -24,7 +24,7 @@ from ..utils.a_star import astar
 class PathfindingManager:
     """管理自动寻路的状态和流程"""
 
-    def __init__(self, border_manager: BorderFrameManager, input_handler: InputHandler):
+    def __init__(self, border_manager: BorderFrameManager, input_handler: AHKInputHandler):
         self.border_manager = border_manager
         self.input_handler = input_handler
         self.is_running = False

@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional
 from queue import Queue, Empty
 import numpy as np
 
-from .input_handler import InputHandler
+from .ahk_input_handler import AHKInputHandler
 from .event_bus import event_bus
 from .states import MacroState
 from .unified_scheduler import UnifiedScheduler
@@ -19,7 +19,7 @@ class SkillManager:
 
     def __init__(
         self,
-        input_handler: InputHandler,
+        input_handler: AHKInputHandler,
         macro_engine_ref,
         border_manager: BorderFrameManager,
         resource_manager=None,

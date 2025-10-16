@@ -16,14 +16,14 @@ from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
 from ..utils.border_frame_manager import BorderFrameManager
-from .input_handler import InputHandler
+from .ahk_input_handler import AHKInputHandler
 from ..utils.debug_log import LOG_INFO, LOG_ERROR, LOG
 
 
 class ResourceManager:
     """被动式资源管理器 - 只提供检测功能，不独立运行"""
 
-    def __init__(self, border_manager: BorderFrameManager, input_handler: InputHandler, debug_display_manager=None):
+    def __init__(self, border_manager: BorderFrameManager, input_handler: AHKInputHandler, debug_display_manager=None):
         self.border_frame_manager = border_manager
         self.input_handler = input_handler
         self.debug_display_manager = debug_display_manager

@@ -42,10 +42,9 @@ from ..utils.debug_log import LOG_INFO, LOG_ERROR
 class GameSkillConfigUI(QMainWindow):
     """主窗口UI类"""
 
-    def __init__(self, hotkey_manager, macro_engine, sound_manager: SoundManager):
+    def __init__(self, macro_engine, sound_manager: SoundManager):
         super().__init__()
 
-        self.hotkey_listener = hotkey_manager
         self.macro_engine = macro_engine
         self.sound_manager = sound_manager
         self.osd_status_window: Optional[OSDStatusWindow] = None
@@ -175,6 +174,7 @@ class GameSkillConfigUI(QMainWindow):
         event_bus.publish("ui:request_current_config")
 
     def _perform_macro_state_changed_ui(self, new_state: MacroState):
+        LOG_INFO(f"[UI] 执行UI状态变更: {new_state}")
         # 声音逻辑集中于此, 确保只有主状态变更才播放声音
         if new_state == MacroState.STOPPED:
             self.sound_manager.play("goodbye")
@@ -188,16 +188,49 @@ class GameSkillConfigUI(QMainWindow):
 
         # UI可见性逻辑 (由MacroEngine控制OSD显示/隐藏)
         if new_state == MacroState.STOPPED:
-            self.osd_status_window.hide()
+            LOG_INFO("[UI] STOPPED状态 - 隐藏OSD，显示主窗口")
+            try:
+                self.osd_status_window.hide()
+                LOG_INFO("[UI] OSD已隐藏")
+            except Exception as e:
+                LOG_ERROR(f"[UI] 隐藏OSD失败: {e}")
+            
             if not self.isVisible():
-                self._show_main_window()
+                try:
+                    self._show_main_window()
+                    LOG_INFO("[UI] 主窗口已显示")
+                except Exception as e:
+                    LOG_ERROR(f"[UI] 显示主窗口失败: {e}")
         else:
-            self.osd_status_window.show()
+            LOG_INFO(f"[UI] {new_state}状态 - 显示OSD，隐藏主窗口")
+            try:
+                LOG_INFO(f"[UI] 准备显示OSD，当前主窗口可见: {self.isVisible()}")
+                self.osd_status_window.show()
+                LOG_INFO("[UI] OSD.show()已调用")
+            except Exception as e:
+                LOG_ERROR(f"[UI] 显示OSD失败: {e}")
+            
             if self.isVisible():
-                self.hide()
+                try:
+                    LOG_INFO("[UI] 准备隐藏主窗口")
+                    self.hide()
+                    LOG_INFO("[UI] 主窗口已隐藏")
+                except Exception as e:
+                    LOG_ERROR(f"[UI] 隐藏主窗口失败: {e}")
 
     def _on_macro_state_changed(self, new_state: MacroState, old_state: MacroState):
-        QTimer.singleShot(0, lambda: self._perform_macro_state_changed_ui(new_state))
+        LOG_INFO(f"[UI] 收到状态变更事件: {old_state} → {new_state}")
+        LOG_INFO(f"[UI] 准备调度UI更新，使用QTimer.singleShot")
+        # 使用QTimer避免在锁内执行UI操作导致死锁
+        # 必须捕获new_state的值，避免lambda闭包问题
+        state = new_state
+        
+        def delayed_ui_update():
+            LOG_INFO(f"[UI] QTimer回调被执行，状态: {state}")
+            self._perform_macro_state_changed_ui(state)
+        
+        QTimer.singleShot(0, delayed_ui_update)
+        LOG_INFO(f"[UI] QTimer.singleShot已调度")
 
     def _perform_macro_status_updated_ui(self, engine_state: Dict[str, Any]):
         # 此函数现在只负责更新文本和OSD, 不播放声音

@@ -1,19 +1,17 @@
 """重构后的MacroEngine - 专注于状态管理和事件协调"""
 
 import threading
-import time
 from typing import Dict, Any, Optional, Tuple
 
 from .config_manager import ConfigManager
-from .input_handler import InputHandler
+from .ahk_input_handler import AHKInputHandler
 from .skill_manager import SkillManager
 from .event_bus import event_bus
 from .states import MacroState
 from ..utils.border_frame_manager import BorderFrameManager
-from ..utils.hotkey_manager import CtypesHotkeyManager
 from ..utils.sound_manager import SoundManager
 from .pathfinding_manager import PathfindingManager
-from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
+from ..utils.debug_log import LOG_ERROR, LOG_INFO
 
 
 class MacroEngine:
@@ -26,9 +24,7 @@ class MacroEngine:
         MacroState.PAUSED: [MacroState.RUNNING, MacroState.STOPPED],
     }
 
-    def __init__(
-        self, hotkey_manager=None, sound_manager=None, config_file: str = "default.json"
-    ):
+    def __init__(self, sound_manager=None, config_file: str = "default.json"):
         self._state = MacroState.STOPPED
         self._prepared_mode = "none"  # 'none', 'combat', 'pathfinding'
         self._state_lock = threading.RLock()
@@ -36,12 +32,9 @@ class MacroEngine:
         self._skills_config: Dict[str, Any] = {}
         self._global_config: Dict[str, Any] = {}
         self.current_config_file = config_file
-        self._is_debug_mode_active = False # 跟踪当前是否处于调试模式（由配置和状态决定）
-
-        # 用于追踪当前注册的热键
-        self._registered_stationary_hotkey = None
-        self._registered_force_move_hotkey = None
-        self._registered_pathfinding_hotkey = None
+        self._is_debug_mode_active = (
+            False  # 跟踪当前是否处于调试模式（由配置和状态决定）
+        )
 
         # 原地模式状态（切换模式）
         self._stationary_mode_active = False
@@ -49,29 +42,45 @@ class MacroEngine:
         self._force_move_active = False
 
         self.config_manager = ConfigManager()
-        
+
         # Initialize DebugDisplayManager first, as others depend on it
         from .debug_display_manager import DebugDisplayManager
-        from .unified_scheduler import UnifiedScheduler as DebugScheduler # Alias to avoid conflict
+        from .unified_scheduler import (
+            UnifiedScheduler as DebugScheduler,
+        )  # Alias to avoid conflict
+
         debug_scheduler = DebugScheduler()
         self.debug_display_manager = DebugDisplayManager(event_bus, debug_scheduler)
         # 不自动启动DebugScheduler，只在需要时启动
         self.debug_scheduler = debug_scheduler
 
-        self.input_handler = InputHandler(hotkey_manager=hotkey_manager, debug_display_manager=self.debug_display_manager)
+        # 使用AHK输入处理器
+        self.input_handler = AHKInputHandler(
+            event_bus=event_bus, debug_display_manager=self.debug_display_manager
+        )
         self.border_manager = BorderFrameManager()
         self.sound_manager = sound_manager or SoundManager()
 
         # 初始化ResourceManager
         from .resource_manager import ResourceManager
+
         self.resource_manager = ResourceManager(
-            self.border_manager, self.input_handler, debug_display_manager=self.debug_display_manager
+            self.border_manager,
+            self.input_handler,
+            debug_display_manager=self.debug_display_manager,
         )
 
         # Pass debug_display_manager to SkillManager
-        self.skill_manager = SkillManager(self.input_handler, self, self.border_manager, self.resource_manager, debug_display_manager=self.debug_display_manager)
+        self.skill_manager = SkillManager(
+            self.input_handler,
+            self,
+            self.border_manager,
+            self.resource_manager,
+            debug_display_manager=self.debug_display_manager,
+        )
 
         from .simple_affix_reroll_manager import SimpleAffixRerollManager
+
         self.affix_reroll_manager = SimpleAffixRerollManager(
             self.border_manager, self.input_handler
         )
@@ -79,11 +88,9 @@ class MacroEngine:
             self.border_manager, self.input_handler
         )
 
-        self.hotkey_manager = hotkey_manager or CtypesHotkeyManager()
-
         self._setup_event_subscriptions()
-        self.load_config(self.current_config_file)  # 先加载配置(会注册x/a热键)
-        self._setup_hotkeys()  # 再启动hotkey_manager
+        self.load_config(self.current_config_file)  # 先加载配置
+        self._setup_ahk_hotkeys()  # 设置AHK热键
 
     def _setup_event_subscriptions(self):
         event_bus.subscribe("ui:load_config_requested", self.load_config)
@@ -97,21 +104,69 @@ class MacroEngine:
         event_bus.subscribe("hotkey:z_press", self._handle_z_press)
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
 
-    def _setup_hotkeys(self):
-        self.hotkey_manager.register_key_event(
-            "f8", on_press=self._handle_f8_press, suppress="always"
-        )
-        self.hotkey_manager.register_key_event(
-            "z", on_press=self._on_z_key_press, suppress="conditional"
-        )
-        self.hotkey_manager.register_key_event(
-            "f7", on_press=self._on_f7_key_press, suppress="conditional"
-        )
-        self.hotkey_manager.set_suppress_condition_callback(
-            self._should_suppress_hotkey
-        )
-        if not self.hotkey_manager.start_listening():
-            LOG_ERROR("热键管理器启动失败！")
+    def _setup_ahk_hotkeys(self):
+        """设置AHK热键 - 使用AHK的Hook系统"""
+        LOG_INFO("[热键管理] 开始注册AHK热键...")
+
+        # 注册系统热键到AHK（使用AHK按键名称）
+        hotkeys = [
+            ("F8", "主控键"),
+            ("F7", "洗练键"),
+            ("F9", "寻路键"),
+            ("z", "执行/暂停键"),
+        ]
+
+        for key, desc in hotkeys:
+            try:
+                result = self.input_handler.register_hook(key, "intercept")
+                if result:
+                    LOG_INFO(f"[热键管理] [OK] {desc} ({key}) 注册成功")
+                else:
+                    LOG_ERROR(
+                        f"[热键管理] [FAIL] {desc} ({key}) 注册失败 - AHK窗口未找到"
+                    )
+            except Exception as e:
+                LOG_ERROR(f"[热键管理] [ERROR] {desc} ({key}) 注册异常: {e}")
+
+        # 订阅AHK拦截事件（系统热键）
+        event_bus.subscribe("intercept_key_down", self._handle_ahk_intercept_key)
+
+        # 订阅AHK优先级事件（space/right_mouse/e等）
+        event_bus.subscribe("priority_key_down", self._handle_ahk_priority_key_down)
+        event_bus.subscribe("priority_key_up", self._handle_ahk_priority_key_up)
+
+        LOG_INFO("[热键管理] AHK热键系统设置完成")
+
+    def _handle_ahk_intercept_key(self, key: str, **kwargs):
+        """处理AHK拦截的系统热键（F8/F7/F9/Z）"""
+        key_lower = key.lower()
+        LOG_INFO(f"[热键管理] 收到AHK拦截按键: {key}")
+        print(f"[热键管理] [DEBUG] 收到AHK拦截按键: {key}, kwargs={kwargs}")
+
+        if key_lower == "f8":
+            print(f"[热键管理] [DEBUG] 执行F8逻辑")
+            self._handle_f8_press()
+        elif key_lower == "f7":
+            self._on_f7_key_press()
+        elif key_lower == "f9":
+            self._on_f9_key_press()
+        elif key_lower == "z":
+            self._on_z_key_press()
+        else:
+            LOG_INFO(f"[热键管理] 未处理的按键: {key}")
+            print(f"[热键管理] [DEBUG] 未处理的按键: {key}")
+
+    def _handle_ahk_priority_key_down(self, key: str):
+        """处理AHK优先级按键按下（space/right_mouse/e等）"""
+        # 这些按键会自动暂停调度器
+        # 由SkillManager监听scheduler_pause_requested事件
+        pass
+
+    def _handle_ahk_priority_key_up(self, key: str):
+        """处理AHK优先级按键释放"""
+        # 这些按键会自动恢复调度器
+        # 由SkillManager监听scheduler_resume_requested事件
+        pass
 
     def _set_state(self, new_state: MacroState) -> bool:
         try:
@@ -134,17 +189,23 @@ class MacroEngine:
                 except Exception as e:
                     LOG_ERROR(f"[状态转换] _on_state_enter 异常: {e}")
                     import traceback
-                    LOG_ERROR(f"[状态转换] _on_state_enter 异常详情:\n{traceback.format_exc()}")
+
+                    LOG_ERROR(
+                        f"[状态转换] _on_state_enter 异常详情:\n{traceback.format_exc()}"
+                    )
                     # 即使_on_state_enter失败，也要继续发布事件
                     pass
 
                 try:
-                    event_bus.publish("engine:state_changed", new_state, old_state)
+                    event_bus.publish(
+                        "engine:state_changed", new_state=new_state, old_state=old_state
+                    )
                     # 在状态转换时，发布完整的状态更新
                     self._publish_status_update()
                 except Exception as e:
                     LOG_ERROR(f"[状态转换] 事件发布异常: {e}")
                     import traceback
+
                     LOG_ERROR(f"[状态转换] 事件发布异常详情:\n{traceback.format_exc()}")
                     # 即使事件发布失败，状态转换也算成功
                     pass
@@ -156,6 +217,7 @@ class MacroEngine:
         except Exception as e:
             LOG_ERROR(f"[状态转换] _set_state 异常: {e}")
             import traceback
+
             LOG_ERROR(f"[状态转换] _set_state 异常详情:\n{traceback.format_exc()}")
             return False
 
@@ -181,8 +243,7 @@ class MacroEngine:
             # 收集资源区域配置，用于模板截取
             resource_regions = self._collect_resource_regions()
             self.border_manager.capture_once_for_debug_and_cache(
-                self._global_config.get("capture_interval", 40),
-                resource_regions
+                self._global_config.get("capture_interval", 40), resource_regions
             )
 
             # 通知ResourceManager截取HSV模板
@@ -205,7 +266,6 @@ class MacroEngine:
                 # 首次启动
                 self._start_subsystems_based_on_mode()
 
-
         elif state == MacroState.PAUSED:
             self.input_handler.clear_queue()  # 清空按键队列
             if self._prepared_mode == "combat":
@@ -214,7 +274,6 @@ class MacroEngine:
                 self.pathfinding_manager.pause()
             self.resource_manager.pause()
             self.border_manager.pause_capture()
-
 
         event_bus.publish(f"engine:macro_{state.name.lower()}")
 
@@ -253,11 +312,12 @@ class MacroEngine:
     def _update_osd_visibility(self):
         """根据当前宏状态和调试模式配置，控制DEBUG OSD的显示/隐藏"""
         # Debug模式启用且程序在READY/RUNNING/PAUSED状态时才显示OSD
-        should_show_debug_osd = (
-            self._is_debug_mode_active and 
-            self._state in [MacroState.READY, MacroState.RUNNING, MacroState.PAUSED]
-        )
-        
+        should_show_debug_osd = self._is_debug_mode_active and self._state in [
+            MacroState.READY,
+            MacroState.RUNNING,
+            MacroState.PAUSED,
+        ]
+
         if should_show_debug_osd:
             if self._state == MacroState.READY:
                 # READY状态：显示OSD但不启动数据发布
@@ -311,6 +371,7 @@ class MacroEngine:
         except Exception as e:
             LOG_ERROR(f"[热键] F8处理异常: {e}")
             import traceback
+
             LOG_ERROR(f"[热键] F8异常详情:\n{traceback.format_exc()}")
 
     def _on_f9_key_press(self):
@@ -334,19 +395,19 @@ class MacroEngine:
         try:
             LOG_INFO(f"[热键] Z键被按下，当前状态: {self._state}")
             result = self.toggle_pause_resume()
-            LOG_INFO(f"[热键] toggle_pause_resume 返回结果: {result}, 新状态: {self._state}")
+            LOG_INFO(
+                f"[热键] toggle_pause_resume 返回结果: {result}, 新状态: {self._state}"
+            )
         except Exception as e:
             LOG_ERROR(f"[热键] Z键处理异常: {e}")
             import traceback
+
             LOG_ERROR(f"[热键] Z键异常详情:\n{traceback.format_exc()}")
 
     def _on_z_key_press(self):
         event_bus.publish("hotkey:z_press")
 
-    def _should_suppress_hotkey(self, key_name: str) -> bool:
-        if key_name.lower() in ["f7", "f9"]:
-            return True
-        return self._state not in [MacroState.STOPPED]
+    # _should_suppress_hotkey 已删除，AHK处理所有热键拦截
 
     def _collect_resource_regions(self) -> Dict[str, Tuple[int, int, int, int]]:
         """收集资源检测区域配置"""
@@ -378,9 +439,9 @@ class MacroEngine:
     def _on_config_updated(
         self, skills_config: Dict[str, Any], global_config: Dict[str, Any]
     ):
-        """响应配置更新，安全地更新所有可配置的热键和资源管理器。"""
+        """响应配置更新"""
         LOG_INFO(f"[配置更新] _on_config_updated 被调用")
-        
+
         # 更新资源管理器配置
         resource_config = global_config.get("resource_management", {})
         if resource_config:
@@ -389,110 +450,35 @@ class MacroEngine:
         # 更新调试模式状态
         debug_mode_enabled = global_config.get("debug_mode", {}).get("enabled", False)
         self._is_debug_mode_active = debug_mode_enabled
-        self.input_handler.set_dry_run_mode(debug_mode_enabled)
-        LOG_INFO(f"[DEBUG MODE] _on_config_updated: 干跑模式已设置为 {debug_mode_enabled}")
+        self.input_handler.dry_run_mode = debug_mode_enabled
+        LOG_INFO(
+            f"[DEBUG MODE] _on_config_updated: 干跑模式已设置为 {debug_mode_enabled}"
+        )
 
-        # 先取消所有可配置的热键,避免角色转换冲突
-        self._unregister_all_configurable_hotkeys()
-        
-        # 提取新的热键配置并重新注册
-        stationary_config = global_config.get("stationary_mode_config", {})
-        pathfinding_config = global_config.get("pathfinding_config", {})
+        # 更新目标窗口配置
+        window_config = global_config.get("window_activation", {})
+        if window_config and window_config.get("enabled", False):
+            ahk_class = window_config.get("ahk_class", "").strip()
+            ahk_exe = window_config.get("ahk_exe", "").strip()
 
-        new_hotkeys = {
-            "stationary": stationary_config.get("hotkey", "").strip().lower(),
-            "force_move": stationary_config.get("force_move_hotkey", "")
-            .strip()
-            .lower(),
-            "pathfinding": pathfinding_config.get("hotkey", "").strip().lower(),
-        }
+            # 优先使用ahk_class，如果为空则使用ahk_exe
+            if ahk_class:
+                target_str = f"ahk_class {ahk_class}"
+                LOG_INFO(f"[窗口激活] 设置目标窗口（类名）: {ahk_class}")
+            elif ahk_exe:
+                target_str = f"ahk_exe {ahk_exe}"
+                LOG_INFO(f"[窗口激活] 设置目标窗口（进程名）: {ahk_exe}")
+            else:
+                LOG_INFO("[窗口激活] 未配置目标窗口")
+                target_str = None
 
-        # 重新注册所有热键
-        for hotkey_type, new_key in new_hotkeys.items():
-            if not self._register_hotkey(hotkey_type, new_key):
-                # 如果注册失败，向UI发送通知
-                event_bus.publish("ui:hotkey_update_failed", hotkey_type, new_key)
+            if target_str:
+                self.input_handler.set_target_window(target_str)
 
         # 更新OSD可见性
         self._update_osd_visibility()
 
-    def _unregister_all_configurable_hotkeys(self):
-        """取消注册所有可配置的热键(stationary/force_move/pathfinding)"""
-        LOG_INFO("[热键管理] 取消注册所有可配置热键")
-        
-        # 取消原地模式热键
-        if self._registered_stationary_hotkey:
-            try:
-                self.hotkey_manager.unregister_hotkey(self._registered_stationary_hotkey)
-                LOG_INFO(f"[热键管理] 已取消原地模式热键: {self._registered_stationary_hotkey}")
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 取消原地模式热键失败: {e}")
-            self._registered_stationary_hotkey = None
-        
-        # 取消交互/强制移动热键
-        if self._registered_force_move_hotkey:
-            try:
-                self.hotkey_manager.unregister_hotkey(self._registered_force_move_hotkey)
-                LOG_INFO(f"[热键管理] 已取消交互/强制移动热键: {self._registered_force_move_hotkey}")
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 取消交互/强制移动热键失败: {e}")
-            self._registered_force_move_hotkey = None
-        
-        # 取消寻路模式热键
-        if self._registered_pathfinding_hotkey:
-            try:
-                self.hotkey_manager.unregister_hotkey(self._registered_pathfinding_hotkey)
-                LOG_INFO(f"[热键管理] 已取消寻路模式热键: {self._registered_pathfinding_hotkey}")
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 取消寻路模式热键失败: {e}")
-            self._registered_pathfinding_hotkey = None
-    
-    def _register_hotkey(self, hotkey_type: str, key: str) -> bool:
-        """注册单个热键"""
-        if not key:
-            LOG_INFO(f"[热键管理] 热键 '{hotkey_type}' 为空,跳过注册")
-            return True
-        
-        hotkey_map = {
-            "stationary": {
-                "setter": lambda k: setattr(self, "_registered_stationary_hotkey", k),
-                "callback": self._on_stationary_key_press,
-                "release_callback": self._on_stationary_key_release,
-                "suppress": "conditional",
-            },
-            "force_move": {
-                "setter": lambda k: setattr(self, "_registered_force_move_hotkey", k),
-                "callback": self._on_force_move_key_press,
-                "release_callback": self._on_force_move_key_release,
-                "suppress": False,
-            },
-            "pathfinding": {
-                "setter": lambda k: setattr(self, "_registered_pathfinding_hotkey", k),
-                "callback": self._on_f9_key_press,
-                "release_callback": None,
-                "suppress": "conditional",
-            },
-        }
-        
-        if hotkey_type not in hotkey_map:
-            LOG_ERROR(f"[热键管理] 未知的热键类型: {hotkey_type}")
-            return False
-        
-        config = hotkey_map[hotkey_type]
-        
-        try:
-            self.hotkey_manager.register_key_event(
-                key,
-                on_press=config["callback"],
-                on_release=config.get("release_callback"),
-                suppress=config["suppress"],
-            )
-            config["setter"](key)
-            LOG_INFO(f"[热键管理] 成功注册热键 '{hotkey_type}': {key}")
-            return True
-        except Exception as e:
-            LOG_ERROR(f"[热键管理] 注册热键 '{hotkey_type}' ({key}) 失败: {e}")
-            return False
+    # 旧的热键管理方法已删除，现在使用AHK处理所有热键
 
     def _on_stationary_key_press(self):
         """原地模式热键按下事件 - 切换模式"""
@@ -529,7 +515,6 @@ class MacroEngine:
     def stop_macro(self) -> bool:
         return self._set_state(MacroState.STOPPED)
 
-
     def toggle_pause_resume(self) -> bool:
         try:
             LOG_INFO(f"[状态转换] toggle_pause_resume 被调用，当前状态: {self._state}")
@@ -553,7 +538,10 @@ class MacroEngine:
         except Exception as e:
             LOG_ERROR(f"[状态转换] toggle_pause_resume 异常: {e}")
             import traceback
-            LOG_ERROR(f"[状态转换] toggle_pause_resume 异常详情:\n{traceback.format_exc()}")
+
+            LOG_ERROR(
+                f"[状态转换] toggle_pause_resume 异常详情:\n{traceback.format_exc()}"
+            )
             return False
 
     def set_debug_mode(self, enabled: bool):
@@ -574,12 +562,11 @@ class MacroEngine:
         except Exception as e:
             LOG_ERROR(f"[DEBUG MODE] 设置DEBUG MODE异常: {e}")
             import traceback
+
             LOG_ERROR(f"[DEBUG MODE] 设置DEBUG MODE异常详情:\n{traceback.format_exc()}")
 
     def load_config(self, config_file: str):
         LOG_INFO(f"[配置加载] 开始加载配置文件: {config_file}")
-        LOG_INFO(f"[配置加载] 当前X键注册状态: {self._registered_stationary_hotkey}")
-        LOG_INFO(f"[配置加载] 当前A键注册状态: {self._registered_force_move_hotkey}")
         try:
             config_path = __import__("pathlib").Path(config_file)
             if not config_path.exists() or config_path.stat().st_size == 0:
@@ -619,12 +606,6 @@ class MacroEngine:
         event_bus.publish(
             "engine:config_updated", self._skills_config, self._global_config
         )
-
-
-
-
-
-
 
     def _generate_default_config(self) -> Dict[str, Any]:
         """生成包含默认值的完整配置"""
@@ -678,7 +659,7 @@ class MacroEngine:
             "priority_keys": {
                 "enabled": False,  # 默认禁用
                 "special_keys": [],
-                "managed_keys": {}
+                "managed_keys": {},
             },
         }
         return {"skills": default_skills, "global": default_global}
@@ -701,9 +682,7 @@ class MacroEngine:
             ),
             # Layer 2: 停止核心服务和IO
             ("核心服务层", [self.border_manager, self.input_handler]),
-            # Layer 3: 释放系统级钩子和监听器
-            ("系统资源层", [self.hotkey_manager]),
-            # Layer 4: 关闭事件总线
+            # Layer 3: 关闭事件总线
             ("事件总线层", [event_bus]),
         ]
 
@@ -711,8 +690,6 @@ class MacroEngine:
         for layer_name, components in cleanup_layers:
             self._cleanup_layer(layer_name, components)
 
-        # 最后，清理自身状态
-        self._unregister_all_configurable_hotkeys()
         LOG_INFO("[清理] 所有组件清理完毕。")
 
     def _cleanup_layer(self, layer_name: str, components: list):
