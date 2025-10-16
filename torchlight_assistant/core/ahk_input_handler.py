@@ -55,6 +55,7 @@ class AHKInputHandler:
             target_str = f"ahk_exe {AHKConfig.WINDOW_EXE}"
             self.command_sender.set_target_window(target_str)
 
+        # 启动事件接收器（文件监控作为备用）
         self.event_receiver = AHKEventReceiver()
         self.event_receiver.start()
         
@@ -201,7 +202,7 @@ class AHKInputHandler:
     def get_queue_stats(self) -> dict:
         if self.event_receiver:
             return self.event_receiver.get_stats()
-        return {}
+        return {"wm_copydata_mode": True}
     
     def register_hook(self, key: str, mode: str = "intercept"):
         return self.command_sender.register_hook(key, mode)

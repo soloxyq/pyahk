@@ -528,19 +528,42 @@ RestorePriorityKey(key) {
 ; 事件发送到Python
 ; ===============================================================================
 SendEventToPython(event) {
-    ; 使用文件通信 (简单可靠)
-    ; 优化：减少重试次数，提高性能
-    loop 2 {
-        try {
-            ; 追加事件到文件
-            FileAppend(event "`n", "ahk_events.txt")
-            return ; 成功写入，退出
-        } catch as err {
-            ; 如果不是最后一次尝试，等待一小段时间
-            if (A_Index < 2) {
-                Sleep(1) ; 等待1ms
-            }
-        }
+    ; 优先使用WM_COPYDATA，失败时回退到文件
+    pythonHwnd := WinExist("通用游戏技能配置")
+    if (pythonHwnd) {
+        SendWMCopyDataToPython(pythonHwnd, event)
+    }
+    
+    ; 同时使用文件作为备用（调试期间）
+    try {
+        FileAppend(event "`n", "ahk_events.txt")
+    } catch {
+        ; 忽略文件写入错误
+    }
+}
+
+; 发送WM_COPYDATA消息到Python的辅助函数
+SendWMCopyDataToPython(hwnd, eventData) {
+    try {
+        ; 准备UTF-8编码的数据
+        eventBytes := Buffer(StrLen(eventData) * 3 + 1)  ; UTF-8最多3字节/字符
+        dataSize := StrPut(eventData, eventBytes, "UTF-8") - 1  ; 不包含null终止符
+        
+        ; 创建COPYDATASTRUCT
+        cds := Buffer(A_PtrSize * 3)
+        NumPut("Ptr", 9999, cds, 0)                        ; dwData = 9999 (事件标识)
+        NumPut("UInt", dataSize, cds, A_PtrSize)           ; cbData = 数据长度
+        NumPut("Ptr", eventBytes.Ptr, cds, A_PtrSize * 2)  ; lpData = 数据指针
+        
+        ; 发送WM_COPYDATA消息
+        DllCall("user32.dll\SendMessageW", 
+            "Ptr", hwnd,      ; 目标窗口句柄
+            "UInt", 0x004A,   ; WM_COPYDATA
+            "Ptr", 0,         ; wParam
+            "Ptr", cds.Ptr)   ; lParam
+        
+    } catch as err {
+        ; 发送失败，静默忽略
     }
 }
 
