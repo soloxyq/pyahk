@@ -78,6 +78,12 @@ class AHKCommandSender:
     def is_stationary_mode_active(self) -> bool:
         """检查原地模式是否激活"""
         return self._stationary_mode_active
+    
+    def set_managed_key_config(self, key: str, target: str, delay: int):
+        """设置管理按键配置"""
+        from torchlight_assistant.config.ahk_commands import CMD_SET_MANAGED_KEY_CONFIG
+        param = f"{key}:{target}:{delay}"
+        return send_ahk_cmd(self.window_title, CMD_SET_MANAGED_KEY_CONFIG, param)
 
     # ========================================================================
     # 队列操作

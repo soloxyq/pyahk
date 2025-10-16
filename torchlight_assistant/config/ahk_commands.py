@@ -18,6 +18,7 @@ CMD_SEND_SEQUENCE = 11  # 发送按键序列
 CMD_SET_STATIONARY = 12 # 设置原地模式
 CMD_SET_FORCE_MOVE_KEY = 13 # 设置强制移动键
 CMD_SET_FORCE_MOVE_STATE = 14 # 设置强制移动状态
+CMD_SET_MANAGED_KEY_CONFIG = 15 # 设置管理按键配置
 
 # 命令名称映射（用于调试）
 CMD_NAMES = {

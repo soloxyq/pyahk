@@ -69,7 +69,11 @@ class AHKInputHandler:
         event_type = parts[0]
         data = parts[1] if len(parts) > 1 else ""
         
-        self.event_bus.publish(event_type, key=data)
+        # 🎯 特殊处理special_key_pause事件
+        if event_type == "special_key_pause":
+            self.event_bus.publish(event_type, action=data)
+        else:
+            self.event_bus.publish(event_type, key=data)
 
     def _start_ahk_server(self) -> bool:
         """启动AHK服务器"""
@@ -106,6 +110,12 @@ class AHKInputHandler:
         
         for key in priority_keys:
             try:
+                # 🎯 管理按键将在配置更新时单独注册为priority模式，这里跳过
+                # 只注册特殊按键（如Space, RButton）为intercept模式
+                if key.lower() == "e":  # e键是管理按键，跳过
+                    print(f"[AHK输入] [SKIP] 跳过管理按键: {key} (将在配置更新时注册)")
+                    continue
+                    
                 result = self.command_sender.register_hook(key, "intercept")
                 if result:
                     print(f"[AHK输入] [OK] 优先级Hook注册成功: {key}")

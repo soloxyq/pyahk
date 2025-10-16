@@ -28,6 +28,13 @@ global LowQueue := []
 global IsPaused := false
 global PriorityKeysActive := Map()
 global RegisteredHooks := Map()
+
+; 🎯 新增：特殊按键状态跟踪
+global SpecialKeysPressed := Map()  ; 跟踪特殊按键的按住状态
+global SpecialKeysPaused := false   ; 特殊按键是否导致系统暂停
+
+; 🎯 新增：管理按键配置存储
+global ManagedKeysConfig := Map()   ; 存储管理按键的延迟和映射配置
 global TargetWin := "" ; 目标窗口标识符
 
 ; 原地模式状态
@@ -225,6 +232,21 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ForceMoveActive := (param = "true")
             ; FileAppend("强制移动状态已设置: " . ForceMoveActive . "`n", "ahk_debug.txt")
             return 1
+
+        case CMD_SET_MANAGED_KEY_CONFIG:
+            ; SET_MANAGED_KEY_CONFIG - 设置管理按键配置
+            ; 参数格式: "key:target:delay" 例如: "e:+:500"
+            global ManagedKeysConfig
+            parts := StrSplit(param, ":")
+            if (parts.Length >= 3) {
+                key := parts[1]
+                target := parts[2]
+                delay := Integer(parts[3])
+                ManagedKeysConfig[key] := { target: target, delay: delay }
+                ; FileAppend("管理按键配置已设置: " . key . " -> " . target . " (延迟: " . delay . "ms)`n", "ahk_debug.txt")
+                return 1
+            }
+            return 0
     }
 
     ; 未识别的命令
@@ -305,15 +327,11 @@ SendPress(key) {
     ; 发送按键 (按下并释放)
     global ForceMoveActive
 
-    ; 如果强制移动键按下，技能键需要替换为f键
+    ; 如果强制移动键按下，所有队列中的按键都替换为f键
     if (ForceMoveActive) {
-        ; 技能键在强制移动时替换为f键
-        if (key = "9" or key = "8" or key = "7" or key = "6" or key = "5" or key = "4" or key = "3" or key = "2" or key =
-            "1") {
-            ; 直接发送f键替换原始技能键
-            Send "{f}"
-            return  ; 已经处理完毕，直接返回
-        }
+        ; 所有按键在强制移动时都替换为f键
+        Send "{f}"
+        return  ; 已经处理完毕，直接返回
     }
 
     ; 正常按键处理（没有强制移动或不是技能键）
@@ -393,16 +411,22 @@ ExecuteMouseClick(data) {
 ; Hook管理
 ; ===============================================================================
 RegisterHook(key, mode) {
+    FileAppend("=== RegisterHook被调用 ===" . "`n", "ahk_debug.txt")
+    FileAppend("按键: " . key . " 模式: " . mode . "`n", "ahk_debug.txt")
+    
     ; 检查是否已注册
     if (RegisteredHooks.Has(key)) {
         existing_mode := RegisteredHooks[key]
+        FileAppend("Hook已存在，旧模式: " . existing_mode . "`n", "ahk_debug.txt")
         if (existing_mode = mode) {
-            ; FileAppend("Hook已存在且模式相同，跳过注册: " . key . " (" . mode . ")`n", "ahk_debug.txt")
+            FileAppend("Hook已存在且模式相同，跳过注册: " . key . " (" . mode . ")`n", "ahk_debug.txt")
             return
         } else {
-            ; FileAppend("Hook已存在但模式不同，先取消旧Hook: " . key . " 旧模式:" . existing_mode . " 新模式:" . mode . "`n", "ahk_debug.txt")
+            FileAppend("Hook已存在但模式不同，先取消旧Hook: " . key . " 旧模式:" . existing_mode . " 新模式:" . mode . "`n", "ahk_debug.txt")
             UnregisterHook(key)
         }
+    } else {
+        FileAppend("Hook不存在，准备新注册: " . key . " (" . mode . ")`n", "ahk_debug.txt")
     }
 
     ; 记录Hook
@@ -420,9 +444,20 @@ RegisterHook(key, mode) {
                 ; FileAppend("成功注册拦截Hook: $" . key . " (仅按下)`n", "ahk_debug.txt")
 
             case "priority":
-                ; 优先级模式 - 发送priority_key事件，只监听按下事件
-                Hotkey("$" key, (*) => HandlePriorityKey(key))
-                ; FileAppend("成功注册优先级Hook: $" . key . " (仅按下)`n", "ahk_debug.txt")
+                ; 优先级模式 - 发送priority_key事件，只监听按下事件（管理按键：拦截+延迟+映射）
+                FileAppend("准备注册priority热键: $" . key . "`n", "ahk_debug.txt")
+                try {
+                    Hotkey("$" key, (*) => HandleManagedKey(key))
+                    FileAppend("成功注册管理按键Hook: $" . key . " (拦截+延迟+映射)`n", "ahk_debug.txt")
+                } catch as err {
+                    FileAppend("注册管理按键Hook失败: $" . key . " 错误: " . err.message . "`n", "ahk_debug.txt")
+                }
+
+            case "special":
+                ; 特殊按键模式 - 不拦截，持续状态检测（如space）
+                Hotkey("~" key, (*) => HandleSpecialKeyDown(key))
+                Hotkey("~" key " up", (*) => HandleSpecialKeyUp(key))
+                ; FileAppend("成功注册特殊按键Hook: ~" . key . " (持续状态检测)`n", "ahk_debug.txt")
 
             case "monitor":
                 ; 监控模式 - 使用~前缀不拦截，监听按下和释放事件
@@ -483,25 +518,86 @@ HandleInterceptKey(key) {
     ; 不发送到目标应用程序（完全拦截）
 }
 
-HandlePriorityKey(key) {
-    ; 优先级模式 - 按键按下（简化版本，使用定时器自动恢复）
-    key_lower := StrLower(key)
+; 🎯 特殊按键处理（如space）- 不拦截，持续状态检测
+HandleSpecialKeyDown(key) {
+    global SpecialKeysPressed, SpecialKeysPaused
 
-    ; FileAppend("HandlePriorityKey被调用: " . key . "`n", "ahk_debug.txt")
+    ; 记录按键按下状态
+    SpecialKeysPressed[key] := true
 
-    ; 通知Python暂停调度
-    SendEventToPython("priority_key_down:" key)
+    ; 如果这是第一个特殊按键，暂停系统
+    if (SpecialKeysPressed.Count = 1 && !SpecialKeysPaused) {
+        SpecialKeysPaused := true
+        SendEventToPython("special_key_pause:start")
+    }
+
+    ; 通知Python特殊按键状态
+    SendEventToPython("special_key_down:" key)
+}
+
+HandleSpecialKeyUp(key) {
+    global SpecialKeysPressed, SpecialKeysPaused
+
+    ; 移除按键状态
+    if (SpecialKeysPressed.Has(key)) {
+        SpecialKeysPressed.Delete(key)
+    }
+
+    ; 如果所有特殊按键都释放了，恢复系统
+    if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
+        SpecialKeysPaused := false
+        SendEventToPython("special_key_pause:end")
+    }
+
+    ; 通知Python特殊按键状态
+    SendEventToPython("special_key_up:" key)
+}
+
+; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射
+HandleManagedKey(key) {
+    global ManagedKeysConfig, IsPaused
+
+    ; 调试信息
+    FileAppend("=== HandleManagedKey被调用 ===" . "`n", "ahk_debug.txt")
+    FileAppend("按键: " . key . "`n", "ahk_debug.txt")
+    FileAppend("时间戳: " . A_TickCount . "`n", "ahk_debug.txt")
+
+    ; 通知Python暂停调度（瞬时暂停）
+    FileAppend("发送managed_key_down事件到Python`n", "ahk_debug.txt")
+    SendEventToPython("managed_key_down:" key)
 
     ; 设置暂停标志
     IsPaused := true
 
-    ; 发送按键到游戏
-    Send "{" key "}"
+    ; 🎯 根据配置进行延迟+映射
+    if (ManagedKeysConfig.Has(key)) {
+        config := ManagedKeysConfig[key]
+        target := config.target
+        delay := config.delay
 
-    ; 设置定时器，500ms后自动恢复队列处理
-    SetTimer(RestorePriorityKey.Bind(key), -500)  ; -500表示只执行一次
+        ; 先延迟
+        if (delay > 0) {
+            Sleep(delay)
+        }
 
-    ; FileAppend("优先级按键已处理: " . key . "`n", "ahk_debug.txt")
+        ; 再发送映射后的按键
+        Send "{" target "}"
+
+        ; FileAppend("管理按键处理: " . key . " -> " . target . " (延迟: " . delay . "ms)`n", "ahk_debug.txt")
+    } else {
+        ; 如果没有配置，使用原按键
+        Send "{" key "}"
+    }
+
+    ; 设置定时器，500ms后自动恢复
+    SetTimer(RestoreManagedKey.Bind(key), -500)
+}
+
+RestoreManagedKey(key) {
+    ; 恢复管理按键后的队列处理
+    global IsPaused
+    IsPaused := false
+    SendEventToPython("managed_key_up:" key)
 }
 
 HandleMonitorKey(key) {
@@ -516,13 +612,7 @@ HandleMonitorKeyUp(key) {
     SendEventToPython("monitor_key_up:" key)
 }
 
-RestorePriorityKey(key) {
-    ; 恢复优先级按键后的队列处理
-    global IsPaused
-    IsPaused := false
-    SendEventToPython("priority_key_up:" key)
-    ; FileAppend("优先级按键自动恢复: " . key . "`n", "ahk_debug.txt")
-}
+; 已移除RestorePriorityKey，替换为RestoreManagedKey
 
 ; ===============================================================================
 ; 事件发送到Python
@@ -530,7 +620,7 @@ RestorePriorityKey(key) {
 SendEventToPython(event) {
     ; 优先查找OSD窗口（运行时可见）
     pythonHwnd := WinExist("TorchLightAssistant_OSD_12345")
-    
+
     if (!pythonHwnd) {
         ; 如果OSD窗口不存在，查找主窗口（停止时可见）
         pythonHwnd := WinExist("TorchLightAssistant_MainWindow_12345")
@@ -547,20 +637,20 @@ SendWMCopyDataToPython(hwnd, eventData) {
         ; 准备UTF-8编码的数据
         eventBytes := Buffer(StrLen(eventData) * 3 + 1)  ; UTF-8最多3字节/字符
         dataSize := StrPut(eventData, eventBytes, "UTF-8") - 1  ; 不包含null终止符
-        
+
         ; 创建COPYDATASTRUCT
         cds := Buffer(A_PtrSize * 3)
         NumPut("Ptr", 9999, cds, 0)                        ; dwData = 9999 (事件标识)
         NumPut("UInt", dataSize, cds, A_PtrSize)           ; cbData = 数据长度
         NumPut("Ptr", eventBytes.Ptr, cds, A_PtrSize * 2)  ; lpData = 数据指针
-        
+
         ; 发送WM_COPYDATA消息
-        DllCall("user32.dll\SendMessageW", 
+        DllCall("user32.dll\SendMessageW",
             "Ptr", hwnd,      ; 目标窗口句柄
             "UInt", 0x004A,   ; WM_COPYDATA
             "Ptr", 0,         ; wParam
             "Ptr", cds.Ptr)   ; lParam
-        
+
     } catch as err {
         ; 发送失败，静默忽略
     }
@@ -589,7 +679,7 @@ Trim(str) {
 ; ===============================================================================
 ; 启动信息
 ; ===============================================================================
-TrayTip("AHK输入系统已启动", "hold_server_extended.ahk", 1)
+; TrayTip("AHK输入系统已启动", "hold_server_extended.ahk", 1)  ; 已禁用系统通知
 
 ; ===============================================================================
 ; 保持运行

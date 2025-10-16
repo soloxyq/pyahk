@@ -134,7 +134,17 @@ class MacroEngine:
         # 订阅AHK拦截事件（系统热键）
         event_bus.subscribe("intercept_key_down", self._handle_ahk_intercept_key)
 
-        # 订阅AHK优先级事件（space/right_mouse/e等）
+        # 🎯 订阅新的按键事件系统
+        # 特殊按键事件（如space）- 持续状态检测
+        event_bus.subscribe("special_key_down", self._handle_ahk_special_key_down)
+        event_bus.subscribe("special_key_up", self._handle_ahk_special_key_up)
+        event_bus.subscribe("special_key_pause", self._handle_ahk_special_key_pause)
+
+        # 管理按键事件（如RButton/e）- 拦截+延迟+映射
+        event_bus.subscribe("managed_key_down", self._handle_ahk_managed_key_down)
+        event_bus.subscribe("managed_key_up", self._handle_ahk_managed_key_up)
+
+        # 兼容旧的优先级事件（逐步迁移）
         event_bus.subscribe("priority_key_down", self._handle_ahk_priority_key_down)
         event_bus.subscribe("priority_key_up", self._handle_ahk_priority_key_up)
 
@@ -163,17 +173,75 @@ class MacroEngine:
         else:
             LOG_INFO(f"[热键管理] 未处理的按键: {key}")
 
+    def _handle_ahk_special_key_down(self, key: str):
+        """处理特殊按键按下（如space）- 不拦截，持续状态检测"""
+        LOG_INFO(f"[特殊按键] 按下: {key}")
+        # 特殊按键按下不立即暂停，等待special_key_pause事件
+
+    def _handle_ahk_special_key_up(self, key: str):
+        """处理特殊按键释放（如space）"""
+        LOG_INFO(f"[特殊按键] 释放: {key}")
+        # 特殊按键释放不立即恢复，等待special_key_pause事件
+
+    def _handle_ahk_special_key_pause(self, action: str):
+        """处理特殊按键暂停状态变化"""
+        if action == "start":
+            LOG_INFO("[特殊按键] 系统暂停 - 特殊按键激活")
+            event_bus.publish(
+                "scheduler_pause_requested",
+                {"reason": "special_keys_active", "type": "special_key_pause"},
+            )
+        elif action == "end":
+            LOG_INFO("[特殊按键] 系统恢复 - 所有特殊按键释放")
+            event_bus.publish(
+                "scheduler_resume_requested",
+                {"reason": "special_keys_released", "type": "special_key_resume"},
+            )
+
+    def _handle_ahk_managed_key_down(self, key: str):
+        """处理管理按键按下（如RButton/e）- 拦截+延迟+映射"""
+        LOG_INFO(f"[管理按键] 按下: {key}")
+
+        # 管理按键立即暂停调度器
+        event_bus.publish(
+            "scheduler_pause_requested",
+            {
+                "reason": f"managed_key_down:{key}",
+                "type": "managed_key_pause",
+                "active_keys": [key],
+            },
+        )
+
+    def _handle_ahk_managed_key_up(self, key: str):
+        """处理管理按键释放"""
+        LOG_INFO(f"[管理按键] 释放: {key}")
+
+        # 管理按键释放后恢复调度器
+        event_bus.publish(
+            "scheduler_resume_requested",
+            {"reason": f"managed_key_up:{key}", "type": "managed_key_resume"},
+        )
+
     def _handle_ahk_priority_key_down(self, key: str):
-        """处理AHK优先级按键按下（space/right_mouse/e等）"""
-        # 优先级按键会自动暂停调度器
-        # 由SkillManager监听scheduler_pause_requested事件
-        pass
+        """处理AHK优先级按键按下（兼容旧版本）"""
+        LOG_INFO(f"[热键管理] 收到AHK拦截按键: {key}")
+
+        # 🎯 关键修复：发布scheduler_pause_requested事件
+        # 这会暂停统一调度器，实现"零资源浪费"优化
+        event_bus.publish(
+            "scheduler_pause_requested",
+            {"reason": f"priority_key_down:{key}", "active_keys": [key]},
+        )
 
     def _handle_ahk_priority_key_up(self, key: str):
-        """处理AHK优先级按键释放"""
-        # 优先级按键会自动恢复调度器
-        # 由SkillManager监听scheduler_resume_requested事件
-        pass
+        """处理AHK优先级按键释放（兼容旧版本）"""
+        LOG_INFO(f"[热键管理] 收到AHK按键释放: {key}")
+
+        # 🎯 关键修复：发布scheduler_resume_requested事件
+        # 这会恢复统一调度器
+        event_bus.publish(
+            "scheduler_resume_requested", {"reason": f"priority_key_up:{key}"}
+        )
 
     def _handle_ahk_monitor_key_down(self, key: str):
         """处理AHK监控按键按下（交互键A等）"""
@@ -498,10 +566,19 @@ class MacroEngine:
             if target_str:
                 self.input_handler.set_target_window(target_str)
 
+        # 🎯 处理优先级按键配置
+        priority_keys_config = global_config.get("priority_keys", {})
+        if priority_keys_config.get("enabled", False):
+            self._update_priority_keys_config(priority_keys_config)
+
         # 设置强制移动键到AHK
         stationary_config = global_config.get("stationary_mode_config", {})
         force_move_key = stationary_config.get("force_move_hotkey", "").strip().lower()
-        if force_move_key and hasattr(self.input_handler, "command_sender") and self.input_handler.command_sender:
+        if (
+            force_move_key
+            and hasattr(self.input_handler, "command_sender")
+            and self.input_handler.command_sender
+        ):
             self.input_handler.command_sender.set_force_move_key(force_move_key)
             LOG_INFO(f"[强制移动键] 已设置到AHK: {force_move_key}")
 
@@ -513,7 +590,9 @@ class MacroEngine:
         if stationary_key:
             new_hook_config[stationary_key] = "intercept"  # 原地模式使用拦截
         if force_move_key:
-            new_hook_config[force_move_key] = "monitor"  # 强制移动键使用监控（不拦截，但能准确检测状态）
+            new_hook_config[force_move_key] = (
+                "monitor"  # 强制移动键使用监控（不拦截，但能准确检测状态）
+            )
 
         # 获取当前的Hook配置映射
         current_hook_config = getattr(self, "_current_hook_config", {})
@@ -604,28 +683,28 @@ class MacroEngine:
     def _on_force_move_key_press(self):
         """交互/强制移动热键按下事件 - 按住激活"""
         self._force_move_active = True
-        
+
         # 通知AHK强制移动状态变化
         if (
             hasattr(self.input_handler, "command_sender")
             and self.input_handler.command_sender
         ):
             self.input_handler.command_sender.set_force_move_state(True)
-        
+
         self._publish_status_update()
         LOG_INFO("[交互模式] 已激活")
 
     def _on_force_move_key_release(self):
         """交互/强制移动热键释放事件 - 松开取消"""
         self._force_move_active = False
-        
+
         # 通知AHK强制移动状态变化
         if (
             hasattr(self.input_handler, "command_sender")
             and self.input_handler.command_sender
         ):
             self.input_handler.command_sender.set_force_move_state(False)
-        
+
         self._publish_status_update()
         LOG_INFO("[交互模式] 已取消")
 
@@ -854,3 +933,76 @@ class MacroEngine:
                 LOG_INFO(f"  - {component_name}.stop_listening() 调用成功")
         except Exception as e:
             LOG_ERROR(f"  - 清理组件 {component_name} 时发生错误: {e}")
+
+    def _update_priority_keys_config(self, priority_keys_config: Dict[str, Any]):
+        """更新优先级按键配置到AHK输入处理器"""
+        try:
+            special_keys = set(priority_keys_config.get("special_keys", []))
+            managed_keys = priority_keys_config.get("managed_keys", {})
+
+            LOG_INFO(
+                f"[优先级按键] 开始更新配置 - 特殊按键: {special_keys}, 管理按键: {list(managed_keys.keys())}"
+            )
+
+            # 🎯 关键：重新注册所有优先级按键Hook
+            if (
+                hasattr(self.input_handler, "command_sender")
+                and self.input_handler.command_sender
+            ):
+
+                # 1. 注册特殊按键（不拦截，持续状态检测）
+                for key in special_keys:
+                    try:
+                        # 🎯 特殊按键使用special模式（不拦截，持续状态检测）
+                        result = self.input_handler.command_sender.register_hook(
+                            key, "special"
+                        )
+                        if result:
+                            LOG_INFO(
+                                f"[优先级按键] 特殊按键注册成功: {key} (special模式)"
+                            )
+                        else:
+                            LOG_ERROR(f"[优先级按键] 特殊按键注册失败: {key}")
+                    except Exception as e:
+                        LOG_ERROR(f"[优先级按键] 特殊按键注册异常 ({key}): {e}")
+
+                # 2. 注册管理按键（完全拦截，延迟+映射）
+                for key, config in managed_keys.items():
+                    try:
+                        # 🎯 管理按键使用priority模式（拦截+延迟+映射）
+                        result = self.input_handler.command_sender.register_hook(
+                            key, "priority"
+                        )
+                        if result:
+                            target = (
+                                config.get("target", key)
+                                if isinstance(config, dict)
+                                else key
+                            )
+                            delay = (
+                                config.get("delay", 0)
+                                if isinstance(config, dict)
+                                else 0
+                            )
+                            # 🎯 发送管理按键配置到AHK
+                            config_result = self.input_handler.command_sender.set_managed_key_config(key, target, delay)
+                            if config_result:
+                                LOG_INFO(
+                                    f"[优先级按键] 管理按键注册成功: {key} -> {target} (延迟: {delay}ms)"
+                                )
+                            else:
+                                LOG_ERROR(f"[优先级按键] 管理按键配置发送失败: {key}")
+                        else:
+                            LOG_ERROR(f"[优先级按键] 管理按键注册失败: {key}")
+                    except Exception as e:
+                        LOG_ERROR(f"[优先级按键] 管理按键注册异常 ({key}): {e}")
+
+                LOG_INFO("[优先级按键] 配置更新完成")
+            else:
+                LOG_ERROR("[优先级按键] AHK命令发送器不可用，无法更新配置")
+
+        except Exception as e:
+            LOG_ERROR(f"[优先级按键] 配置更新失败: {e}")
+            import traceback
+
+            LOG_ERROR(f"[优先级按键] 详细错误: {traceback.format_exc()}")
