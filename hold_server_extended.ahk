@@ -224,13 +224,10 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
         case CMD_SET_FORCE_MOVE_KEY:
             ; SET_FORCE_MOVE_KEY - 设置强制移动键
-            ; 参数格式: "key" 例如: "a"
-            if (param != "") {
-                global ForceMoveKey
-                ForceMoveKey := param
-                return 1
-            }
-            return 0
+            ; 参数格式: "key" 例如: "a"，空字符串表示清空配置
+            global ForceMoveKey
+            ForceMoveKey := param  ; 接受任何值，包括空字符串
+            return 1
 
         case CMD_SET_FORCE_MOVE_STATE:
             ; SET_FORCE_MOVE_STATE - 设置强制移动状态
@@ -260,13 +257,14 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
         case CMD_SET_FORCE_MOVE_REPLACEMENT_KEY:
             ; SET_FORCE_MOVE_REPLACEMENT_KEY - 设置强制移动替换键
-            ; 参数格式: "key" 例如: "f"
+            ; 参数格式: "key" 例如: "f"，空字符串使用默认值"f"
+            global ForceMoveReplacementKey
             if (param != "") {
-                global ForceMoveReplacementKey
                 ForceMoveReplacementKey := param
-                return 1
+            } else {
+                ForceMoveReplacementKey := "f"  ; 默认值
             }
-            return 0
+            return 1
     }
 
     ; 未识别的命令

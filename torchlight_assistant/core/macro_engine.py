@@ -681,11 +681,14 @@ class MacroEngine:
             # 洗练管理器配置通过事件系统更新，不需要直接调用
 
             # 设置强制移动键到AHK（仅设置，不注册Hook）
+            # 总是发送，即使是空值，以便清空之前的配置
             stationary_config = global_config.get("stationary_mode_config", {})
-            force_move_key = stationary_config.get("force_move_hotkey")
+            force_move_key = stationary_config.get("force_move_hotkey", "")
+            self.input_handler.set_force_move_key(force_move_key)
             if force_move_key:
-                self.input_handler.set_force_move_key(force_move_key)
                 LOG_INFO(f"[强制移动键] 已设置到AHK: {force_move_key}")
+            else:
+                LOG_INFO("[强制移动键] 已清空AHK配置")
 
             # 设置强制移动替换键到AHK
             force_move_replacement_key = stationary_config.get(

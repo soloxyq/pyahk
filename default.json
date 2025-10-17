@@ -2,14 +2,14 @@
     "skills": {
         "Skill1": {
             "Enabled": true,
-            "Key": "c",
+            "Key": "7",
             "Priority": false,
             "Timer": 200,
             "TriggerMode": 0,
-            "CooldownCoordX": 795,
-            "CooldownCoordY": 995,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
             "CooldownSize": 12,
-            "ExecuteCondition": 0,
+            "ExecuteCondition": 2,
             "ConditionCoordX": 900,
             "ConditionCoordY": 600,
             "ConditionColor": 0,
@@ -17,27 +17,27 @@
         },
         "Skill2": {
             "Enabled": true,
-            "Key": "Lbutton",
+            "Key": "8",
             "Priority": false,
-            "Timer": 75,
-            "TriggerMode": 0,
-            "CooldownCoordX": 857,
-            "CooldownCoordY": 995,
-            "CooldownSize": 12,
+            "Timer": 999,
+            "TriggerMode": 1,
+            "CooldownCoordX": 1000,
+            "CooldownCoordY": 700,
+            "CooldownSize": 15,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 1310,
-            "ConditionCoordY": 992,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
             "ConditionColor": 0,
-            "AltKey": "2"
+            "AltKey": ""
         },
         "Skill3": {
-            "Enabled": true,
-            "Key": "3",
+            "Enabled": false,
+            "Key": "6",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 1,
-            "CooldownCoordX": 919,
-            "CooldownCoordY": 995,
+            "CooldownCoordX": 1100,
+            "CooldownCoordY": 700,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -47,12 +47,12 @@
         },
         "Skill4": {
             "Enabled": false,
-            "Key": "4",
+            "Key": "5",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 1,
-            "CooldownCoordX": 981,
-            "CooldownCoordY": 995,
+            "CooldownCoordX": 1200,
+            "CooldownCoordY": 700,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -61,23 +61,23 @@
             "AltKey": ""
         },
         "Skill5": {
-            "Enabled": true,
-            "Key": "1",
+            "Enabled": false,
+            "Key": "4",
             "Priority": false,
-            "Timer": 200,
+            "Timer": 1000,
             "TriggerMode": 0,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
-            "ExecuteCondition": 1,
-            "ConditionCoordX": 611,
-            "ConditionCoordY": 933,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
             "ConditionColor": 0,
             "AltKey": ""
         },
         "Skill6": {
             "Enabled": false,
-            "Key": "6",
+            "Key": "3",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 0,
@@ -126,25 +126,26 @@
         "debug_mode": {
             "enabled": false
         },
-        "queue_processor_interval": 35,
+        "queue_processor_interval": 50,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
-        "cooldown_checker_interval": 110,
-        "sequence_timer_interval": 1000,
+        "cooldown_checker_interval": 200,
+        "sequence_timer_interval": 75,
         "capture_interval": 60,
         "hp_cooldown": 1000,
-        "mp_cooldown": 2000,
+        "mp_cooldown": 1000,
         "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
-            "ahk_class": "Diablo IV Main Window Class",
-            "ahk_exe": ""
+            "ahk_class": "Notepad++",
+            "ahk_exe": "notepad++.exe"
         },
         "stationary_mode_config": {
-            "hotkey": "xbutton1",
+            "hotkey": "x",
             "mode_type": "shift_modifier",
-            "force_move_hotkey": "x"
+            "force_move_hotkey": "",
+            "force_move_replacement_key": "f"
         },
         "affix_reroll": {
             "enabled": true,
@@ -174,17 +175,11 @@
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "text_ocr",
-                "text_x1": 97,
-                "text_y1": 814,
-                "text_x2": 228,
-                "text_y2": 835,
-                "ocr_engine": "tesseract",
-                "match_threshold": 0.7,
-                "region_x1": 136,
-                "region_y1": 910,
-                "region_x2": 213,
-                "region_y2": 1004,
+                "detection_mode": "rectangle",
+                "region_x1": 258,
+                "region_y1": 118,
+                "region_x2": 273,
+                "region_y2": 167,
                 "colors": [
                     {
                         "name": "Color1",
@@ -210,21 +205,15 @@
                 "enabled": true,
                 "key": "2",
                 "threshold": 50,
-                "cooldown": 2000,
+                "cooldown": 1000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "text_ocr",
-                "text_x1": 1767,
-                "text_y1": 814,
-                "text_x2": 1894,
-                "text_y2": 835,
-                "ocr_engine": "tesseract",
-                "match_threshold": 0.7,
-                "region_x1": 1552,
-                "region_y1": 910,
-                "region_x2": 1560,
-                "region_y2": 1004,
+                "detection_mode": "rectangle",
+                "region_x1": 570,
+                "region_y1": 121,
+                "region_x2": 584,
+                "region_y2": 165,
                 "colors": [
                     {
                         "name": "Color1",
@@ -244,12 +233,16 @@
             "special_keys": [
                 "space"
             ],
-            "managed_keys": {}
+            "managed_keys": {
+                "e": {
+                    "target": "+",
+                    "delay": 50
+                }
+            }
         },
-        "skill_sequence": "1,2,3,4,5,6,7,8",
+        "skill_sequence": "1,2,3,4,5,6,7,8,9",
         "process_history": {
             "recent_processes": [
-                "NutstoreClient.exe",
                 "notepad++.exe"
             ]
         },
