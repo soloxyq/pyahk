@@ -85,7 +85,6 @@ ProcessQueue() {
             return  ; 还在延迟中，不处理任何队列
         } else {
             ; 延迟结束，重置
-            FileAppend("⏰ 延迟结束: DelayUntil=" . DelayUntil . ", A_TickCount=" . A_TickCount . "`n", "ahk_debug.txt")
             DelayUntil := 0
         }
     }
@@ -100,12 +99,6 @@ ProcessQueue() {
 
     ; 暂停时不处理其他队列（包括IsPaused和SpecialKeysPaused）
     if (IsPaused || SpecialKeysPaused) {
-        ; 添加调试日志
-        static lastLogTime := 0
-        if (A_TickCount - lastLogTime > 1000) {  ; 每秒最多记录一次
-            FileAppend("⚠️ 队列被暂停: IsPaused=" . IsPaused . ", SpecialKeysPaused=" . SpecialKeysPaused . "`n", "ahk_debug.txt")
-            lastLogTime := A_TickCount
-        }
         return
     }
 
@@ -323,8 +316,8 @@ ClearQueue(priority) {
 ; 动作执行
 ; ===============================================================================
 ExecuteAction(action) {
-    ; 解析动作类型
-    parts := StrSplit(action, ":", 2)
+    ; 解析动作类型（注意：StrSplit的第4个参数是MaxParts，第3个是OmitChars）
+    parts := StrSplit(action, ":", , 2)
     if parts.Length < 2 {
         SendPress(action) ; 兼容旧的直接发送key的模式
         return
@@ -349,7 +342,6 @@ ExecuteAction(action) {
             ; 🎯 异步延迟：设置延迟结束时间，不阻塞
             global DelayUntil
             DelayUntil := A_TickCount + Integer(actionData)
-            FileAppend("⏰ 设置延迟: DelayUntil=" . DelayUntil . ", delay=" . actionData . "ms`n", "ahk_debug.txt")
         case "notify":
             ; 🎯 发送通知到Python
             SendEventToPython(actionData)
@@ -503,22 +495,6 @@ UnregisterHook(key) {
 ; ===============================================================================
 HandleInterceptKey(key) {
     ; 拦截模式 - 按键按下（简化版本，只处理按下事件）
-    key_upper := StrUpper(key)
-
-    ; 🔍 F8按键特别标记（低频，保留）
-    if (key_upper = "F8") {
-        FileAppend("`n🔴 === F8按键被拦截 ===" . "`n", "ahk_debug.txt")
-        FileAppend("时间: " . A_Now . "`n", "ahk_debug.txt")
-    }
-
-    ; 🔍 Z键特别标记（低频，保留）
-    if (key_upper = "Z") {
-        FileAppend("`n🟡 === Z按键被拦截 ===" . "`n", "ahk_debug.txt")
-        FileAppend("时间: " . A_Now . "`n", "ahk_debug.txt")
-        activeWin := WinGetTitle("A")
-        FileAppend("当前活动窗口: " . activeWin . "`n", "ahk_debug.txt")
-    }
-
     ; 所有拦截按键都完全拦截，只通知Python
     SendEventToPython("intercept_key_down:" key)
 
@@ -568,7 +544,6 @@ HandleManagedKey(key) {
     ; DelayUntil机制会自动阻止其他队列在延迟期间执行
     ; 不需要IsPaused，逻辑更简洁
 
-    FileAppend("`n🔵 管理按键被触发: " . key . "`n", "ahk_debug.txt")
     SendEventToPython("managed_key_down:" key)
 
     ; 将延迟+映射操作放入Emergency队列
@@ -641,35 +616,16 @@ HandleMonitorKeyUp(key) {
 ; 事件发送到Python
 ; ===============================================================================
 SendEventToPython(event) {
-    ; 🔍 F8事件特别标记
-    if (InStr(event, "F8") || InStr(event, "f8")) {
-        FileAppend("🔵 SendEventToPython: " . event . "`n", "ahk_debug.txt")
-    }
-
     ; 优先查找OSD窗口（运行时可见）
     pythonHwnd := WinExist("TorchLightAssistant_OSD_12345")
 
-    if (pythonHwnd) {
-        if (InStr(event, "F8") || InStr(event, "f8")) {
-            FileAppend("找到OSD窗口，句柄: " . pythonHwnd . "`n", "ahk_debug.txt")
-        }
-    } else {
+    if (!pythonHwnd) {
         ; 如果OSD窗口不存在，查找主窗口（停止时可见）
         pythonHwnd := WinExist("TorchLightAssistant_MainWindow_12345")
-        if (pythonHwnd && (InStr(event, "F8") || InStr(event, "f8"))) {
-            FileAppend("找到主窗口，句柄: " . pythonHwnd . "`n", "ahk_debug.txt")
-        }
     }
 
     if (pythonHwnd) {
         SendWMCopyDataToPython(pythonHwnd, event)
-        if (InStr(event, "F8") || InStr(event, "f8")) {
-            FileAppend("✅ 事件已发送到Python`n", "ahk_debug.txt")
-        }
-    } else {
-        if (InStr(event, "F8") || InStr(event, "f8")) {
-            FileAppend("❌ 错误：找不到Python窗口！`n", "ahk_debug.txt")
-        }
     }
 }
 
