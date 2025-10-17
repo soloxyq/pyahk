@@ -201,6 +201,13 @@ class GameSkillConfigUI(QMainWindow):
             except Exception as e:
                 LOG_ERROR(f"[UI] 隐藏OSD失败: {e}")
             
+            # 🎯 通知AHK切换到主窗口
+            try:
+                self.macro_engine.input_handler.set_python_window_state("main")
+                LOG_INFO("[UI] 已通知AHK切换到主窗口")
+            except Exception as e:
+                LOG_ERROR(f"[UI] 通知AHK切换窗口失败: {e}")
+            
             if not self.isVisible():
                 try:
                     self._show_main_window()
@@ -215,6 +222,13 @@ class GameSkillConfigUI(QMainWindow):
                 LOG_INFO("[UI] OSD.show()已调用")
             except Exception as e:
                 LOG_ERROR(f"[UI] 显示OSD失败: {e}")
+            
+            # 🎯 通知AHK切换到OSD窗口  
+            try:
+                self.macro_engine.input_handler.set_python_window_state("osd")
+                LOG_INFO("[UI] 已通知AHK切换到OSD窗口")
+            except Exception as e:
+                LOG_ERROR(f"[UI] 通知AHK切换窗口失败: {e}")
             
             if self.isVisible():
                 try:

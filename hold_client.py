@@ -73,6 +73,11 @@ def send_ahk_cmd(window_title: str, cmd_id: int, param: str = "") -> bool:
 
     # 发送消息
     res = SendMessageW(hwnd, WM_COPYDATA, 0, ctypes.addressof(cds))
+    
+    # 🎯 发送失败时清除缓存
+    if res != 1:
+        _ahk_hwnd = 0  # 清除无效缓存
+        
     return res == 1  # AHK返回1表示成功
 
 

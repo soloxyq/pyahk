@@ -52,6 +52,10 @@ global ForceMoveReplacementKey := "f"  ; 强制移动时的替换键，由Python
 ; 🎯 异步延迟机制
 global DelayUntil := 0  ; 延迟到什么时间（毫秒），0表示没有延迟
 
+; 🎯 基于F8状态的智能窗口句柄缓存
+global CurrentPythonWindow := "TorchLightAssistant_MainWindow_12345"  ; 启动时默认主窗口
+global CachedPythonHwnd := 0  ; 缓存的Python窗口句柄
+
 ; 统计信息
 global QueueStats := Map(
     "emergency", 0,
@@ -264,6 +268,19 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             } else {
                 ForceMoveReplacementKey := "f"  ; 默认值
             }
+            return 1
+            
+        case CMD_SET_PYTHON_WINDOW_STATE:
+            ; SET_PYTHON_WINDOW_STATE - 设置Python窗口状态
+            ; 参数格式: "main" 或 "osd"
+            global CurrentPythonWindow, CachedPythonHwnd
+            if (param = "main") {
+                CurrentPythonWindow := "TorchLightAssistant_MainWindow_12345"
+            } else if (param = "osd") {
+                CurrentPythonWindow := "TorchLightAssistant_OSD_12345"
+            }
+            ; 清除缓存，强制重新获取新窗口句柄
+            CachedPythonHwnd := 0
             return 1
     }
 
@@ -493,8 +510,11 @@ UnregisterHook(key) {
 ; ===============================================================================
 HandleInterceptKey(key) {
     ; 拦截模式 - 按键按下（简化版本，只处理按下事件）
+    
     ; 所有拦截按键都完全拦截，只通知Python
     SendEventToPython("intercept_key_down:" key)
+    
+    ; 🎯 F8不再在AHK端主动切换，由Python完成UI切换后主动通知AHK
 
     ; 不发送到目标应用程序（完全拦截）
 }
@@ -614,16 +634,27 @@ HandleMonitorKeyUp(key) {
 ; 事件发送到Python
 ; ===============================================================================
 SendEventToPython(event) {
-    ; 优先查找OSD窗口（运行时可见）
-    pythonHwnd := WinExist("TorchLightAssistant_OSD_12345")
-
-    if (!pythonHwnd) {
-        ; 如果OSD窗口不存在，查找主窗口（停止时可见）
-        pythonHwnd := WinExist("TorchLightAssistant_MainWindow_12345")
+    global CurrentPythonWindow, CachedPythonHwnd
+    
+    ; 🎯 使用缓存的窗口句柄
+    if (CachedPythonHwnd != 0) {
+        ; 直接使用缓存的句柄
+        if (SendWMCopyDataToPython(CachedPythonHwnd, event)) {
+            return  ; 发送成功，直接返回
+        }
+        ; 发送失败，清除缓存
+        CachedPythonHwnd := 0
     }
-
-    if (pythonHwnd) {
-        SendWMCopyDataToPython(pythonHwnd, event)
+    
+    ; 🎯 缓存失效或首次调用：根据F8状态查找正确的窗口
+    CachedPythonHwnd := WinExist(CurrentPythonWindow)
+    
+    ; 最后尝试发送
+    if (CachedPythonHwnd) {
+        ; 🎯 如果最后一次发送也失败，清除缓存
+        if (!SendWMCopyDataToPython(CachedPythonHwnd, event)) {
+            CachedPythonHwnd := 0
+        }
     }
 }
 
@@ -641,14 +672,18 @@ SendWMCopyDataToPython(hwnd, eventData) {
         NumPut("Ptr", eventBytes.Ptr, cds, A_PtrSize * 2)  ; lpData = 数据指针
 
         ; 发送WM_COPYDATA消息
-        DllCall("user32.dll\SendMessageW",
+        result := DllCall("user32.dll\SendMessageW",
             "Ptr", hwnd,      ; 目标窗口句柄
             "UInt", 0x004A,   ; WM_COPYDATA
             "Ptr", 0,         ; wParam
             "Ptr", cds.Ptr)   ; lParam
+            
+        ; 🎯 返回成功状态
+        return (result != 0)
 
     } catch as err {
-        ; 发送失败，静默忽略
+        ; 发送失败，返回失败
+        return false
     }
 }
 

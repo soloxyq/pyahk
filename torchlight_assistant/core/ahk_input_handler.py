@@ -301,6 +301,14 @@ class AHKInputHandler:
         """清空所有可配置的Hook（保留F8根热键）"""
         return self.command_sender.clear_all_configurable_hooks()
     
+    def set_python_window_state(self, state: str) -> bool:
+        """设置Python窗口状态
+        
+        Args:
+            state: "main" 或 "osd"
+        """
+        return self.command_sender.set_python_window_state(state)
+    
     def start(self):
         pass
     

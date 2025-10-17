@@ -84,6 +84,15 @@ class AHKCommandSender:
         """清空所有可配置的Hook（保留F8根热键）"""
         from torchlight_assistant.config.ahk_commands import CMD_CLEAR_HOOKS
         return send_ahk_cmd(self.window_title, CMD_CLEAR_HOOKS, "")
+    
+    def set_python_window_state(self, state: str) -> bool:
+        """设置Python窗口状态
+        
+        Args:
+            state: "main" 或 "osd"
+        """
+        from torchlight_assistant.config.ahk_commands import CMD_SET_PYTHON_WINDOW_STATE
+        return send_ahk_cmd(self.window_title, CMD_SET_PYTHON_WINDOW_STATE, state)
         
     def is_stationary_mode_active(self) -> bool:
         """检查原地模式是否激活"""
