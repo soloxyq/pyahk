@@ -41,7 +41,7 @@ from .ui_components import (
     PriorityKeysWidget,
 )
 from ..utils.sound_manager import SoundManager
-from ..utils.debug_log import LOG_INFO, LOG_ERROR
+from ..utils.debug_log import LOG, LOG_INFO, LOG_ERROR
 
 
 class GameSkillConfigUI(QMainWindow):
@@ -599,7 +599,7 @@ class GameSkillConfigUI(QMainWindow):
                 # 处理AHK事件
                 self._process_ahk_event(event_data)
                 
-                LOG_INFO(f"[WM_COPYDATA] 收到AHK事件: {event_data}")
+                LOG(f"[WM_COPYDATA] 收到AHK事件: {event_data}")
                 
         except Exception as e:
             LOG_ERROR(f"[WM_COPYDATA] 解析消息失败: {e}")

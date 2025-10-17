@@ -86,7 +86,7 @@ class SkillManager:
             # 暂停统一调度器，但不改变 _is_paused 状态（这是临时性能优化暂停）
             if self.unified_scheduler.get_status()["running"]:
                 self.unified_scheduler.pause()
-                LOG_INFO(f"[性能优化] 调度器已暂停 - {reason}, 激活按键: {active_keys}")
+                LOG(f"[性能优化] 调度器已暂停 - {reason}, 激活按键: {active_keys}")
             
         except Exception as e:
             LOG_ERROR(f"[性能优化] 暂停调度器异常: {e}")
@@ -99,7 +99,7 @@ class SkillManager:
             # 只有在 SkillManager 正在运行且未被用户手动暂停时才恢复
             if self._is_running and not self._is_paused:
                 self.unified_scheduler.resume()
-                LOG_INFO(f"[性能优化] 调度器已恢复 - {reason}")
+                LOG(f"[性能优化] 调度器已恢复 - {reason}")
             
         except Exception as e:
             LOG_ERROR(f"[性能优化] 恢复调度器异常: {e}")

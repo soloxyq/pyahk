@@ -37,6 +37,9 @@ global SpecialKeysPaused := false   ; 特殊按键是否导致系统暂停
 global ManagedKeysConfig := Map()   ; 存储管理按键的延迟和映射配置
 global TargetWin := "" ; 目标窗口标识符
 
+; 🎯 监控按键状态跟踪（避免重复发送事件）
+global MonitorKeysState := Map()   ; 跟踪monitor按键的按下状态
+
 ; 原地模式状态
 global StationaryModeActive := false
 global StationaryModeType := "shift_modifier"
@@ -119,9 +122,6 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         param := StrGet(dataPtr, dataSize, "UTF-8")
     }
 
-    ; 调试日志（可选）
-    ; FileAppend("收到命令ID: " . cmdId . ", 参数: '" . param . "'`n", "ahk_debug.txt")
-
     ; 处理命令
     switch cmdId {
         case CMD_PING:
@@ -133,7 +133,6 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             global TargetWin
             if (param != "") {
                 TargetWin := param
-                ; FileAppend("目标窗口已设置: '" . TargetWin . "'`n", "ahk_debug.txt")
             }
             return 1
 
@@ -141,19 +140,14 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; ACTIVATE - 激活目标窗口
             global TargetWin
 
-            ; FileAppend("激活命令收到，TargetWin='" . TargetWin . "'`n", "ahk_debug.txt")
-
             if (TargetWin != "") {
                 if WinExist(TargetWin) {
                     WinActivate(TargetWin)
-                    ; FileAppend("窗口已激活`n", "ahk_debug.txt")
                     return 1
                 } else {
-                    ; FileAppend("窗口不存在`n", "ahk_debug.txt")
                     return 0
                 }
             } else {
-                ; FileAppend("TargetWin为空`n", "ahk_debug.txt")
                 return 0
             }
 
@@ -208,8 +202,6 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 global StationaryModeActive, StationaryModeType
                 StationaryModeActive := (parts[1] = "true")
                 StationaryModeType := parts[2]
-                ; FileAppend("原地模式已设置: active=" . StationaryModeActive . ", type=" . StationaryModeType . "`n",
-                ;     "ahk_debug.txt")
                 return 1
             }
             return 0
@@ -220,7 +212,6 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             if (param != "") {
                 global ForceMoveKey
                 ForceMoveKey := param
-                ; FileAppend("强制移动键已设置: " . ForceMoveKey . "`n", "ahk_debug.txt")
                 return 1
             }
             return 0
@@ -230,7 +221,6 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 参数格式: "true" 或 "false"
             global ForceMoveActive
             ForceMoveActive := (param = "true")
-            ; FileAppend("强制移动状态已设置: " . ForceMoveActive . "`n", "ahk_debug.txt")
             return 1
 
         case CMD_SET_MANAGED_KEY_CONFIG:
@@ -243,7 +233,6 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 target := parts[2]
                 delay := Integer(parts[3])
                 ManagedKeysConfig[key] := { target: target, delay: delay }
-                ; FileAppend("管理按键配置已设置: " . key . " -> " . target . " (延迟: " . delay . "ms)`n", "ahk_debug.txt")
                 return 1
             }
             return 0
@@ -488,26 +477,22 @@ HandleInterceptKey(key) {
     ; 拦截模式 - 按键按下（简化版本，只处理按下事件）
     key_upper := StrUpper(key)
 
-    ; 🔍 F8按键特别标记
+    ; 🔍 F8按键特别标记（低频，保留）
     if (key_upper = "F8") {
         FileAppend("`n🔴 === F8按键被拦截 ===" . "`n", "ahk_debug.txt")
         FileAppend("时间: " . A_Now . "`n", "ahk_debug.txt")
     }
 
-    ; 🔍 Z键特别标记
+    ; 🔍 Z键特别标记（低频，保留）
     if (key_upper = "Z") {
         FileAppend("`n🟡 === Z按键被拦截 ===" . "`n", "ahk_debug.txt")
         FileAppend("时间: " . A_Now . "`n", "ahk_debug.txt")
-        ; 获取当前活动窗口
         activeWin := WinGetTitle("A")
         FileAppend("当前活动窗口: " . activeWin . "`n", "ahk_debug.txt")
     }
 
-    FileAppend("HandleInterceptKey被调用: " . key . "`n", "ahk_debug.txt")
-
     ; 所有拦截按键都完全拦截，只通知Python
     SendEventToPython("intercept_key_down:" key)
-    FileAppend("已发送事件到Python: intercept_key_down:" . key . "`n", "ahk_debug.txt")
 
     ; 不发送到目标应用程序（完全拦截）
 }
@@ -589,13 +574,39 @@ RestoreManagedKey(key) {
 
 HandleMonitorKey(key) {
     ; 监控模式 - 按键按下 (不拦截)
-    ; FileAppend("HandleMonitorKey被调用: " . key . "`n", "ahk_debug.txt")
+    ; 🎯 性能优化：只在状态变化时发送事件
+    global MonitorKeysState
+    
+    key_upper := StrUpper(key)
+    
+    ; 如果按键已经是按下状态，不重复发送
+    if (MonitorKeysState.Has(key_upper) && MonitorKeysState[key_upper] = true) {
+        return
+    }
+    
+    ; 标记为按下状态
+    MonitorKeysState[key_upper] := true
+    
+    ; 发送按下事件
     SendEventToPython("monitor_key_down:" key)
 }
 
 HandleMonitorKeyUp(key) {
     ; 监控模式 - 按键释放 (不拦截)
-    ; FileAppend("HandleMonitorKeyUp被调用: " . key . "`n", "ahk_debug.txt")
+    ; 🎯 性能优化：只在状态变化时发送事件
+    global MonitorKeysState
+    
+    key_upper := StrUpper(key)
+    
+    ; 如果按键已经是释放状态，不重复发送
+    if (!MonitorKeysState.Has(key_upper) || MonitorKeysState[key_upper] = false) {
+        return
+    }
+    
+    ; 标记为释放状态
+    MonitorKeysState[key_upper] := false
+    
+    ; 发送释放事件
     SendEventToPython("monitor_key_up:" key)
 }
 

@@ -4,7 +4,7 @@ from PySide6.QtGui import QFont
 from typing import Optional
 import ctypes
 from ctypes import wintypes
-from ..utils.debug_log import LOG_INFO, LOG_ERROR
+from ..utils.debug_log import LOG, LOG_ERROR
 
 # Windows API常量
 WM_COPYDATA = 0x004A
@@ -67,7 +67,7 @@ class OSDStatusWindow(QWidget):
 
                 # 只处理WM_COPYDATA消息
                 if msg.message == WM_COPYDATA:
-                    LOG_INFO(f"[OSD WM_COPYDATA] 检测到WM_COPYDATA消息")
+                    LOG(f"[OSD WM_COPYDATA] 检测到WM_COPYDATA消息")
                     # 处理WM_COPYDATA消息
                     self._handle_wm_copydata(msg.wParam, msg.lParam)
                     return True, 0
@@ -80,7 +80,7 @@ class OSDStatusWindow(QWidget):
     def _handle_wm_copydata(self, wParam, lParam):
         """处理WM_COPYDATA消息内容"""
         try:
-            LOG_INFO(f"[OSD WM_COPYDATA] 开始处理消息，wParam: {wParam}, lParam: {lParam}")
+            LOG(f"[OSD WM_COPYDATA] 开始处理消息，wParam: {wParam}, lParam: {lParam}")
 
             # 定义COPYDATASTRUCT结构
             class COPYDATASTRUCT(ctypes.Structure):
@@ -93,21 +93,21 @@ class OSDStatusWindow(QWidget):
             # 从lParam解析COPYDATASTRUCT
             cds = COPYDATASTRUCT.from_address(lParam)
 
-            LOG_INFO(f"[OSD WM_COPYDATA] 解析结构：dwData={cds.dwData}, cbData={cds.cbData}, lpData={cds.lpData}")
+            LOG(f"[OSD WM_COPYDATA] 解析结构：dwData={cds.dwData}, cbData={cds.cbData}, lpData={cds.lpData}")
 
             # 检查是否是AHK事件消息（使用9999作为标识）
             if cds.dwData == 9999 and cds.cbData > 0:
                 # 读取事件数据
                 event_data = ctypes.string_at(cds.lpData, cds.cbData).decode('utf-8')
 
-                LOG_INFO(f"[OSD WM_COPYDATA] 成功解码事件数据: {event_data}")
+                LOG(f"[OSD WM_COPYDATA] 成功解码事件数据: {event_data}")
 
                 # 处理AHK事件
                 self._process_ahk_event(event_data)
 
-                LOG_INFO(f"[OSD WM_COPYDATA] 收到AHK事件: {event_data}")
+                LOG(f"[OSD WM_COPYDATA] 收到AHK事件: {event_data}")
             else:
-                LOG_INFO(f"[OSD WM_COPYDATA] 不是AHK事件消息，dwData={cds.dwData}, cbData={cds.cbData}")
+                LOG(f"[OSD WM_COPYDATA] 不是AHK事件消息，dwData={cds.dwData}, cbData={cds.cbData}")
 
         except Exception as e:
             LOG_ERROR(f"[OSD WM_COPYDATA] 解析消息失败: {e}")

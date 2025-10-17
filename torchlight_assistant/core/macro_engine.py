@@ -11,7 +11,7 @@ from .states import MacroState
 from ..utils.border_frame_manager import BorderFrameManager
 from ..utils.sound_manager import SoundManager
 from .pathfinding_manager import PathfindingManager
-from ..utils.debug_log import LOG_ERROR, LOG_INFO
+from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 
 
 class MacroEngine:
@@ -293,12 +293,12 @@ class MacroEngine:
 
     def _handle_ahk_special_key_down(self, key: str):
         """处理特殊按键按下（如space）- 不拦截，持续状态检测"""
-        LOG_INFO(f"[特殊按键] 按下: {key}")
+        LOG(f"[特殊按键] 按下: {key}")
         # 特殊按键按下不立即暂停，等待special_key_pause事件
 
     def _handle_ahk_special_key_up(self, key: str):
         """处理特殊按键释放（如space）"""
-        LOG_INFO(f"[特殊按键] 释放: {key}")
+        LOG(f"[特殊按键] 释放: {key}")
         # 特殊按键释放不立即恢复，等待special_key_pause事件
 
     def _handle_ahk_special_key_pause(self, action: str):
@@ -318,7 +318,7 @@ class MacroEngine:
 
     def _handle_ahk_managed_key_down(self, key: str):
         """处理管理按键按下（如RButton/e）- 拦截+延迟+映射"""
-        LOG_INFO(f"[管理按键] 按下: {key}")
+        LOG(f"[管理按键] 按下: {key}")
 
         # 管理按键立即暂停调度器
         event_bus.publish(
@@ -332,7 +332,7 @@ class MacroEngine:
 
     def _handle_ahk_managed_key_up(self, key: str):
         """处理管理按键释放"""
-        LOG_INFO(f"[管理按键] 释放: {key}")
+        LOG(f"[管理按键] 释放: {key}")
 
         # 管理按键释放后恢复调度器
         event_bus.publish(
