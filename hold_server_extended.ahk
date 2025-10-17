@@ -42,12 +42,12 @@ global MonitorKeysState := Map()   ; 跟踪monitor按键的按下状态
 
 ; 原地模式状态
 global StationaryModeActive := false
-global StationaryModeType := "shift_modifier"
+global StationaryModeType := ""  ; 由Python设置，默认为空（未启用）
 
 ; 强制移动键
 global ForceMoveKey := ""  ; 由Python设置，默认为空（未启用）
 global ForceMoveActive := false  ; 强制移动键是否处于按下状态
-global ForceMoveReplacementKey := "f"  ; 强制移动时的替换键，由Python设置
+global ForceMoveReplacementKey := ""  ; 强制移动时的替换键，由Python设置，默认为空
 
 ; 🎯 异步延迟机制
 global DelayUntil := 0  ; 延迟到什么时间（毫秒），0表示没有延迟

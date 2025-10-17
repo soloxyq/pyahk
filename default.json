@@ -144,8 +144,8 @@
         "stationary_mode_config": {
             "hotkey": "x",
             "mode_type": "shift_modifier",
-            "force_move_hotkey": "",
-            "force_move_replacement_key": "f"
+            "force_move_hotkey": "a",
+            "force_move_replacement_key": "v"
         },
         "affix_reroll": {
             "enabled": true,

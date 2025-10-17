@@ -690,14 +690,17 @@ class MacroEngine:
             else:
                 LOG_INFO("[强制移动键] 已清空AHK配置")
 
-            # 设置强制移动替换键到AHK
-            force_move_replacement_key = stationary_config.get(
-                "force_move_replacement_key", "f"
-            )
-            self.input_handler.set_force_move_replacement_key(
-                force_move_replacement_key
-            )
-            LOG_INFO(f"[强制移动替换键] 已设置到AHK: {force_move_replacement_key}")
+            # 设置强制移动替换键到AHK（只有用户配置了才发送）
+            if "force_move_replacement_key" in stationary_config:
+                force_move_replacement_key = stationary_config["force_move_replacement_key"]
+                self.input_handler.set_force_move_replacement_key(
+                    force_move_replacement_key
+                )
+                LOG_INFO(f"[强制移动替换键] 已设置到AHK: {force_move_replacement_key}")
+            else:
+                # 用户未配置，发送空字符串清空AHK配置
+                self.input_handler.set_force_move_replacement_key("")
+                LOG_INFO("[强制移动替换键] 用户未配置，已清空AHK配置")
 
             # 注意：热键管理现在由状态机驱动，不在这里处理
 
