@@ -132,7 +132,6 @@ class MacroEngine:
 
             # 管理按键事件（如RButton/e）- 拦截+延迟+映射
             event_bus.subscribe("managed_key_down", self._handle_ahk_managed_key_down)
-            event_bus.subscribe("managed_key_up", self._handle_ahk_managed_key_up)
 
             # 兼容旧的优先级事件（逐步迁移）
             event_bus.subscribe("priority_key_down", self._handle_ahk_priority_key_down)
@@ -319,26 +318,7 @@ class MacroEngine:
     def _handle_ahk_managed_key_down(self, key: str):
         """处理管理按键按下（如RButton/e）- 拦截+延迟+映射"""
         LOG(f"[管理按键] 按下: {key}")
-
-        # 管理按键立即暂停调度器
-        event_bus.publish(
-            "scheduler_pause_requested",
-            {
-                "reason": f"managed_key_down:{key}",
-                "type": "managed_key_pause",
-                "active_keys": [key],
-            },
-        )
-
-    def _handle_ahk_managed_key_up(self, key: str):
-        """处理管理按键释放"""
-        LOG(f"[管理按键] 释放: {key}")
-
-        # 管理按键释放后恢复调度器
-        event_bus.publish(
-            "scheduler_resume_requested",
-            {"reason": f"managed_key_up:{key}", "type": "managed_key_resume"},
-        )
+        # 不需要暂停Python调度器，AHK层的DelayUntil机制已经足够
 
     def _handle_ahk_priority_key_down(self, key: str):
         """处理AHK优先级按键按下（兼容旧版本）"""
@@ -496,7 +476,7 @@ class MacroEngine:
             self.border_manager.stop()
             # 注意：不调用 input_handler.cleanup()，保持AHK进程和F8热键运行
             self._prepared_mode = "none"
-            
+
             LOG_INFO("[状态转换] STOPPED状态处理完成，等待F8重新启动")
 
         event_bus.publish(f"engine:macro_{state.name.lower()}")
@@ -706,10 +686,14 @@ class MacroEngine:
             if force_move_key:
                 self.input_handler.set_force_move_key(force_move_key)
                 LOG_INFO(f"[强制移动键] 已设置到AHK: {force_move_key}")
-            
+
             # 设置强制移动替换键到AHK
-            force_move_replacement_key = stationary_config.get("force_move_replacement_key", "f")
-            self.input_handler.set_force_move_replacement_key(force_move_replacement_key)
+            force_move_replacement_key = stationary_config.get(
+                "force_move_replacement_key", "f"
+            )
+            self.input_handler.set_force_move_replacement_key(
+                force_move_replacement_key
+            )
             LOG_INFO(f"[强制移动替换键] 已设置到AHK: {force_move_replacement_key}")
 
             # 注意：热键管理现在由状态机驱动，不在这里处理

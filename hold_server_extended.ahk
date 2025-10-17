@@ -49,6 +49,9 @@ global ForceMoveKey := ""  ; 由Python设置，默认为空（未启用）
 global ForceMoveActive := false  ; 强制移动键是否处于按下状态
 global ForceMoveReplacementKey := "f"  ; 强制移动时的替换键，由Python设置
 
+; 🎯 异步延迟机制
+global DelayUntil := 0  ; 延迟到什么时间（毫秒），0表示没有延迟
+
 ; 统计信息
 global QueueStats := Map(
     "emergency", 0,
@@ -74,6 +77,19 @@ OnMessage(0x4A, WM_COPYDATA)
 ; 队列处理器 (10ms定时器)
 ; ===============================================================================
 ProcessQueue() {
+    global DelayUntil
+
+    ; 🎯 检查是否在异步延迟中
+    if (DelayUntil > 0) {
+        if (A_TickCount < DelayUntil) {
+            return  ; 还在延迟中，不处理任何队列
+        } else {
+            ; 延迟结束，重置
+            FileAppend("⏰ 延迟结束: DelayUntil=" . DelayUntil . ", A_TickCount=" . A_TickCount . "`n", "ahk_debug.txt")
+            DelayUntil := 0
+        }
+    }
+
     ; 紧急队列永远执行
     if (EmergencyQueue.Length > 0) {
         action := EmergencyQueue.RemoveAt(1)
@@ -82,8 +98,14 @@ ProcessQueue() {
         return
     }
 
-    ; 暂停时不处理其他队列
-    if (IsPaused) {
+    ; 暂停时不处理其他队列（包括IsPaused和SpecialKeysPaused）
+    if (IsPaused || SpecialKeysPaused) {
+        ; 添加调试日志
+        static lastLogTime := 0
+        if (A_TickCount - lastLogTime > 1000) {  ; 每秒最多记录一次
+            FileAppend("⚠️ 队列被暂停: IsPaused=" . IsPaused . ", SpecialKeysPaused=" . SpecialKeysPaused . "`n", "ahk_debug.txt")
+            lastLogTime := A_TickCount
+        }
         return
     }
 
@@ -324,7 +346,13 @@ ExecuteAction(action) {
         case "mouse_click":
             ExecuteMouseClick(actionData)
         case "delay":
-            Sleep Integer(actionData)
+            ; 🎯 异步延迟：设置延迟结束时间，不阻塞
+            global DelayUntil
+            DelayUntil := A_TickCount + Integer(actionData)
+            FileAppend("⏰ 设置延迟: DelayUntil=" . DelayUntil . ", delay=" . actionData . "ms`n", "ahk_debug.txt")
+        case "notify":
+            ; 🎯 发送通知到Python
+            SendEventToPython(actionData)
     }
 }
 
@@ -443,7 +471,7 @@ RegisterHook(key, mode) {
 
 UnregisterHook(key) {
     ; 简化版本：直接取消，不需要重复注销
-    
+
     ; 检查是否在记录中
     if (!RegisteredHooks.Has(key)) {
         return
@@ -534,35 +562,32 @@ HandleSpecialKeyUp(key) {
 
 ; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射
 HandleManagedKey(key) {
-    global ManagedKeysConfig, IsPaused
+    global ManagedKeysConfig, EmergencyQueue
 
-    ; 🎯 优先响应：立即暂停队列 → 延迟 → 发送按键 → 立即恢复队列
-    
-    ; 1. 立即暂停队列（确保优先响应）
-    IsPaused := true
+    ; 🎯 异步优化：将延迟+映射操作放入Emergency队列
+    ; DelayUntil机制会自动阻止其他队列在延迟期间执行
+    ; 不需要IsPaused，逻辑更简洁
+
+    FileAppend("`n🔵 管理按键被触发: " . key . "`n", "ahk_debug.txt")
     SendEventToPython("managed_key_down:" key)
 
-    ; 2. 根据配置进行延迟+映射
+    ; 将延迟+映射操作放入Emergency队列
     if (ManagedKeysConfig.Has(key)) {
         config := ManagedKeysConfig[key]
         target := config.target
         delay := config.delay
 
-        ; 延迟
+        ; 放入Emergency队列（会立即执行）
         if (delay > 0) {
-            Sleep(delay)
+            EmergencyQueue.Push("delay:" delay)
         }
-
-        ; 发送映射后的按键
-        Send "{" target "}"
+        EmergencyQueue.Push("press:" target)
     } else {
         ; 如果没有配置，使用原按键
-        Send "{" key "}"
+        EmergencyQueue.Push("press:" key)
     }
 
-    ; 3. 立即恢复队列
-    IsPaused := false
-    SendEventToPython("managed_key_up:" key)
+    ; 注意：DelayUntil结束后队列会自动恢复
 }
 
 RestoreManagedKey(key) {
@@ -576,17 +601,17 @@ HandleMonitorKey(key) {
     ; 监控模式 - 按键按下 (不拦截)
     ; 🎯 性能优化：只在状态变化时发送事件
     global MonitorKeysState
-    
+
     key_upper := StrUpper(key)
-    
+
     ; 如果按键已经是按下状态，不重复发送
     if (MonitorKeysState.Has(key_upper) && MonitorKeysState[key_upper] = true) {
         return
     }
-    
+
     ; 标记为按下状态
     MonitorKeysState[key_upper] := true
-    
+
     ; 发送按下事件
     SendEventToPython("monitor_key_down:" key)
 }
@@ -595,17 +620,17 @@ HandleMonitorKeyUp(key) {
     ; 监控模式 - 按键释放 (不拦截)
     ; 🎯 性能优化：只在状态变化时发送事件
     global MonitorKeysState
-    
+
     key_upper := StrUpper(key)
-    
+
     ; 如果按键已经是释放状态，不重复发送
     if (!MonitorKeysState.Has(key_upper) || MonitorKeysState[key_upper] = false) {
         return
     }
-    
+
     ; 标记为释放状态
     MonitorKeysState[key_upper] := false
-    
+
     ; 发送释放事件
     SendEventToPython("monitor_key_up:" key)
 }
