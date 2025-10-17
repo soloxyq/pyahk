@@ -416,72 +416,46 @@ ExecuteMouseClick(data) {
 ; Hook管理
 ; ===============================================================================
 RegisterHook(key, mode) {
-    FileAppend("=== RegisterHook被调用 ===" . "`n", "ahk_debug.txt")
-    FileAppend("按键: " . key . " 模式: " . mode . "`n", "ahk_debug.txt")
-    
-    ; 检查是否已注册
-    if (RegisteredHooks.Has(key)) {
-        existing_mode := RegisteredHooks[key]
-        FileAppend("Hook已存在，旧模式: " . existing_mode . "`n", "ahk_debug.txt")
-        if (existing_mode = mode) {
-            FileAppend("Hook已存在且模式相同，跳过注册: " . key . " (" . mode . ")`n", "ahk_debug.txt")
-            return
-        } else {
-            FileAppend("Hook已存在但模式不同，先取消旧Hook: " . key . " 旧模式:" . existing_mode . " 新模式:" . mode . "`n", "ahk_debug.txt")
-            UnregisterHook(key)
-        }
-    } else {
-        FileAppend("Hook不存在，准备新注册: " . key . " (" . mode . ")`n", "ahk_debug.txt")
+    ; 简化版本：直接注册，不检查是否已存在
+    ; F8不加入记录（由Python端单独管理）
+    ; 🔧 关键修复：使用"On"选项确保热键被启用（即使之前被禁用过）
+
+    key_upper := StrUpper(key)
+
+    ; 记录Hook（F8除外）
+    if (key_upper != "F8") {
+        RegisteredHooks[key] := mode
     }
 
-    ; 记录Hook
-    RegisteredHooks[key] := mode
-
-    ; 调试信息（可选）
-    ; FileAppend("开始注册Hook: " . key . " 模式: " . mode . "`n", "ahk_debug.txt")
-
-    ; 根据模式注册Hotkey（直接使用AHK按键名称）
+    ; 根据模式注册Hotkey（使用"On"选项）
     try {
         switch mode {
             case "intercept":
-                ; 拦截模式 - 使用$前缀避免自拦截，只监听按下事件
-                Hotkey("$" key, (*) => HandleInterceptKey(key))
-                ; FileAppend("成功注册拦截Hook: $" . key . " (仅按下)`n", "ahk_debug.txt")
+                Hotkey("$" key, (*) => HandleInterceptKey(key), "On")
 
             case "priority":
-                ; 优先级模式 - 发送priority_key事件，只监听按下事件（管理按键：拦截+延迟+映射）
-                FileAppend("准备注册priority热键: $" . key . "`n", "ahk_debug.txt")
-                try {
-                    Hotkey("$" key, (*) => HandleManagedKey(key))
-                    FileAppend("成功注册管理按键Hook: $" . key . " (拦截+延迟+映射)`n", "ahk_debug.txt")
-                } catch as err {
-                    FileAppend("注册管理按键Hook失败: $" . key . " 错误: " . err.message . "`n", "ahk_debug.txt")
-                }
+                Hotkey("$" key, (*) => HandleManagedKey(key), "On")
 
             case "special":
-                ; 特殊按键模式 - 不拦截，持续状态检测（如space）
-                Hotkey("~" key, (*) => HandleSpecialKeyDown(key))
-                Hotkey("~" key " up", (*) => HandleSpecialKeyUp(key))
-                ; FileAppend("成功注册特殊按键Hook: ~" . key . " (持续状态检测)`n", "ahk_debug.txt")
+                Hotkey("~" key, (*) => HandleSpecialKeyDown(key), "On")
+                Hotkey("~" key " up", (*) => HandleSpecialKeyUp(key), "On")
 
             case "monitor":
-                ; 监控模式 - 使用~前缀不拦截，监听按下和释放事件
-                Hotkey("~" key, (*) => HandleMonitorKey(key))
-                Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key))
-                ; FileAppend("成功注册监控Hook: ~" . key . " (按下+释放)`n", "ahk_debug.txt")
+                Hotkey("~" key, (*) => HandleMonitorKey(key), "On")
+                Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key), "On")
 
             case "block":
-                ; 阻止模式 - 完全阻止按键
-                Hotkey("$" key, (*) => {})
-                ; FileAppend("成功注册阻止Hook: $" . key . " (完全阻止)`n", "ahk_debug.txt")
+                Hotkey("$" key, (*) => {}, "On")
         }
     } catch as err {
-        ; FileAppend("Hook注册失败: " . key . " 错误: " . err.message . "`n", "ahk_debug.txt")
+        ; 注册失败，静默处理
     }
 }
 
 UnregisterHook(key) {
-    ; 检查是否已注册
+    ; 简化版本：直接取消，不需要重复注销
+    
+    ; 检查是否在记录中
     if (!RegisteredHooks.Has(key)) {
         return
     }
@@ -489,17 +463,18 @@ UnregisterHook(key) {
     ; 获取模式
     mode := RegisteredHooks[key]
 
-    ; 取消Hotkey（直接使用AHK按键名称）
-    switch mode {
-        case "intercept":
-            Hotkey("$" key, "Off")
-        case "priority":
-            Hotkey("$" key, "Off")
-        case "monitor":
-            Hotkey("~" key, "Off")
-            Hotkey("~" key " up", "Off")
-        case "block":
-            Hotkey("$" key, "Off")
+    ; 取消Hotkey
+    try {
+        switch mode {
+            case "intercept", "priority", "block":
+                Hotkey("$" key, "Off")
+
+            case "monitor", "special":
+                Hotkey("~" key, "Off")
+                Hotkey("~" key " up", "Off")
+        }
+    } catch {
+        ; 取消失败，静默处理
     }
 
     ; 删除记录
@@ -511,14 +486,28 @@ UnregisterHook(key) {
 ; ===============================================================================
 HandleInterceptKey(key) {
     ; 拦截模式 - 按键按下（简化版本，只处理按下事件）
-    key_lower := StrLower(key)
+    key_upper := StrUpper(key)
 
-    ; 调试信息（可选）
-    ; FileAppend("HandleInterceptKey被调用: " . key . " (小写: " . key_lower . ")`n", "ahk_debug.txt")
+    ; 🔍 F8按键特别标记
+    if (key_upper = "F8") {
+        FileAppend("`n🔴 === F8按键被拦截 ===" . "`n", "ahk_debug.txt")
+        FileAppend("时间: " . A_Now . "`n", "ahk_debug.txt")
+    }
+
+    ; 🔍 Z键特别标记
+    if (key_upper = "Z") {
+        FileAppend("`n🟡 === Z按键被拦截 ===" . "`n", "ahk_debug.txt")
+        FileAppend("时间: " . A_Now . "`n", "ahk_debug.txt")
+        ; 获取当前活动窗口
+        activeWin := WinGetTitle("A")
+        FileAppend("当前活动窗口: " . activeWin . "`n", "ahk_debug.txt")
+    }
+
+    FileAppend("HandleInterceptKey被调用: " . key . "`n", "ahk_debug.txt")
 
     ; 所有拦截按键都完全拦截，只通知Python
     SendEventToPython("intercept_key_down:" key)
-    ; FileAppend("按键已拦截并通知Python: " . key . "`n", "ahk_debug.txt")
+    FileAppend("已发送事件到Python: intercept_key_down:" . key . "`n", "ahk_debug.txt")
 
     ; 不发送到目标应用程序（完全拦截）
 }
@@ -562,40 +551,33 @@ HandleSpecialKeyUp(key) {
 HandleManagedKey(key) {
     global ManagedKeysConfig, IsPaused
 
-    ; 调试信息
-    FileAppend("=== HandleManagedKey被调用 ===" . "`n", "ahk_debug.txt")
-    FileAppend("按键: " . key . "`n", "ahk_debug.txt")
-    FileAppend("时间戳: " . A_TickCount . "`n", "ahk_debug.txt")
-
-    ; 通知Python暂停调度（瞬时暂停）
-    FileAppend("发送managed_key_down事件到Python`n", "ahk_debug.txt")
+    ; 🎯 优先响应：立即暂停队列 → 延迟 → 发送按键 → 立即恢复队列
+    
+    ; 1. 立即暂停队列（确保优先响应）
+    IsPaused := true
     SendEventToPython("managed_key_down:" key)
 
-    ; 设置暂停标志
-    IsPaused := true
-
-    ; 🎯 根据配置进行延迟+映射
+    ; 2. 根据配置进行延迟+映射
     if (ManagedKeysConfig.Has(key)) {
         config := ManagedKeysConfig[key]
         target := config.target
         delay := config.delay
 
-        ; 先延迟
+        ; 延迟
         if (delay > 0) {
             Sleep(delay)
         }
 
-        ; 再发送映射后的按键
+        ; 发送映射后的按键
         Send "{" target "}"
-
-        ; FileAppend("管理按键处理: " . key . " -> " . target . " (延迟: " . delay . "ms)`n", "ahk_debug.txt")
     } else {
         ; 如果没有配置，使用原按键
         Send "{" key "}"
     }
 
-    ; 设置定时器，500ms后自动恢复
-    SetTimer(RestoreManagedKey.Bind(key), -500)
+    ; 3. 立即恢复队列
+    IsPaused := false
+    SendEventToPython("managed_key_up:" key)
 }
 
 RestoreManagedKey(key) {
@@ -623,16 +605,35 @@ HandleMonitorKeyUp(key) {
 ; 事件发送到Python
 ; ===============================================================================
 SendEventToPython(event) {
+    ; 🔍 F8事件特别标记
+    if (InStr(event, "F8") || InStr(event, "f8")) {
+        FileAppend("🔵 SendEventToPython: " . event . "`n", "ahk_debug.txt")
+    }
+
     ; 优先查找OSD窗口（运行时可见）
     pythonHwnd := WinExist("TorchLightAssistant_OSD_12345")
 
-    if (!pythonHwnd) {
+    if (pythonHwnd) {
+        if (InStr(event, "F8") || InStr(event, "f8")) {
+            FileAppend("找到OSD窗口，句柄: " . pythonHwnd . "`n", "ahk_debug.txt")
+        }
+    } else {
         ; 如果OSD窗口不存在，查找主窗口（停止时可见）
         pythonHwnd := WinExist("TorchLightAssistant_MainWindow_12345")
+        if (pythonHwnd && (InStr(event, "F8") || InStr(event, "f8"))) {
+            FileAppend("找到主窗口，句柄: " . pythonHwnd . "`n", "ahk_debug.txt")
+        }
     }
 
     if (pythonHwnd) {
         SendWMCopyDataToPython(pythonHwnd, event)
+        if (InStr(event, "F8") || InStr(event, "f8")) {
+            FileAppend("✅ 事件已发送到Python`n", "ahk_debug.txt")
+        }
+    } else {
+        if (InStr(event, "F8") || InStr(event, "f8")) {
+            FileAppend("❌ 错误：找不到Python窗口！`n", "ahk_debug.txt")
+        }
     }
 }
 
@@ -690,38 +691,18 @@ Trim(str) {
 ; Hook清理函数
 ; ===============================================================================
 ClearAllConfigurableHooks() {
-    ; 清空所有可配置的Hook（只保留F8这个根热键）
-    ; 先收集所有要删除的键，然后再删除（避免遍历时修改Map的问题）
-    FileAppend("=== ClearAllConfigurableHooks 被调用 ===" . "`n", "ahk_debug.txt")
-    FileAppend("当前注册的Hook数量: " . RegisteredHooks.Count . "`n", "ahk_debug.txt")
-    
-    ; 第一步：收集所有要删除的键
+    ; 简化版本：清空所有记录的Hook（F8不在记录中，所以自动被保留）
+
+    ; 收集所有要删除的键
     keysToRemove := []
     for key, mode in RegisteredHooks {
-        FileAppend("检查Hook: " . key . " (模式: " . mode . ")`n", "ahk_debug.txt")
-        
-        ; 只保留F8根热键，清除所有其他动态热键
-        if (key = "F8") {
-            FileAppend("跳过F8根热键`n", "ahk_debug.txt")
-            continue
-        }
-        
-        FileAppend("标记为待删除: " . key . "`n", "ahk_debug.txt")
         keysToRemove.Push(key)
     }
-    
-    ; 第二步：删除所有标记的键
+
+    ; 删除所有键
     for index, key in keysToRemove {
-        FileAppend("准备取消Hook: " . key . "`n", "ahk_debug.txt")
         UnregisterHook(key)
-        FileAppend("已取消Hook: " . key . "`n", "ahk_debug.txt")
     }
-    
-    FileAppend("清理完成后，剩余Hook数量: " . RegisteredHooks.Count . "`n", "ahk_debug.txt")
-    for key, mode in RegisteredHooks {
-        FileAppend("剩余Hook: " . key . " (模式: " . mode . ")`n", "ahk_debug.txt")
-    }
-    FileAppend("=== ClearAllConfigurableHooks 完成 ===" . "`n", "ahk_debug.txt")
 }
 
 ; ===============================================================================

@@ -76,7 +76,8 @@ class GameSkillConfigUI(QMainWindow):
         self._load_initial_config_to_ui()
 
     def _setup_window(self):
-        self.setWindowTitle("通用游戏技能配置")
+        # 设置窗口标题供AHK查找（显示名称保持中文，但内部标识用于AHK）
+        self.setWindowTitle("TorchLightAssistant_MainWindow_12345")
         self.setGeometry(100, 100, 1200, 800)
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
