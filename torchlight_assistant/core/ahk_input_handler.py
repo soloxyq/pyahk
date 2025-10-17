@@ -293,6 +293,10 @@ class AHKInputHandler:
         """设置强制移动键"""
         return self.command_sender.set_force_move_key(key)
     
+    def set_force_move_replacement_key(self, key: str) -> bool:
+        """设置强制移动替换键"""
+        return self.command_sender.set_force_move_replacement_key(key)
+    
     def clear_all_configurable_hooks(self) -> bool:
         """清空所有可配置的Hook（保留F8根热键）"""
         return self.command_sender.clear_all_configurable_hooks()

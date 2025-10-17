@@ -148,31 +148,39 @@ class StationaryModeWidget(QWidget):
         self.hotkey_entry.setPlaceholderText("清空则禁用")
         grid_layout.addWidget(self.hotkey_entry, 0, 1)
 
-        # 交互/强制移动键
-        grid_layout.addWidget(QLabel("交互/强制移动键:"), 1, 0)
-        self.force_move_hotkey_entry = ConfigLineEdit()
-        self.force_move_hotkey_entry.setMaximumHeight(32)
-        self.force_move_hotkey_entry.setPlaceholderText("清空则禁用")
-        grid_layout.addWidget(self.force_move_hotkey_entry, 1, 1)
-
         # 原地实现方式
-        grid_layout.addWidget(QLabel("原地实现方式:"), 2, 0)
+        grid_layout.addWidget(QLabel("原地实现方式:"), 1, 0)
         self.mode_combo = ConfigComboBox()
         self.mode_combo.setMaximumHeight(32)
         self.mode_combo.addItems(["为所有按键添加Shift修饰符", "阻止左键和右键执行"])
-        grid_layout.addWidget(self.mode_combo, 2, 1)
+        grid_layout.addWidget(self.mode_combo, 1, 1)
+
+        # 交互/强制移动键
+        grid_layout.addWidget(QLabel("交互/强制移动键:"), 2, 0)
+        self.force_move_hotkey_entry = ConfigLineEdit()
+        self.force_move_hotkey_entry.setMaximumHeight(32)
+        self.force_move_hotkey_entry.setPlaceholderText("清空则禁用")
+        grid_layout.addWidget(self.force_move_hotkey_entry, 2, 1)
+
+        # 交互替换键
+        grid_layout.addWidget(QLabel("交互替换键:"), 3, 0)
+        self.force_move_replacement_key_entry = ConfigLineEdit()
+        self.force_move_replacement_key_entry.setMaximumHeight(32)
+        self.force_move_replacement_key_entry.setPlaceholderText("默认: f")
+        grid_layout.addWidget(self.force_move_replacement_key_entry, 3, 1)
 
         description_label = QLabel(
             "• 原地模式: 开启后，角色将原地释放技能而不移动。\n"
-            "• 交互/强制移动键: 按住此键将临时屏蔽所有技能，只执行移动（鼠标左键）或交互。"
+            "• 交互/强制移动键: 按住此键将临时屏蔽所有技能，只执行移动（鼠标左键）或交互。\n"
+            "• 交互替换键: 交互模式激活时，所有技能键将被替换为此键（通常设置为移动键，如f）。"
         )
         description_label.setStyleSheet("color: #888888; font-size: 9pt;")
         description_label.setWordWrap(True)
-        grid_layout.addWidget(description_label, 3, 0, 1, 2)
+        grid_layout.addWidget(description_label, 4, 0, 1, 2)
 
         self.status_label = QLabel("当前未设置")
         self.status_label.setStyleSheet("color: #4a90e2; font-weight: bold;")
-        grid_layout.addWidget(self.status_label, 4, 0, 1, 2)
+        grid_layout.addWidget(self.status_label, 5, 0, 1, 2)
 
         layout.addWidget(group)
         layout.addStretch()
@@ -181,6 +189,7 @@ class StationaryModeWidget(QWidget):
         """获取配置"""
         stationary_hotkey = self.hotkey_entry.text().strip().lower()
         force_move_hotkey = self.force_move_hotkey_entry.text().strip().lower()
+        force_move_replacement_key = self.force_move_replacement_key_entry.text().strip().lower()
 
         return {
             "stationary_mode_config": {
@@ -191,6 +200,7 @@ class StationaryModeWidget(QWidget):
                     else "block_mouse"
                 ),
                 "force_move_hotkey": force_move_hotkey if force_move_hotkey else "",
+                "force_move_replacement_key": force_move_replacement_key if force_move_replacement_key else "f",
             }
         }
 
@@ -198,12 +208,15 @@ class StationaryModeWidget(QWidget):
         """从配置更新UI"""
         stationary_config = config.get(
             "stationary_mode_config",
-            {"hotkey": "", "mode_type": "block_mouse", "force_move_hotkey": ""},
+            {"hotkey": "", "mode_type": "block_mouse", "force_move_hotkey": "", "force_move_replacement_key": "f"},
         )
 
         self.hotkey_entry.setText(stationary_config.get("hotkey", ""))
         self.force_move_hotkey_entry.setText(
             stationary_config.get("force_move_hotkey", "")
+        )
+        self.force_move_replacement_key_entry.setText(
+            stationary_config.get("force_move_replacement_key", "f")
         )
 
         mode_type = stationary_config.get("mode_type", "block_mouse")

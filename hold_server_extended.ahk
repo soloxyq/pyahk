@@ -45,8 +45,9 @@ global StationaryModeActive := false
 global StationaryModeType := "shift_modifier"
 
 ; 强制移动键
-global ForceMoveKey := "a"  ; 默认为a键
+global ForceMoveKey := ""  ; 由Python设置，默认为空（未启用）
 global ForceMoveActive := false  ; 强制移动键是否处于按下状态
+global ForceMoveReplacementKey := "f"  ; 强制移动时的替换键，由Python设置
 
 ; 统计信息
 global QueueStats := Map(
@@ -241,6 +242,16 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; CLEAR_HOOKS - 清空所有可配置的Hook（保留F8根热键）
             ClearAllConfigurableHooks()
             return 1
+
+        case CMD_SET_FORCE_MOVE_REPLACEMENT_KEY:
+            ; SET_FORCE_MOVE_REPLACEMENT_KEY - 设置强制移动替换键
+            ; 参数格式: "key" 例如: "f"
+            if (param != "") {
+                global ForceMoveReplacementKey
+                ForceMoveReplacementKey := param
+                return 1
+            }
+            return 0
     }
 
     ; 未识别的命令
@@ -319,12 +330,12 @@ ExecuteAction(action) {
 
 SendPress(key) {
     ; 发送按键 (按下并释放)
-    global ForceMoveActive
+    global ForceMoveActive, ForceMoveReplacementKey
 
-    ; 如果强制移动键按下，所有队列中的按键都替换为f键
+    ; 如果强制移动键按下，所有队列中的按键都替换为配置的替换键
     if (ForceMoveActive) {
-        ; 所有按键在强制移动时都替换为f键
-        Send "{f}"
+        ; 所有按键在强制移动时都替换为配置的替换键
+        Send "{" ForceMoveReplacementKey "}"
         return  ; 已经处理完毕，直接返回
     }
 
@@ -348,6 +359,8 @@ SendUp(key) {
 
 ShouldAddShiftModifier(key) {
     ; 检查是否应该添加shift修饰符
+    ; 🎯 简化逻辑：原地模式激活时，所有按键都加Shift
+    ; 不需要判断是否是技能键，由Python层决定发送什么按键
     global StationaryModeActive, StationaryModeType
 
     ; 如果原地模式未激活，不添加shift修饰符
@@ -360,21 +373,8 @@ ShouldAddShiftModifier(key) {
         return false
     }
 
-    ; 定义需要添加shift修饰符的技能键
-    skillKeys := ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0",
-        "q", "w", "e", "r", "t", "y", "u", "i", "o", "p",
-        "a", "s", "d", "f", "g", "h", "j", "k", "l", "z", "x", "c", "v", "b", "n", "m"]
-
-    keyLower := StrLower(key)
-
-    ; 检查是否是技能键
-    for _, skillKey in skillKeys {
-        if (keyLower == skillKey) {
-            return true
-        }
-    }
-
-    return false
+    ; 原地模式激活且是shift_modifier模式，所有按键都加Shift
+    return true
 }
 
 ExecuteSequence(sequence) {

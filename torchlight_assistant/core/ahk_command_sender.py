@@ -75,6 +75,11 @@ class AHKCommandSender:
         param = "true" if active else "false"
         return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_STATE, param)
     
+    def set_force_move_replacement_key(self, key: str):
+        """设置强制移动替换键"""
+        from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_REPLACEMENT_KEY
+        return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_REPLACEMENT_KEY, key)
+    
     def clear_all_configurable_hooks(self) -> bool:
         """清空所有可配置的Hook（保留F8根热键）"""
         from torchlight_assistant.config.ahk_commands import CMD_CLEAR_HOOKS
