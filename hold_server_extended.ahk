@@ -37,6 +37,11 @@ global SpecialKeysPaused := false   ; 特殊按键是否导致系统暂停
 global ManagedKeysConfig := Map()   ; 存储管理按键的延迟和映射配置
 global TargetWin := "" ; 目标窗口标识符
 
+; 🎯 新增：紧急按键缓存（Master方案学习）
+global CachedHpKey := ""     ; 缓存的HP按键
+global CachedMpKey := ""     ; 缓存的MP按键
+global ActiveSequences := Map() ; 去重机制：正在处理的按键序列
+
 ; 🎯 监控按键状态跟踪（避免重复发送事件）
 global MonitorKeysState := Map()   ; 跟踪monitor按键的按下状态
 
@@ -101,12 +106,44 @@ ProcessQueue() {
         return
     }
 
-    ; 暂停时不处理其他队列（包括IsPaused和SpecialKeysPaused）
-    if (IsPaused || SpecialKeysPaused) {
-        return
+    ; 🎯 修复：优先级模式下的紧急按键处理（Master方案学习）
+    if (IsPaused) {
+        return  ; 手动暂停时完全停止
+    }
+    
+    if (SpecialKeysPaused) {
+        ; 特殊按键激活时：只允许紧急按键通过
+        if (HighQueue.Length > 0) {
+            action := HighQueue[1]
+            if (IsEmergencyAction(action)) {
+                action := HighQueue.RemoveAt(1)
+                ExecuteAction(action)
+                QueueStats["processed"] := QueueStats["processed"] + 1
+                return
+            }
+        }
+        if (NormalQueue.Length > 0) {
+            action := NormalQueue[1]
+            if (IsEmergencyAction(action)) {
+                action := NormalQueue.RemoveAt(1)
+                ExecuteAction(action)
+                QueueStats["processed"] := QueueStats["processed"] + 1
+                return
+            }
+        }
+        if (LowQueue.Length > 0) {
+            action := LowQueue[1]
+            if (IsEmergencyAction(action)) {
+                action := LowQueue.RemoveAt(1)
+                ExecuteAction(action)
+                QueueStats["processed"] := QueueStats["processed"] + 1
+                return
+            }
+        }
+        return  ; 非紧急按键在优先级模式下被过滤
     }
 
-    ; 按优先级处理
+    ; 正常模式：按优先级处理
     if (HighQueue.Length > 0) {
         action := HighQueue.RemoveAt(1)
         ExecuteAction(action)
@@ -282,10 +319,87 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 清除缓存，强制重新获取新窗口句柄
             CachedPythonHwnd := 0
             return 1
+            
+        case CMD_BATCH_UPDATE_CONFIG:
+            ; BATCH_UPDATE_CONFIG - 批量配置更新（Master方案学习）
+            ; 参数格式: "hp_key:1,mp_key:2,stationary_type:shift_modifier"
+            UpdateBatchConfig(param)
+            return 1
     }
 
     ; 未识别的命令
     return 0
+}
+
+; ===============================================================================
+; 紧急按键和去重机制（Master方案学习）
+; ===============================================================================
+; 判断是否为紧急动作（HP/MP等生存技能）
+IsEmergencyAction(action) {
+    global CachedHpKey, CachedMpKey
+    
+    ; 解析动作类型
+    if (InStr(action, ":")) {
+        parts := StrSplit(action, ":", , 2)
+        if (parts.Length >= 2 && parts[1] = "press") {
+            key := StrLower(parts[2])
+            return (key = CachedHpKey || key = CachedMpKey)
+        }
+    } else {
+        ; 兼容旧格式：直接按键
+        key := StrLower(action)
+        return (key = CachedHpKey || key = CachedMpKey)
+    }
+    
+    return false
+}
+
+; 检查按键序列是否正在处理中（去重机制）
+IsSequenceActive(key) {
+    global ActiveSequences
+    return ActiveSequences.Has(key)
+}
+
+; 标记按键序列为活跃状态
+MarkSequenceActive(key) {
+    global ActiveSequences
+    ActiveSequences[key] := A_TickCount
+}
+
+; 清理按键序列标记
+ClearSequenceMark(key) {
+    global ActiveSequences
+    if (ActiveSequences.Has(key)) {
+        ActiveSequences.Delete(key)
+    }
+}
+
+; 批量配置更新函数（Master方案学习）
+UpdateBatchConfig(configString) {
+    global CachedHpKey, CachedMpKey, StationaryModeType
+    
+    if (configString = "") {
+        return
+    }
+    
+    configs := StrSplit(configString, ",")
+    for index, config in configs {
+        parts := StrSplit(config, ":")
+        if (parts.Length >= 2) {
+            key := Trim(parts[1])
+            value := Trim(parts[2])
+            
+            switch key {
+                case "hp_key":
+                    CachedHpKey := StrLower(value)
+                case "mp_key":
+                    CachedMpKey := StrLower(value)
+                case "stationary_type":
+                    StationaryModeType := value
+                ; 可扩展更多配置项...
+            }
+        }
+    }
 }
 
 ; ===============================================================================
@@ -331,6 +445,13 @@ ClearQueue(priority) {
 ; 动作执行
 ; ===============================================================================
 ExecuteAction(action) {
+    ; 🎯 处理清理标记（Master方案学习）
+    if (InStr(action, "cleanup:")) {
+        key := StrReplace(action, "cleanup:", "")
+        ClearSequenceMark(key)
+        return
+    }
+    
     ; 解析动作类型（注意：StrSplit的第4个参数是MaxParts，第3个是OmitChars）
     parts := StrSplit(action, ":", , 2)
     if parts.Length < 2 {
@@ -554,13 +675,17 @@ HandleSpecialKeyUp(key) {
     SendEventToPython("special_key_up:" key)
 }
 
-; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射
+; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射 + 去重
 HandleManagedKey(key) {
     global ManagedKeysConfig, EmergencyQueue
-
-    ; 🎯 异步优化：将延迟+映射操作放入Emergency队列
-    ; DelayUntil机制会自动阻止其他队列在延迟期间执行
-    ; 不需要IsPaused，逻辑更简洁
+    
+    ; 🎯 去重机制：防止快速重复按键（Master方案学习）
+    if (IsSequenceActive(key)) {
+        return  ; 该按键序列正在处理中，忽略
+    }
+    
+    ; 标记为处理中
+    MarkSequenceActive(key)
 
     SendEventToPython("managed_key_down:" key)
 
@@ -575,12 +700,14 @@ HandleManagedKey(key) {
             EmergencyQueue.Push("delay:" delay)
         }
         EmergencyQueue.Push("press:" target)
+        
+        ; 添加清理标记（序列执行完后清除去重标记）
+        EmergencyQueue.Push("cleanup:" key)
     } else {
         ; 如果没有配置，使用原按键
         EmergencyQueue.Push("press:" key)
+        EmergencyQueue.Push("cleanup:" key)
     }
-
-    ; 注意：DelayUntil结束后队列会自动恢复
 }
 
 RestoreManagedKey(key) {

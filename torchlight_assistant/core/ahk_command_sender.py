@@ -93,6 +93,34 @@ class AHKCommandSender:
         """
         from torchlight_assistant.config.ahk_commands import CMD_SET_PYTHON_WINDOW_STATE
         return send_ahk_cmd(self.window_title, CMD_SET_PYTHON_WINDOW_STATE, state)
+    
+    def batch_update_config(self, config_dict: dict) -> bool:
+        """批量更新配置（Master方案学习）
+        
+        Args:
+            config_dict: 配置字典，如 {"hp_key": "1", "mp_key": "2", "stationary_type": "shift_modifier"}
+        """
+        from torchlight_assistant.config.ahk_commands import CMD_BATCH_UPDATE_CONFIG
+        
+        try:
+            # 构建参数字符串： "hp_key:1,mp_key:2,stationary_type:shift_modifier"
+            config_items = []
+            for key, value in config_dict.items():
+                if value:  # 只发送非空值
+                    config_items.append(f"{key}:{value}")
+            
+            if not config_items:
+                return True  # 没有配置需要更新
+            
+            param = ",".join(config_items)
+            result = send_ahk_cmd(self.window_title, CMD_BATCH_UPDATE_CONFIG, param)
+            
+            return result
+        except Exception as e:
+            print(f"【AHKCommandSender】 批量更新配置失败: {e}")
+            import traceback
+            print(f"【AHKCommandSender】 异常详情:\n{traceback.format_exc()}")
+            return False
         
     def is_stationary_mode_active(self) -> bool:
         """检查原地模式是否激活"""

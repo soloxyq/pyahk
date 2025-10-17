@@ -301,19 +301,21 @@ class MacroEngine:
         # 特殊按键释放不立即恢复，等待special_key_pause事件
 
     def _handle_ahk_special_key_pause(self, action: str):
-        """处理特殊按键暂停状态变化"""
+        """处理特殊按键状态变化 - 修复后的版本：不暂停Python层面，AHK层面已经处理过滤逻辑"""
         if action == "start":
-            LOG_INFO("[特殊按键] 系统暂停 - 特殊按键激活")
-            event_bus.publish(
-                "scheduler_pause_requested",
-                {"reason": "special_keys_active", "type": "special_key_pause"},
-            )
+            LOG_INFO("【特殊按键】 特殊按键激活 - AHK层面已启用过滤，仅允许紧急按键")
+            # 不再暂停Python调度器，让AHK层面处理过滤
+            # event_bus.publish(
+            #     "scheduler_pause_requested",
+            #     {"reason": "special_keys_active", "type": "special_key_pause"},
+            # )
         elif action == "end":
-            LOG_INFO("[特殊按键] 系统恢复 - 所有特殊按键释放")
-            event_bus.publish(
-                "scheduler_resume_requested",
-                {"reason": "special_keys_released", "type": "special_key_resume"},
-            )
+            LOG_INFO("【特殊按键】 所有特殊按键释放 - AHK层面过滤解除")
+            # 不再恢复Python调度器，让AHK层面处理过滤
+            # event_bus.publish(
+            #     "scheduler_resume_requested",
+            #     {"reason": "special_keys_released", "type": "special_key_resume"},
+            # )
 
     def _handle_ahk_managed_key_down(self, key: str):
         """处理管理按键按下（如RButton/e）- 拦截+延迟+映射"""
@@ -702,6 +704,9 @@ class MacroEngine:
                 self.input_handler.set_force_move_replacement_key("")
                 LOG_INFO("[强制移动替换键] 用户未配置，已清空AHK配置")
 
+            # 🎯 新增：批量更新AHK紧急按键缓存（修复BUG）
+            self._update_ahk_emergency_keys_cache(global_config)
+            
             # 注意：热键管理现在由状态机驱动，不在这里处理
 
             # 更新OSD可见性
@@ -712,6 +717,44 @@ class MacroEngine:
             import traceback
 
             LOG_ERROR(f"[配置更新] 详细错误: {traceback.format_exc()}")
+
+    def _update_ahk_emergency_keys_cache(self, global_config: Dict[str, Any]):
+        """更新AHK紧急按键缓存（修复space按键时HP/MP无法执行的BUG）"""
+        try:
+            # 收集HP/MP按键配置
+            resource_config = global_config.get("resource_management", {})
+            hp_config = resource_config.get("hp_config", {})
+            mp_config = resource_config.get("mp_config", {})
+            
+            batch_config = {}
+            
+            # HP按键
+            if hp_config.get("enabled", False):
+                hp_key = hp_config.get("key", "")
+                if hp_key:
+                    batch_config["hp_key"] = hp_key.lower()
+            
+            # MP按键
+            if mp_config.get("enabled", False):
+                mp_key = mp_config.get("key", "")
+                if mp_key:
+                    batch_config["mp_key"] = mp_key.lower()
+            
+            # 添加其他缓存配置
+            stationary_config = global_config.get("stationary_mode_config", {})
+            mode_type = stationary_config.get("mode_type", "")
+            if mode_type:
+                batch_config["stationary_type"] = mode_type
+            
+            # 只有在有配置更新时才发送
+            if batch_config and hasattr(self.input_handler, "command_sender") and self.input_handler.command_sender:
+                self.input_handler.command_sender.batch_update_config(batch_config)
+                LOG_INFO(f"【紧急按键缓存】 已更新AHK配置: {batch_config}")
+            
+        except Exception as e:
+            LOG_ERROR(f"【紧急按键缓存】 更新失败: {e}")
+            import traceback
+            LOG_ERROR(f"【紧急按键缓存】 异常详情:\n{traceback.format_exc()}")
 
     # 旧的热键管理方法已删除，现在使用AHK处理所有热键
 
