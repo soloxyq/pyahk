@@ -116,7 +116,7 @@ class AHKInputHandler:
         用户按F8准备时注册所有其他按键
         
         Args:
-            special_keys: 特殊按键列表 (special模式) - 如 ["space"]
+            special_keys: 特殊按键列表 (special模式) - 如 ["space", "RButton"]
             managed_keys: 管理按键字典 (priority模式) - 如 {"e": {"target": "+", "delay": 500}}
             other_hooks: 其他Hook配置 - 如 {"x": "intercept", "a": "monitor", "RButton": "intercept"}
         """
@@ -274,6 +274,16 @@ class AHKInputHandler:
         return {"wm_copydata_mode": True}
     
     def register_hook(self, key: str, mode: str = "intercept"):
+        """
+        注册热键Hook
+        
+        Args:
+            key: 按键名（使用AHK标准名称，如 "RButton", "space"）
+            mode: Hook模式
+            
+        Returns:
+            注册是否成功
+        """
         return self.command_sender.register_hook(key, mode)
     
     def unregister_hook(self, key: str):

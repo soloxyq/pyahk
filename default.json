@@ -2,14 +2,14 @@
     "skills": {
         "Skill1": {
             "Enabled": true,
-            "Key": "7",
-            "Priority": false,
-            "Timer": 200,
-            "TriggerMode": 0,
-            "CooldownCoordX": 0,
-            "CooldownCoordY": 0,
-            "CooldownSize": 12,
-            "ExecuteCondition": 2,
+            "Key": "q",
+            "Priority": true,
+            "Timer": 150,
+            "TriggerMode": 1,
+            "CooldownCoordX": 1446,
+            "CooldownCoordY": 1035,
+            "CooldownSize": 8,
+            "ExecuteCondition": 0,
             "ConditionCoordX": 900,
             "ConditionCoordY": 600,
             "ConditionColor": 0,
@@ -17,27 +17,27 @@
         },
         "Skill2": {
             "Enabled": true,
-            "Key": "8",
+            "Key": "Lbutton",
             "Priority": false,
-            "Timer": 999,
-            "TriggerMode": 1,
-            "CooldownCoordX": 1000,
-            "CooldownCoordY": 700,
-            "CooldownSize": 15,
+            "Timer": 175,
+            "TriggerMode": 0,
+            "CooldownCoordX": 857,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 0,
-            "ConditionCoordY": 0,
+            "ConditionCoordX": 1310,
+            "ConditionCoordY": 992,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "2"
         },
         "Skill3": {
             "Enabled": false,
-            "Key": "6",
+            "Key": "",
             "Priority": false,
-            "Timer": 1000,
-            "TriggerMode": 1,
-            "CooldownCoordX": 1100,
-            "CooldownCoordY": 700,
+            "Timer": 650,
+            "TriggerMode": 0,
+            "CooldownCoordX": 919,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -47,12 +47,12 @@
         },
         "Skill4": {
             "Enabled": false,
-            "Key": "5",
+            "Key": "4",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 1,
-            "CooldownCoordX": 1200,
-            "CooldownCoordY": 700,
+            "CooldownCoordX": 981,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -62,31 +62,31 @@
         },
         "Skill5": {
             "Enabled": false,
-            "Key": "4",
+            "Key": "1",
             "Priority": false,
-            "Timer": 1000,
+            "Timer": 150,
             "TriggerMode": 0,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
-            "ExecuteCondition": 0,
-            "ConditionCoordX": 0,
-            "ConditionCoordY": 0,
-            "ConditionColor": 0,
+            "ExecuteCondition": 1,
+            "ConditionCoordX": 126,
+            "ConditionCoordY": 970,
+            "ConditionColor": 1,
             "AltKey": ""
         },
         "Skill6": {
             "Enabled": false,
-            "Key": "3",
+            "Key": "2",
             "Priority": false,
-            "Timer": 1000,
+            "Timer": 200,
             "TriggerMode": 0,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
-            "ExecuteCondition": 0,
-            "ConditionCoordX": 0,
-            "ConditionCoordY": 0,
+            "ExecuteCondition": 1,
+            "ConditionCoordX": 1800,
+            "ConditionCoordY": 970,
             "ConditionColor": 0,
             "AltKey": ""
         },
@@ -126,26 +126,26 @@
         "debug_mode": {
             "enabled": false
         },
-        "queue_processor_interval": 50,
+        "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
-        "cooldown_checker_interval": 200,
-        "sequence_timer_interval": 75,
-        "capture_interval": 60,
+        "cooldown_checker_interval": 120,
+        "sequence_timer_interval": 125,
+        "capture_interval": 55,
         "hp_cooldown": 1000,
         "mp_cooldown": 1000,
         "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
-            "ahk_class": "Notepad++",
-            "ahk_exe": "notepad++.exe"
+            "ahk_class": "POEWindowClass",
+            "ahk_exe": "PathOfExile_x64.exe"
         },
         "stationary_mode_config": {
-            "hotkey": "x",
+            "hotkey": "",
             "mode_type": "shift_modifier",
-            "force_move_hotkey": "a",
-            "force_move_replacement_key": "v"
+            "force_move_hotkey": "",
+            "force_move_replacement_key": "f"
         },
         "affix_reroll": {
             "enabled": true,
@@ -158,7 +158,7 @@
             "close_button_coord": null
         },
         "pathfinding_config": {
-            "hotkey": "f9",
+            "hotkey": "",
             "minimap_area": [
                 0,
                 0,
@@ -176,10 +176,10 @@
                 "tolerance_s": 30,
                 "tolerance_v": 50,
                 "detection_mode": "rectangle",
-                "region_x1": 258,
-                "region_y1": 118,
-                "region_x2": 273,
-                "region_y2": 167,
+                "region_x1": 113,
+                "region_y1": 896,
+                "region_x2": 124,
+                "region_y2": 1051,
                 "colors": [
                     {
                         "name": "Color1",
@@ -204,16 +204,16 @@
             "mp_config": {
                 "enabled": true,
                 "key": "2",
-                "threshold": 50,
+                "threshold": 40,
                 "cooldown": 1000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
                 "detection_mode": "rectangle",
-                "region_x1": 570,
-                "region_y1": 121,
-                "region_x2": 584,
-                "region_y2": 165,
+                "region_x1": 1787,
+                "region_y1": 894,
+                "region_x2": 1800,
+                "region_y2": 1053,
                 "colors": [
                     {
                         "name": "Color1",
@@ -231,11 +231,12 @@
         "priority_keys": {
             "enabled": true,
             "special_keys": [
-                "space"
+                "space",
+                "RButton"
             ],
             "managed_keys": {
                 "e": {
-                    "target": "+",
+                    "target": "e",
                     "delay": 50
                 }
             }
@@ -247,10 +248,10 @@
             ]
         },
         "tesseract_ocr": {
-            "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
             "lang": "eng",
             "psm_mode": 7,
-            "char_whitelist": "0123456789/"
+            "char_whitelist": "0123456789/,"
         }
     }
 }

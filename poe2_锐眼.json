@@ -142,37 +142,23 @@
             "ahk_exe": "PathOfExile_x64.exe"
         },
         "stationary_mode_config": {
-            "hotkey": "xbutton1",
+            "hotkey": "",
             "mode_type": "shift_modifier",
-            "force_move_hotkey": ""
+            "force_move_hotkey": "",
+            "force_move_replacement_key": "f"
         },
         "affix_reroll": {
             "enabled": true,
-            "target_affixes": [
-                "毒伤",
-                "生命上限"
-            ],
-            "max_attempts": 99,
+            "target_affixes": [],
+            "max_attempts": 100,
             "click_delay": 200,
-            "enchant_button_coord": [
-                489,
-                907
-            ],
-            "first_affix_button_coord": [
-                143,
-                554
-            ],
-            "replace_button_coord": [
-                345,
-                916
-            ],
-            "close_button_coord": [
-                351,
-                654
-            ]
+            "enchant_button_coord": null,
+            "first_affix_button_coord": null,
+            "replace_button_coord": null,
+            "close_button_coord": null
         },
         "pathfinding_config": {
-            "hotkey": "f9",
+            "hotkey": "",
             "minimap_area": [
                 0,
                 0,
@@ -184,12 +170,18 @@
             "hp_config": {
                 "enabled": true,
                 "key": "1",
-                "threshold": 60,
+                "threshold": 50,
                 "cooldown": 1000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "rectangle",
+                "detection_mode": "text_ocr",
+                "text_x1": 97,
+                "text_y1": 814,
+                "text_x2": 228,
+                "text_y2": 835,
+                "ocr_engine": "tesseract",
+                "match_threshold": 0.7,
                 "region_x1": 113,
                 "region_y1": 896,
                 "region_x2": 124,
@@ -218,12 +210,18 @@
             "mp_config": {
                 "enabled": true,
                 "key": "2",
-                "threshold": 30,
+                "threshold": 40,
                 "cooldown": 2000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "rectangle",
+                "detection_mode": "text_ocr",
+                "text_x1": 1767,
+                "text_y1": 814,
+                "text_x2": 1894,
+                "text_y2": 835,
+                "ocr_engine": "tesseract",
+                "match_threshold": 0.7,
                 "region_x1": 1787,
                 "region_y1": 894,
                 "region_x2": 1800,
@@ -246,7 +244,7 @@
             "enabled": true,
             "special_keys": [
                 "space",
-                "right_mouse"
+                "RButton"
             ],
             "managed_keys": {
                 "e": {
@@ -255,7 +253,18 @@
                 }
             }
         },
-        "skill_sequence": "Rbutton,q,Lbutton,Lbutton,Lbutton,Lbutton,Lbutton,LbuttonLbutton,Lbutton,Lbutton",
-        "process_history": {}
+        "skill_sequence": "1,2,3,4,5,6,7,8",
+        "process_history": {
+            "recent_processes": [
+                "NutstoreClient.exe",
+                "notepad++.exe"
+            ]
+        },
+        "tesseract_ocr": {
+            "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            "lang": "eng",
+            "psm_mode": 7,
+            "char_whitelist": "0123456789/,"
+        }
     }
 }

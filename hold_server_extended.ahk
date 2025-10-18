@@ -86,11 +86,17 @@ OnMessage(0x4A, WM_COPYDATA)
 ; 队列处理器 (10ms定时器)
 ; ===============================================================================
 ProcessQueue() {
-    global DelayUntil
+    global DelayUntil, HighQueue, NormalQueue, LowQueue
 
     ; 🎯 检查是否在异步延迟中
     if (DelayUntil > 0) {
         if (A_TickCount < DelayUntil) {
+            ; 🎯 关键修复：延迟期间清空所有非紧急队列，防止技能积累
+            if (HighQueue.Length > 0 || NormalQueue.Length > 0 || LowQueue.Length > 0) {
+                HighQueue := []
+                NormalQueue := []
+                LowQueue := []
+            }
             return  ; 还在延迟中，不处理任何队列
         } else {
             ; 延迟结束，重置
@@ -110,7 +116,7 @@ ProcessQueue() {
     if (IsPaused) {
         return  ; 手动暂停时完全停止
     }
-    
+
     if (SpecialKeysPaused) {
         ; 特殊按键激活时：只允许紧急按键通过
         if (HighQueue.Length > 0) {
@@ -306,7 +312,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 ForceMoveReplacementKey := "f"  ; 默认值
             }
             return 1
-            
+
         case CMD_SET_PYTHON_WINDOW_STATE:
             ; SET_PYTHON_WINDOW_STATE - 设置Python窗口状态
             ; 参数格式: "main" 或 "osd"
@@ -319,7 +325,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 清除缓存，强制重新获取新窗口句柄
             CachedPythonHwnd := 0
             return 1
-            
+
         case CMD_BATCH_UPDATE_CONFIG:
             ; BATCH_UPDATE_CONFIG - 批量配置更新（Master方案学习）
             ; 参数格式: "hp_key:1,mp_key:2,stationary_type:shift_modifier"
@@ -337,7 +343,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 ; 判断是否为紧急动作（HP/MP等生存技能）
 IsEmergencyAction(action) {
     global CachedHpKey, CachedMpKey
-    
+
     ; 解析动作类型
     if (InStr(action, ":")) {
         parts := StrSplit(action, ":", , 2)
@@ -350,7 +356,7 @@ IsEmergencyAction(action) {
         key := StrLower(action)
         return (key = CachedHpKey || key = CachedMpKey)
     }
-    
+
     return false
 }
 
@@ -377,18 +383,18 @@ ClearSequenceMark(key) {
 ; 批量配置更新函数（Master方案学习）
 UpdateBatchConfig(configString) {
     global CachedHpKey, CachedMpKey, StationaryModeType
-    
+
     if (configString = "") {
         return
     }
-    
+
     configs := StrSplit(configString, ",")
     for index, config in configs {
         parts := StrSplit(config, ":")
         if (parts.Length >= 2) {
             key := Trim(parts[1])
             value := Trim(parts[2])
-            
+
             switch key {
                 case "hp_key":
                     CachedHpKey := StrLower(value)
@@ -396,7 +402,7 @@ UpdateBatchConfig(configString) {
                     CachedMpKey := StrLower(value)
                 case "stationary_type":
                     StationaryModeType := value
-                ; 可扩展更多配置项...
+                    ; 可扩展更多配置项...
             }
         }
     }
@@ -451,7 +457,7 @@ ExecuteAction(action) {
         ClearSequenceMark(key)
         return
     }
-    
+
     ; 解析动作类型（注意：StrSplit的第4个参数是MaxParts，第3个是OmitChars）
     parts := StrSplit(action, ":", , 2)
     if parts.Length < 2 {
@@ -631,10 +637,10 @@ UnregisterHook(key) {
 ; ===============================================================================
 HandleInterceptKey(key) {
     ; 拦截模式 - 按键按下（简化版本，只处理按下事件）
-    
+
     ; 所有拦截按键都完全拦截，只通知Python
     SendEventToPython("intercept_key_down:" key)
-    
+
     ; 🎯 F8不再在AHK端主动切换，由Python完成UI切换后主动通知AHK
 
     ; 不发送到目标应用程序（完全拦截）
@@ -677,15 +683,22 @@ HandleSpecialKeyUp(key) {
 
 ; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射 + 去重
 HandleManagedKey(key) {
-    global ManagedKeysConfig, EmergencyQueue
-    
+    global ManagedKeysConfig, EmergencyQueue, HighQueue, NormalQueue, LowQueue, IsPaused
+
     ; 🎯 去重机制：防止快速重复按键（Master方案学习）
     if (IsSequenceActive(key)) {
         return  ; 该按键序列正在处理中，忽略
     }
-    
+
     ; 标记为处理中
     MarkSequenceActive(key)
+
+    ; 🎯 关键修复：清空所有非紧急队列，避免技能前后摇冲突
+    if (HighQueue.Length > 0 || NormalQueue.Length > 0 || LowQueue.Length > 0) {
+        HighQueue := []
+        NormalQueue := []
+        LowQueue := []
+    }
 
     SendEventToPython("managed_key_down:" key)
 
@@ -696,16 +709,25 @@ HandleManagedKey(key) {
         delay := config.delay
 
         ; 放入Emergency队列（会立即执行）
+        ; 🎯 按键前后都加delay
         if (delay > 0) {
-            EmergencyQueue.Push("delay:" delay)
+            EmergencyQueue.Push("delay:" delay)  ; 按键前delay
         }
         EmergencyQueue.Push("press:" target)
-        
+
+        if (delay > 0) {
+            EmergencyQueue.Push("delay:" delay)  ; 按键后delay
+        }
+
+        ; 🎯 关键修复：添加恢复通知，让Python恢复调度器
+        EmergencyQueue.Push("notify:managed_key_complete:" key)
+
         ; 添加清理标记（序列执行完后清除去重标记）
         EmergencyQueue.Push("cleanup:" key)
     } else {
         ; 如果没有配置，使用原按键
         EmergencyQueue.Push("press:" key)
+        EmergencyQueue.Push("notify:managed_key_complete:" key)
         EmergencyQueue.Push("cleanup:" key)
     }
 }
@@ -762,7 +784,7 @@ HandleMonitorKeyUp(key) {
 ; ===============================================================================
 SendEventToPython(event) {
     global CurrentPythonWindow, CachedPythonHwnd
-    
+
     ; 🎯 使用缓存的窗口句柄
     if (CachedPythonHwnd != 0) {
         ; 直接使用缓存的句柄
@@ -772,10 +794,10 @@ SendEventToPython(event) {
         ; 发送失败，清除缓存
         CachedPythonHwnd := 0
     }
-    
+
     ; 🎯 缓存失效或首次调用：根据F8状态查找正确的窗口
     CachedPythonHwnd := WinExist(CurrentPythonWindow)
-    
+
     ; 最后尝试发送
     if (CachedPythonHwnd) {
         ; 🎯 如果最后一次发送也失败，清除缓存
@@ -804,7 +826,7 @@ SendWMCopyDataToPython(hwnd, eventData) {
             "UInt", 0x004A,   ; WM_COPYDATA
             "Ptr", 0,         ; wParam
             "Ptr", cds.Ptr)   ; lParam
-            
+
         ; 🎯 返回成功状态
         return (result != 0)
 

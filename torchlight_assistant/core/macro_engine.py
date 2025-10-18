@@ -132,6 +132,7 @@ class MacroEngine:
 
             # 管理按键事件（如RButton/e）- 拦截+延迟+映射
             event_bus.subscribe("managed_key_down", self._handle_ahk_managed_key_down)
+            event_bus.subscribe("managed_key_complete", self._handle_ahk_managed_key_complete)
 
             # 兼容旧的优先级事件（逐步迁移）
             event_bus.subscribe("priority_key_down", self._handle_ahk_priority_key_down)
@@ -233,11 +234,12 @@ class MacroEngine:
             if priority_config.get("enabled", False):
                 LOG_INFO("[热键管理] 优先级配置已启用")
 
-                # 注册特殊按键（如space）
+                # 注册特殊按键（如space, RButton）- 使用AHK标准按键名
                 special_keys = priority_config.get("special_keys", [])
                 LOG_INFO(f"[热键管理] 特殊按键列表: {special_keys}")
+                LOG_INFO(f"[热键管理] 特殊按键数量: {len(special_keys)}")
                 for key in special_keys:
-                    LOG_INFO(f"[热键管理] 准备注册特殊按键: {key}")
+                    LOG_INFO(f"[热键管理] 准备注册特殊按键: '{key}' (类型: {type(key).__name__})")
                     if self.input_handler.register_hook(key, "special"):
                         LOG_INFO(f"[特殊按键] 注册成功: {key} (special)")
                     else:
@@ -319,8 +321,36 @@ class MacroEngine:
 
     def _handle_ahk_managed_key_down(self, key: str):
         """处理管理按键按下（如RButton/e）- 拦截+延迟+映射"""
-        LOG(f"[管理按键] 按下: {key}")
-        # 不需要暂停Python调度器，AHK层的DelayUntil机制已经足够
+        LOG_INFO(f"[管理按键] ========== 按下: {key} ==========")
+        LOG_INFO(f"[管理按键] 当前状态: {self._state}")
+        
+        # 🎯 关键修复：暂停Python调度器，防止技能队列继续添加动作
+        LOG_INFO(f"[管理按键] 发布scheduler_pause_requested事件")
+        event_bus.publish(
+            "scheduler_pause_requested",
+            {"reason": f"managed_key_down:{key}", "active_keys": [key]},
+        )
+        
+        # 🎯 清空输入队列中的待处理动作
+        queue_length = self.input_handler.get_queue_length()
+        if queue_length > 0:
+            LOG_INFO(f"[管理按键] 清空输入队列，当前长度: {queue_length}")
+            self.input_handler.clear_queue()
+        
+        LOG_INFO(f"[管理按键] 管理按键处理完成")
+
+    def _handle_ahk_managed_key_complete(self, key: str):
+        """处理管理按键完成（延迟+按键执行完毕）"""
+        LOG_INFO(f"[管理按键] ========== 完成: {key} ==========")
+        
+        # 🎯 恢复Python调度器
+        LOG_INFO(f"[管理按键] 发布scheduler_resume_requested事件")
+        event_bus.publish(
+            "scheduler_resume_requested",
+            {"reason": f"managed_key_complete:{key}"},
+        )
+        
+        LOG_INFO(f"[管理按键] 调度器已恢复")
 
     def _handle_ahk_priority_key_down(self, key: str):
         """处理AHK优先级按键按下（兼容旧版本）"""
