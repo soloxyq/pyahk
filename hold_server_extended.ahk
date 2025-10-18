@@ -13,6 +13,7 @@
 #SingleInstance Force
 Persistent
 #WinActivateForce ; 强制激活窗口
+SendMode "Input"  ; 使用SendInput模式，提高在游戏中的识别率
 
 ; 包含命令定义
 #Include ahk_commands.ahk
@@ -491,7 +492,7 @@ ExecuteAction(action) {
 }
 
 SendPress(key) {
-    ; 发送按键 (按下并释放)
+    ; 发送按键 (按下并释放，最小延时)
     global ForceMoveActive, ForceMoveReplacementKey
 
     ; 如果强制移动键按下，所有队列中的按键都替换为配置的替换键
@@ -505,7 +506,9 @@ SendPress(key) {
     if (ShouldAddShiftModifier(key)) {
         Send "+{" key "}"  ; 带shift修饰符
     } else {
-        Send "{" key "}"   ; 普通按键
+        Send "{" key " down}"
+        Sleep 5
+        Send "{" key " up}"
     }
 }
 

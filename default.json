@@ -168,18 +168,18 @@
         },
         "resource_management": {
             "hp_config": {
-                "enabled": false,
-                "key": "1",
-                "threshold": 50,
+                "enabled": true,
+                "key": "c",
+                "threshold": 60,
                 "cooldown": 1000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
                 "detection_mode": "rectangle",
-                "region_x1": 113,
-                "region_y1": 896,
-                "region_x2": 124,
-                "region_y2": 1051,
+                "region_x1": 747,
+                "region_y1": 978,
+                "region_x2": 753,
+                "region_y2": 1049,
                 "colors": [
                     {
                         "name": "Color1",

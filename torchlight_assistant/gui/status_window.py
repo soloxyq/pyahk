@@ -25,8 +25,18 @@ class OSDStatusWindow(QWidget):
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
+            | Qt.WindowType.WindowDoesNotAcceptFocus
         )
+        # 透明背景与输入穿透，避免获取焦点与拦截鼠标键盘
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_ShowWithoutActivating, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        try:
+            # Qt 5.12+ 可用，PySide6 支持；若不可用则忽略异常
+            self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
+        except Exception:
+            pass
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setWindowOpacity(0.8)
 
         self.width = width
