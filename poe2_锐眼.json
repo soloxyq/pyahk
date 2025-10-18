@@ -129,11 +129,11 @@
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
-        "cooldown_checker_interval": 95,
+        "cooldown_checker_interval": 120,
         "sequence_timer_interval": 125,
-        "capture_interval": 50,
+        "capture_interval": 55,
         "hp_cooldown": 1000,
-        "mp_cooldown": 2000,
+        "mp_cooldown": 1000,
         "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
@@ -175,7 +175,7 @@
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "text_ocr",
+                "detection_mode": "rectangle",
                 "text_x1": 97,
                 "text_y1": 814,
                 "text_x2": 228,
@@ -211,11 +211,11 @@
                 "enabled": true,
                 "key": "2",
                 "threshold": 40,
-                "cooldown": 2000,
+                "cooldown": 1000,
                 "tolerance_h": 10,
                 "tolerance_s": 30,
                 "tolerance_v": 50,
-                "detection_mode": "text_ocr",
+                "detection_mode": "rectangle",
                 "text_x1": 1767,
                 "text_y1": 814,
                 "text_x2": 1894,
@@ -248,12 +248,12 @@
             ],
             "managed_keys": {
                 "e": {
-                    "target": "9",
+                    "target": "e",
                     "delay": 50
                 }
             }
         },
-        "skill_sequence": "1,2,3,4,5,6,7,8",
+        "skill_sequence": "1,2,3,4,5,6,7,8,9",
         "process_history": {
             "recent_processes": [
                 "NutstoreClient.exe",

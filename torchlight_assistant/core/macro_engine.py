@@ -303,21 +303,17 @@ class MacroEngine:
         # 特殊按键释放不立即恢复，等待special_key_pause事件
 
     def _handle_ahk_special_key_pause(self, action: str):
-        """处理特殊按键状态变化 - 修复后的版本：不暂停Python层面，AHK层面已经处理过滤逻辑"""
+        """处理特殊按键状态变化（最小实现）：特殊按键激活期间丢弃所有非紧急入队"""
         if action == "start":
-            LOG_INFO("【特殊按键】 特殊按键激活 - AHK层面已启用过滤，仅允许紧急按键")
-            # 不再暂停Python调度器，让AHK层面处理过滤
-            # event_bus.publish(
-            #     "scheduler_pause_requested",
-            #     {"reason": "special_keys_active", "type": "special_key_pause"},
-            # )
+            LOG_INFO("【特殊按键】 特殊按键激活 - 丢弃所有非紧急入队")
+            # 启用丢弃非紧急入队（HP/MP除外）
+            if hasattr(self.input_handler, "set_drop_non_emergency"):
+                self.input_handler.set_drop_non_emergency(True)
         elif action == "end":
-            LOG_INFO("【特殊按键】 所有特殊按键释放 - AHK层面过滤解除")
-            # 不再恢复Python调度器，让AHK层面处理过滤
-            # event_bus.publish(
-            #     "scheduler_resume_requested",
-            #     {"reason": "special_keys_released", "type": "special_key_resume"},
-            # )
+            LOG_INFO("【特殊按键】 特殊按键释放 - 允许非紧急入队")
+            # 关闭丢弃非紧急入队
+            if hasattr(self.input_handler, "set_drop_non_emergency"):
+                self.input_handler.set_drop_non_emergency(False)
 
     def _handle_ahk_managed_key_down(self, key: str):
         """处理管理按键按下（如RButton/e）- 拦截+延迟+映射"""

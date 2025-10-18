@@ -35,6 +35,8 @@ class AHKInputHandler:
         self.ahk_process: Optional[subprocess.Popen] = None
         
         self.dry_run_mode = False
+        # 当特殊按键激活时，丢弃所有非紧急（HP/MP以外）的入队请求
+        self._drop_non_emergency = False
         
         self._init_ahk_system()
         
@@ -215,6 +217,10 @@ class AHKInputHandler:
                     pass
             return True
         
+        # 特殊按键激活时，丢弃所有非紧急入队（send_key 视为非紧急）
+        if self._drop_non_emergency:
+            return False
+        
         if "," in key_str:
             return self.command_sender.send_sequence(key_str, priority=2)
         else:
@@ -242,18 +248,22 @@ class AHKInputHandler:
                     pass
             return True
         
+        # 特殊按键激活时，丢弃非紧急入队（鼠标点击视为非紧急）
+        if self._drop_non_emergency:
+            return False
+        
         return self.command_sender.send_mouse_click(button, priority=2)
     
     def execute_skill_normal(self, key: str):
-        if key:
+        if key and not self._drop_non_emergency:
             self.command_sender.send_normal(key)
     
     def execute_skill_high(self, key: str):
-        if key:
+        if key and not self._drop_non_emergency:
             self.command_sender.send_high_priority(key)
     
     def execute_utility(self, key: str):
-        if key:
+        if key and not self._drop_non_emergency:
             self.command_sender.send_low_priority(key)
     
     def execute_hp_potion(self, key: str):
@@ -318,6 +328,10 @@ class AHKInputHandler:
             state: "main" 或 "osd"
         """
         return self.command_sender.set_python_window_state(state)
+    
+    def set_drop_non_emergency(self, enabled: bool):
+        """在特殊按键激活时启用，丢弃所有非紧急入队"""
+        self._drop_non_emergency = enabled
     
     def start(self):
         pass
