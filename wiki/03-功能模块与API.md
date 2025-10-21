@@ -172,20 +172,198 @@ SetTimer(ProcessQueue, 10)  // 每10ms调用一次
 
 ```python
 # 发送不同优先级的按键
-self.input_handler.execute_hp_potion("1")     # Emergency (0)
+self.input_handler.execute_hp_potion("c")     # Emergency (0) - 新的HP按键
+self.input_handler.execute_mp_potion("2")     # Emergency (0) 
 self.input_handler.execute_skill_high("q")    # High (1)
 self.input_handler.execute_skill_normal("2")  # Normal (2)
 self.input_handler.execute_utility("tab")     # Low (3)
 
-# 发送序列（支持delay指令）
+# 发送序列（支持delay指令与去重）
 self.input_handler.send_key("delay50,q,delay100,w")
+
+# 批量更新配置 (2025.10新增)
+self.input_handler.command_sender.batch_update_config({
+    "emergency_hp_key": "c",
+    "emergency_mp_key": "2",
+    "special_keys_config": ["space"],
+    "managed_keys_config": {"e": {"target": "shift", "delay": 50}}
+})
 ```
+
+## 🚑 索急按键系统 API (2025.10.17新增)
+
+### 概述
+
+絒急按键系统提供了高可靠的生存技能支持，确保 HP/MP 等关键操作在任何情况下都能优先执行。基于 **智能缓存、序列去重、批量配置更新** 三大核心特性实现。
+
+### 紂急按键 API
+
+```python
+class AHKInputHandler:
+    def execute_hp_potion(self, key: str):
+        """执行HP药剂，自动添加到Emergency队列(0)"""
+        return self.command_sender.send_emergency(key)
+    
+    def execute_mp_potion(self, key: str):
+        """执行MP药剂，自动添加到Emergency队列(0)"""
+        return self.command_sender.send_emergency(key)
+    
+    def send_emergency_sequence(self, sequence: str):
+        """发送索急序列，包含去重逻辑"""
+        return self.command_sender.send_sequence(sequence, priority=0)
+        
+    def update_emergency_keys_cache(self, hp_key: str, mp_key: str):
+        """更新索急按键缓存，用于 AHK 端快速识别"""
+        return self.command_sender.batch_update_config({
+            "emergency_hp_key": hp_key,
+            "emergency_mp_key": mp_key
+        })
+```
+
+### 批量配置更新 API
+
+```python
+class AHKCommandSender:
+    def batch_update_config(self, config_updates: dict) -> bool:
+        """
+        批量更新 AHK 配置，减少通信开销
+        
+        Args:
+            config_updates: 配置更新字典
+                - emergency_hp_key: HP 按键
+                - emergency_mp_key: MP 按键  
+                - special_keys_config: 特殊按键列表
+                - managed_keys_config: 管理按键配置
+                - 等等...
+        
+        Returns:
+            bool: 是否成功更新
+        """
+        data = json.dumps(config_updates)
+        return self.send_ahk_cmd(CMD_BATCH_UPDATE_CONFIG, data)
+        
+    def send_emergency(self, key: str) -> bool:
+        """发送索急按键到 Emergency 队列 (0)"""
+        return self.send_ahk_cmd(CMD_ENQUEUE, f"0|press:{key}")
+```
+
+### 序列去重 API
+
+```python
+class MacroEngine:
+    def execute_skill_with_deduplication(self, skill_config: dict):
+        """
+        执行技能并自动去重
+        如果同一序列正在执行，则跳过本次执行
+        """
+        sequence = skill_config.get('key', '')
+        alt_sequence = skill_config.get('alt_key', '')
+        
+        # 优先使用 alt_key 序列
+        target_sequence = alt_sequence if alt_sequence else sequence
+        
+        if target_sequence:
+            # AHK 端会自动进行去重检查
+            priority = 1 if skill_config.get('priority', False) else 2
+            return self.input_handler.send_key(target_sequence, priority)
+        
+        return False
+```
+
+### 使用示例
+
+#### 1. 初始化索急按键缓存
+
+```python
+# 在配置加载时自动更新缓存
+def load_config(self, config_file: str):
+    config = self.config_manager.load_config(config_file)
+    
+    # 提取索急按键配置
+    hp_config = config.get('global', {}).get('resource_management', {}).get('hp_config', {})
+    mp_config = config.get('global', {}).get('resource_management', {}).get('mp_config', {})
+    
+    hp_key = hp_config.get('key', 'c')  # 默认为 'c' (新版本)
+    mp_key = mp_config.get('key', '2')
+    
+    # 批量更新配置
+    self.input_handler.command_sender.batch_update_config({
+        "emergency_hp_key": hp_key,
+        "emergency_mp_key": mp_key,
+        "hp_threshold": hp_config.get('threshold', 60),  # 新默认阈值 60%
+        "mp_threshold": mp_config.get('threshold', 40)
+    })
+```
+
+#### 2. 索急情况下的药剂使用
+
+```python
+# 在资源管理器中使用
+def check_and_use_hp_potion(self):
+    if self.current_hp_percentage < self.hp_threshold:
+        # 使用新的索急 API，确保优先执行
+        self.input_handler.execute_hp_potion(self.hp_key)  # 默认为 'c'
+        
+        # 更新冷却时间
+        self.last_hp_use_time = time.time()
+        
+        # 可选：发送复合序列
+        # self.input_handler.send_emergency_sequence("delay30,c")
+```
+
+#### 3. 游戏配置切换
+
+```python
+# 为不同游戏切换配置
+def switch_to_torchlight_infinite(self):
+    """Torchlight Infinite 专用配置"""
+    self.input_handler.command_sender.batch_update_config({
+        # 絒急按键新配置
+        "emergency_hp_key": "c",      # HP按键从 '1' 改为 'c'
+        "emergency_mp_key": "2",
+        
+        # 窗口激活配置
+        "window_class": "UnrealWindow",
+        "window_exe": "torchlight_infinite.exe",
+        
+        # HP 检测区域新坐标
+        "hp_region": [747, 978, 753, 1049],  # 新的检测区域
+        "hp_threshold": 60,                  # 阈值从 50% 提升到 60%
+        
+        # 技能按键映射
+        "skill_mappings": {
+            "Skill1": {"key": "LButton", "coords": [815, 1000]},
+            "Skill3": {"key": "q", "coords": [925, 1000]},
+            "Skill4": {"key": "e", "coords": [980, 1000]}
+        }
+    })
+
+def switch_to_poe2(self):
+    """Path of Exile 2 专用配置"""
+    self.input_handler.command_sender.batch_update_config({
+        "emergency_hp_key": "1",      # 保持原有配置
+        "emergency_mp_key": "2",
+        "window_class": "POEWindowClass",
+        "window_exe": "PathOfExile_x64.exe",
+        "hp_region": [113, 896, 124, 1051],
+        "hp_threshold": 50
+    })
+```
+
+### 性能优化特性
+
+1. **智能缓存**: AHK 端直接缓存絒急按键，无需重复解析配置
+2. **序列去重**: 防止快速重复按键导致的性能问题和误触发
+3. **批量更新**: 一次通信更新多个配置项，减少 WM_COPYDATA 开销
+4. **絒急优先**: Emergency 队列在任何情况下都不被暂停，确保生存技能可靠执行
+
+---
 
 ## 🎯 技能自动化系统
 
 ### 概述
 
-技能系统是 pyahk 的核心功能，提供自动化的技能释放、冷却检测和优先级管理。支持多种触发模式和执---
+技能系统是 pyahk 的核心功能，提供自动化的技能释放、冷却检测和优先级管理。支持多种触发模式和执行---
 
 ## 💊 智能药剂系统
 
