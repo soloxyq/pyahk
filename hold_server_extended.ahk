@@ -80,6 +80,7 @@ global QueueStats := Map(
     "processed", 0
 )
 
+
 ; 🚀 性能优化：字符串缓存池，减少频繁的字符串操作
 global StringSplitCache := Map()
 global StringLowerCache := Map()
@@ -108,7 +109,7 @@ hWnd := gui1.Hwnd
 OnMessage(0x4A, WM_COPYDATA)
 
 ; ===============================================================================
-; 队列处理器 (10ms定时器)
+; 队列处理器 (20ms定时器)
 ; ===============================================================================
 ProcessQueue() {
     global DelayUntil, TotalQueueCount, QueueCounts
@@ -200,8 +201,8 @@ ProcessQueue() {
     }
 }
 
-; 启动定时器
-SetTimer(ProcessQueue, 10)
+; 启动定时器（固定20ms，简单高效）
+SetTimer(ProcessQueue, 20)
 
 ; ===============================================================================
 ; 命令接收 (WM_COPYDATA)
@@ -598,7 +599,8 @@ CachedStrLower(str) {
     return result
 }
 
-; 📝 注意：直接使用常量比较，不要函数包装（函数调用开销 > 直接比較）
+; 📝 注意：直接使用常量比较，不要函数包装（函数调用开销 > 直接比较）
+
 
 ; ===============================================================================
 ; 动作执行
@@ -963,7 +965,7 @@ SendEventToPython(event) {
     }
 }
 
-; 发送WM_COPYDATA消息到Python的辅助函数
+; 发送WM_COPYDATA消息到Python的辅助函数（简单高效版本）
 SendWMCopyDataToPython(hwnd, eventData) {
     try {
         ; 准备UTF-8编码的数据
@@ -983,7 +985,7 @@ SendWMCopyDataToPython(hwnd, eventData) {
             "Ptr", 0,         ; wParam
             "Ptr", cds.Ptr)   ; lParam
 
-        ; 🎯 返回成功状态
+        ; 返回成功状态
         return (result != 0)
 
     } catch as err {
@@ -993,7 +995,7 @@ SendWMCopyDataToPython(hwnd, eventData) {
 }
 
 SendStatsToPython() {
-    ; 发送统计信息
+    ; 🚀 发送统计信息
     stats := Format("stats:e={},h={},n={},l={},p={}",
         QueueStats["emergency"],
         QueueStats["high"],
