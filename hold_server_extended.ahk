@@ -26,6 +26,15 @@ global HighQueue := []
 global NormalQueue := []
 global LowQueue := []
 
+; 🚀 性能优化：队列计数器，避免频繁的Length属性访问
+global QueueCounts := Map(
+    "emergency", 0,
+    "high", 0,
+    "normal", 0,
+    "low", 0
+)
+global TotalQueueCount := 0  ; 总任务计数，用于快速检查是否有工作
+
 global IsPaused := false
 global PriorityKeysActive := Map()
 global RegisteredHooks := Map()
@@ -71,6 +80,21 @@ global QueueStats := Map(
     "processed", 0
 )
 
+; 🚀 性能优化：字符串缓存池，减少频繁的字符串操作
+global StringSplitCache := Map()
+global StringLowerCache := Map()
+global MaxCacheSize := 100
+
+; 预定义常用字符串常量，避免重复创建
+global ACTION_PRESS := "press"
+global ACTION_DELAY := "delay"
+global ACTION_SEQUENCE := "sequence"
+global ACTION_CLEANUP := "cleanup"
+global ACTION_HOLD := "hold"
+global ACTION_RELEASE := "release"
+global ACTION_MOUSE_CLICK := "mouse_click"
+global ACTION_NOTIFY := "notify"
+
 ; ===============================================================================
 ; GUI窗口 (接收WM_COPYDATA)
 ; ===============================================================================
@@ -87,16 +111,19 @@ OnMessage(0x4A, WM_COPYDATA)
 ; 队列处理器 (10ms定时器)
 ; ===============================================================================
 ProcessQueue() {
-    global DelayUntil, HighQueue, NormalQueue, LowQueue
+    global DelayUntil, TotalQueueCount, QueueCounts
+
+    ; 🚀 性能优化：快速检查 - 如果没有任何任务且不在延迟中，直接返回
+    if (TotalQueueCount = 0 && DelayUntil = 0) {
+        return
+    }
 
     ; 🎯 检查是否在异步延迟中
     if (DelayUntil > 0) {
         if (A_TickCount < DelayUntil) {
-            ; 🎯 关键修复：延迟期间清空所有非紧急队列，防止技能积累
-            if (HighQueue.Length > 0 || NormalQueue.Length > 0 || LowQueue.Length > 0) {
-                HighQueue := []
-                NormalQueue := []
-                LowQueue := []
+            ; 🎯 关键修复：延迟期间清空所有非索急队列，防止技能积累
+            if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
+                ClearNonEmergencyQueues()
             }
             return  ; 还在延迟中，不处理任何队列
         } else {
@@ -105,62 +132,69 @@ ProcessQueue() {
         }
     }
 
-    ; 紧急队列永远执行
-    if (EmergencyQueue.Length > 0) {
+    ; 🚀 索急队列永远执行（使用计数器检查）
+    if (QueueCounts["emergency"] > 0) {
         action := EmergencyQueue.RemoveAt(1)
+        DecrementQueueCount("emergency")
         ExecuteAction(action)
         QueueStats["processed"] := QueueStats["processed"] + 1
         return
     }
 
-    ; 🎯 修复：优先级模式下的紧急按键处理（Master方案学习）
+    ; 🎯 修复：优先级模式下的絒急按键处理（Master方案学习）
     if (IsPaused) {
         return  ; 手动暂停时完全停止
     }
 
     if (SpecialKeysPaused) {
-        ; 特殊按键激活时：只允许紧急按键通过
-        if (HighQueue.Length > 0) {
+        ; 特殊按键激活时：只允许絒急按键通过
+        if (QueueCounts["high"] > 0) {
             action := HighQueue[1]
             if (IsEmergencyAction(action)) {
                 action := HighQueue.RemoveAt(1)
+                DecrementQueueCount("high")
                 ExecuteAction(action)
                 QueueStats["processed"] := QueueStats["processed"] + 1
                 return
             }
         }
-        if (NormalQueue.Length > 0) {
+        if (QueueCounts["normal"] > 0) {
             action := NormalQueue[1]
             if (IsEmergencyAction(action)) {
                 action := NormalQueue.RemoveAt(1)
+                DecrementQueueCount("normal")
                 ExecuteAction(action)
                 QueueStats["processed"] := QueueStats["processed"] + 1
                 return
             }
         }
-        if (LowQueue.Length > 0) {
+        if (QueueCounts["low"] > 0) {
             action := LowQueue[1]
             if (IsEmergencyAction(action)) {
                 action := LowQueue.RemoveAt(1)
+                DecrementQueueCount("low")
                 ExecuteAction(action)
                 QueueStats["processed"] := QueueStats["processed"] + 1
                 return
             }
         }
-        return  ; 非紧急按键在优先级模式下被过滤
+        return  ; 非索急按键在优先级模式下被过滤
     }
 
-    ; 正常模式：按优先级处理
-    if (HighQueue.Length > 0) {
+    ; 🚀 正常模式：按优先级处理（使用计数器）
+    if (QueueCounts["high"] > 0) {
         action := HighQueue.RemoveAt(1)
+        DecrementQueueCount("high")
         ExecuteAction(action)
         QueueStats["processed"] := QueueStats["processed"] + 1
-    } else if (NormalQueue.Length > 0) {
+    } else if (QueueCounts["normal"] > 0) {
         action := NormalQueue.RemoveAt(1)
+        DecrementQueueCount("normal")
         ExecuteAction(action)
         QueueStats["processed"] := QueueStats["processed"] + 1
-    } else if (LowQueue.Length > 0) {
+    } else if (QueueCounts["low"] > 0) {
         action := LowQueue.RemoveAt(1)
+        DecrementQueueCount("low")
         ExecuteAction(action)
         QueueStats["processed"] := QueueStats["processed"] + 1
     }
@@ -218,7 +252,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         case CMD_ENQUEUE:
             ; ENQUEUE - 添加到队列
             ; 参数格式: "priority:action"
-            parts := StrSplit(param, ":", , 2)
+            parts := CachedStrSplit(param, ":", , 2)
             if (parts.Length >= 2) {
                 priority := Integer(parts[1])
                 action := parts[2]
@@ -240,7 +274,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         case CMD_HOOK_REGISTER:
             ; HOOK_REGISTER - 注册Hook
             ; 参数格式: "key:mode"
-            parts := StrSplit(param, ":")
+            parts := CachedStrSplit(param, ":")
             if (parts.Length >= 2) {
                 RegisterHook(parts[1], parts[2])
                 return 1
@@ -261,7 +295,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         case CMD_SET_STATIONARY:
             ; SET_STATIONARY - 设置原地模式
             ; 参数格式: "active:mode_type" 例如: "true:shift_modifier"
-            parts := StrSplit(param, ":")
+            parts := CachedStrSplit(param, ":")
             if (parts.Length >= 2) {
                 global StationaryModeActive, StationaryModeType
                 StationaryModeActive := (parts[1] = "true")
@@ -288,7 +322,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; SET_MANAGED_KEY_CONFIG - 设置管理按键配置
             ; 参数格式: "key:target:delay" 例如: "e:+:500"
             global ManagedKeysConfig
-            parts := StrSplit(param, ":")
+            parts := CachedStrSplit(param, ":")
             if (parts.Length >= 3) {
                 key := parts[1]
                 target := parts[2]
@@ -343,18 +377,18 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 ; ===============================================================================
 ; 判断是否为紧急动作（HP/MP等生存技能）
 IsEmergencyAction(action) {
-    global CachedHpKey, CachedMpKey
+    global CachedHpKey, CachedMpKey, ACTION_PRESS
 
-    ; 解析动作类型
+    ; 🚀 解析动作类型（使用缓存）
     if (InStr(action, ":")) {
-        parts := StrSplit(action, ":", , 2)
-        if (parts.Length >= 2 && parts[1] = "press") {
-            key := StrLower(parts[2])
+        parts := CachedStrSplit(action, ":", , 2)
+        if (parts.Length >= 2 && parts[1] = ACTION_PRESS) {
+            key := CachedStrLower(parts[2])
             return (key = CachedHpKey || key = CachedMpKey)
         }
     } else {
         ; 兼容旧格式：直接按键
-        key := StrLower(action)
+        key := CachedStrLower(action)
         return (key = CachedHpKey || key = CachedMpKey)
     }
 
@@ -389,18 +423,19 @@ UpdateBatchConfig(configString) {
         return
     }
 
-    configs := StrSplit(configString, ",")
+    ; 🚀 使用缓存分割
+    configs := CachedStrSplit(configString, ",")
     for index, config in configs {
-        parts := StrSplit(config, ":")
+        parts := CachedStrSplit(config, ":")
         if (parts.Length >= 2) {
             key := Trim(parts[1])
             value := Trim(parts[2])
 
             switch key {
                 case "hp_key":
-                    CachedHpKey := StrLower(value)
+                    CachedHpKey := CachedStrLower(value)
                 case "mp_key":
-                    CachedMpKey := StrLower(value)
+                    CachedMpKey := CachedStrLower(value)
                 case "stationary_type":
                     StationaryModeType := value
                     ; 可扩展更多配置项...
@@ -410,37 +445,89 @@ UpdateBatchConfig(configString) {
 }
 
 ; ===============================================================================
+; 🚀 队列计数器管理函数（性能优化）
+; ===============================================================================
+IncrementQueueCount(queueName) {
+    global QueueCounts, TotalQueueCount
+    QueueCounts[queueName] := QueueCounts[queueName] + 1
+    TotalQueueCount := TotalQueueCount + 1
+}
+
+DecrementQueueCount(queueName) {
+    global QueueCounts, TotalQueueCount
+    if (QueueCounts[queueName] > 0) {
+        QueueCounts[queueName] := QueueCounts[queueName] - 1
+        TotalQueueCount := TotalQueueCount - 1
+    }
+}
+
+; 🚀 快速清理非紂急队列（性能优化）
+ClearNonEmergencyQueues() {
+    global HighQueue, NormalQueue, LowQueue, QueueCounts, TotalQueueCount
+    
+    ; 更新计数器
+    TotalQueueCount := TotalQueueCount - QueueCounts["high"] - QueueCounts["normal"] - QueueCounts["low"]
+    QueueCounts["high"] := 0
+    QueueCounts["normal"] := 0
+    QueueCounts["low"] := 0
+    
+    ; 清空队列
+    HighQueue := []
+    NormalQueue := []
+    LowQueue := []
+}
+
+; ===============================================================================
 ; 队列操作
 ; ===============================================================================
 EnqueueAction(priority, action) {
     switch priority {
         case 0:
             EmergencyQueue.Push(action)
+            IncrementQueueCount("emergency")
             QueueStats["emergency"] := QueueStats["emergency"] + 1
         case 1:
             HighQueue.Push(action)
+            IncrementQueueCount("high")
             QueueStats["high"] := QueueStats["high"] + 1
         case 2:
             NormalQueue.Push(action)
+            IncrementQueueCount("normal")
             QueueStats["normal"] := QueueStats["normal"] + 1
         case 3:
             LowQueue.Push(action)
+            IncrementQueueCount("low")
             QueueStats["low"] := QueueStats["low"] + 1
     }
 }
 
 ClearQueue(priority) {
+    global QueueCounts, TotalQueueCount
+    
     switch priority {
         case 0:
+            TotalQueueCount := TotalQueueCount - QueueCounts["emergency"]
+            QueueCounts["emergency"] := 0
             EmergencyQueue := []
         case 1:
+            TotalQueueCount := TotalQueueCount - QueueCounts["high"]
+            QueueCounts["high"] := 0
             HighQueue := []
         case 2:
+            TotalQueueCount := TotalQueueCount - QueueCounts["normal"]
+            QueueCounts["normal"] := 0
             NormalQueue := []
         case 3:
+            TotalQueueCount := TotalQueueCount - QueueCounts["low"]
+            QueueCounts["low"] := 0
             LowQueue := []
         case -1:
-            ; 清空所有队列
+            ; 🚀 清空所有队列（使用计数器）
+            TotalQueueCount := 0
+            QueueCounts["emergency"] := 0
+            QueueCounts["high"] := 0
+            QueueCounts["normal"] := 0
+            QueueCounts["low"] := 0
             EmergencyQueue := []
             HighQueue := []
             NormalQueue := []
@@ -449,18 +536,85 @@ ClearQueue(priority) {
 }
 
 ; ===============================================================================
+; 🚀 字符串缓存函数（性能优化）
+; ===============================================================================
+CachedStrSplit(str, delimiter, omitChars := "", maxParts := -1) {
+    global StringSplitCache, MaxCacheSize
+    
+    ; 生成缓存键
+    cacheKey := str . "|" . delimiter . "|" . omitChars . "|" . maxParts
+    
+    ; 检查缓存
+    if (StringSplitCache.Has(cacheKey)) {
+        return StringSplitCache[cacheKey]
+    }
+    
+    ; 执行分割
+    result := StrSplit(str, delimiter, omitChars, maxParts)
+    
+    ; 缓存管理：防止内存泄露
+    if (StringSplitCache.Count >= MaxCacheSize) {
+        ; 清理最早的一半缓存
+        clearCount := 0
+        for key in StringSplitCache {
+            StringSplitCache.Delete(key)
+            clearCount++
+            if (clearCount >= MaxCacheSize // 2) {
+                break
+            }
+        }
+    }
+    
+    ; 添加到缓存
+    StringSplitCache[cacheKey] := result
+    return result
+}
+
+CachedStrLower(str) {
+    global StringLowerCache, MaxCacheSize
+    
+    ; 检查缓存
+    if (StringLowerCache.Has(str)) {
+        return StringLowerCache[str]
+    }
+    
+    ; 执行转换
+    result := StrLower(str)
+    
+    ; 缓存管理
+    if (StringLowerCache.Count >= MaxCacheSize) {
+        ; 清理一半缓存
+        clearCount := 0
+        for key in StringLowerCache {
+            StringLowerCache.Delete(key)
+            clearCount++
+            if (clearCount >= MaxCacheSize // 2) {
+                break
+            }
+        }
+    }
+    
+    StringLowerCache[str] := result
+    return result
+}
+
+; 📝 注意：直接使用常量比较，不要函数包装（函数调用开销 > 直接比較）
+
+; ===============================================================================
 ; 动作执行
 ; ===============================================================================
 ExecuteAction(action) {
-    ; 🎯 处理清理标记（Master方案学习）
-    if (InStr(action, "cleanup:")) {
-        key := StrReplace(action, "cleanup:", "")
+    global ACTION_CLEANUP, ACTION_PRESS, ACTION_SEQUENCE, ACTION_HOLD, ACTION_RELEASE, ACTION_MOUSE_CLICK, ACTION_DELAY, ACTION_NOTIFY
+    
+    ; 🚀 处理清理标记（使用常量比较）
+    if (InStr(action, ACTION_CLEANUP . ":")) {
+        key := StrReplace(action, ACTION_CLEANUP . ":", "")
         ClearSequenceMark(key)
         return
     }
 
-    ; 解析动作类型（注意：StrSplit的第4个参数是MaxParts，第3个是OmitChars）
-    parts := StrSplit(action, ":", , 2)
+    ; 🚀 解析动作类型（使用缓存分割）
+    parts := CachedStrSplit(action, ":", , 2)
     if parts.Length < 2 {
         SendPress(action) ; 兼容旧的直接发送key的模式
         return
@@ -469,25 +623,24 @@ ExecuteAction(action) {
     actionType := parts[1]
     actionData := parts[2]
 
-    ; 执行动作
-    switch actionType {
-        case "press":
-            SendPress(actionData)
-        case "sequence":
-            ExecuteSequence(actionData)
-        case "hold":
-            SendDown(actionData)
-        case "release":
-            SendUp(actionData)
-        case "mouse_click":
-            ExecuteMouseClick(actionData)
-        case "delay":
-            ; 🎯 异步延迟：设置延迟结束时间，不阻塞
-            global DelayUntil
-            DelayUntil := A_TickCount + Integer(actionData)
-        case "notify":
-            ; 🎯 发送通知到Python
-            SendEventToPython(actionData)
+    ; 🚀 执行动作（直接常量比较，无函数调用开销）
+    if (actionType = ACTION_PRESS) {
+        SendPress(actionData)
+    } else if (actionType = ACTION_SEQUENCE) {
+        ExecuteSequence(actionData)
+    } else if (actionType = ACTION_HOLD) {
+        SendDown(actionData)
+    } else if (actionType = ACTION_RELEASE) {
+        SendUp(actionData)
+    } else if (actionType = ACTION_MOUSE_CLICK) {
+        ExecuteMouseClick(actionData)
+    } else if (actionType = ACTION_DELAY) {
+        ; 🎯 异步延迟：设置延迟结束时间，不阻塞
+        global DelayUntil
+        DelayUntil := A_TickCount + Integer(actionData)
+    } else if (actionType = ACTION_NOTIFY) {
+        ; 🎯 发送通知到Python
+        SendEventToPython(actionData)
     }
 }
 
@@ -543,11 +696,13 @@ ShouldAddShiftModifier(key) {
 }
 
 ExecuteSequence(sequence) {
-    ; 执行按键序列: "delay50,q,delay100,w"
-    parts := StrSplit(sequence, ",")
+    global ACTION_DELAY
+    
+    ; 🚀 执行按键序列（使用缓存分割）
+    parts := CachedStrSplit(sequence, ",")
     for index, part in parts {
         part := Trim(part)
-        if (InStr(part, "delay")) {
+        if (InStr(part, ACTION_DELAY)) {
             ; 延迟指令
             ms := Integer(SubStr(part, 6))
             Sleep ms
@@ -696,11 +851,9 @@ HandleManagedKey(key) {
     ; 标记为处理中
     MarkSequenceActive(key)
 
-    ; 🎯 关键修复：清空所有非紧急队列，避免技能前后摇冲突
-    if (HighQueue.Length > 0 || NormalQueue.Length > 0 || LowQueue.Length > 0) {
-        HighQueue := []
-        NormalQueue := []
-        LowQueue := []
+    ; 🚀 关键修复：清空所有非紂急队列，同时同步计数器！
+    if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
+        ClearNonEmergencyQueues()  ; 使用统一函数确保计数器同步
     }
 
     SendEventToPython("managed_key_down:" key)
@@ -711,27 +864,27 @@ HandleManagedKey(key) {
         target := config.target
         delay := config.delay
 
-        ; 放入Emergency队列（会立即执行）
+        ; 🚀 放入Emergency队列（使用EnqueueAction确保计数器同步）
         ; 🎯 按键前后都加delay
         if (delay > 0) {
-            EmergencyQueue.Push("delay:" delay)  ; 按键前delay
+            EnqueueAction(0, "delay:" delay)  ; 按键前elay
         }
-        EmergencyQueue.Push("press:" target)
+        EnqueueAction(0, "press:" target)
 
         if (delay > 0) {
-            EmergencyQueue.Push("delay:" delay)  ; 按键后delay
+            EnqueueAction(0, "delay:" delay)  ; 按键名elay
         }
 
         ; 🎯 关键修复：添加恢复通知，让Python恢复调度器
-        EmergencyQueue.Push("notify:managed_key_complete:" key)
+        EnqueueAction(0, "notify:managed_key_complete:" key)
 
         ; 添加清理标记（序列执行完后清除去重标记）
-        EmergencyQueue.Push("cleanup:" key)
+        EnqueueAction(0, "cleanup:" key)
     } else {
-        ; 如果没有配置，使用原按键
-        EmergencyQueue.Push("press:" key)
-        EmergencyQueue.Push("notify:managed_key_complete:" key)
-        EmergencyQueue.Push("cleanup:" key)
+        ; 🚀 如果没有配置，使用原按键（确保计数器同步）
+        EnqueueAction(0, "press:" key)
+        EnqueueAction(0, "notify:managed_key_complete:" key)
+        EnqueueAction(0, "cleanup:" key)
     }
 }
 
