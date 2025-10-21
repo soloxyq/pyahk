@@ -1,0 +1,250 @@
+{
+    "skills": {
+        "Skill1": {
+            "Enabled": false,
+            "Key": "LButton",
+            "Priority": true,
+            "Timer": 150,
+            "TriggerMode": 1,
+            "CooldownCoordX": 815,
+            "CooldownCoordY": 1000,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 900,
+            "ConditionCoordY": 600,
+            "ConditionColor": 0,
+            "AltKey": "9"
+        },
+        "Skill2": {
+            "Enabled": false,
+            "Key": "c",
+            "Priority": false,
+            "Timer": 175,
+            "TriggerMode": 1,
+            "CooldownCoordX": 870,
+            "CooldownCoordY": 1000,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 1310,
+            "ConditionCoordY": 992,
+            "ConditionColor": 0,
+            "AltKey": "2"
+        },
+        "Skill3": {
+            "Enabled": true,
+            "Key": "q",
+            "Priority": false,
+            "Timer": 650,
+            "TriggerMode": 1,
+            "CooldownCoordX": 925,
+            "CooldownCoordY": 1000,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill4": {
+            "Enabled": true,
+            "Key": "e",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "CooldownCoordX": 980,
+            "CooldownCoordY": 1000,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill5": {
+            "Enabled": false,
+            "Key": "RButton",
+            "Priority": false,
+            "Timer": 150,
+            "TriggerMode": 1,
+            "CooldownCoordX": 1035,
+            "CooldownCoordY": 1000,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 126,
+            "ConditionCoordY": 970,
+            "ConditionColor": 1,
+            "AltKey": ""
+        },
+        "Skill6": {
+            "Enabled": true,
+            "Key": "v",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 1800,
+            "ConditionCoordY": 970,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill7": {
+            "Enabled": false,
+            "Key": "7",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill8": {
+            "Enabled": false,
+            "Key": "8",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        }
+    },
+    "global": {
+        "sequence_enabled": false,
+        "debug_mode": {
+            "enabled": false
+        },
+        "queue_processor_interval": 35,
+        "key_press_duration": 10,
+        "mouse_click_duration": 5,
+        "cooldown_checker_interval": 125,
+        "sequence_timer_interval": 125,
+        "capture_interval": 55,
+        "hp_cooldown": 1000,
+        "mp_cooldown": 1000,
+        "resource_check_interval": 200,
+        "sound_feedback_enabled": true,
+        "window_activation": {
+            "enabled": true,
+            "ahk_class": "Notepad++",
+            "ahk_exe": "notepad++.exe"
+        },
+        "stationary_mode_config": {
+            "hotkey": "x",
+            "mode_type": "shift_modifier",
+            "force_move_hotkey": "a",
+            "force_move_replacement_key": "f"
+        },
+        "affix_reroll": {
+            "enabled": true,
+            "target_affixes": [],
+            "max_attempts": 100,
+            "click_delay": 200,
+            "enchant_button_coord": null,
+            "first_affix_button_coord": null,
+            "replace_button_coord": null,
+            "close_button_coord": null
+        },
+        "pathfinding_config": {
+            "hotkey": "",
+            "minimap_area": [
+                0,
+                0,
+                0,
+                0
+            ]
+        },
+        "resource_management": {
+            "hp_config": {
+                "enabled": true,
+                "key": "c",
+                "threshold": 60,
+                "cooldown": 1000,
+                "tolerance_h": 10,
+                "tolerance_s": 30,
+                "tolerance_v": 50,
+                "detection_mode": "rectangle",
+                "region_x1": 628,
+                "region_y1": 390,
+                "region_x2": 704,
+                "region_y2": 437,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 157,
+                        "target_s": 75,
+                        "target_v": 29,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    },
+                    {
+                        "name": "Color2",
+                        "target_h": 40,
+                        "target_s": 84,
+                        "target_v": 48,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    }
+                ]
+            },
+            "mp_config": {
+                "enabled": false,
+                "key": "2",
+                "threshold": 40,
+                "cooldown": 1000,
+                "tolerance_h": 10,
+                "tolerance_s": 30,
+                "tolerance_v": 50,
+                "detection_mode": "rectangle",
+                "region_x1": 1839,
+                "region_y1": 106,
+                "region_x2": 1892,
+                "region_y2": 139,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 104,
+                        "target_s": 80,
+                        "target_v": 58,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    }
+                ]
+            },
+            "check_interval": 200
+        },
+        "priority_keys": {
+            "enabled": true,
+            "special_keys": [],
+            "managed_keys": {}
+        },
+        "skill_sequence": "1,2,3,4,5,6,7,8,9",
+        "process_history": {
+            "recent_processes": [
+                "NutstoreClient.exe",
+                "notepad++.exe"
+            ]
+        },
+        "tesseract_ocr": {
+            "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            "lang": "eng",
+            "psm_mode": 7,
+            "char_whitelist": "0123456789/,"
+        }
+    }
+}

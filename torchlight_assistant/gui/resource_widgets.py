@@ -37,7 +37,6 @@ class ResourceManagementWidget(QWidget):
         super().__init__()
         self.hp_widgets = {}
         self.mp_widgets = {}
-        self.tolerance_widgets = {}  # 容差配置控件
         self.main_window = None  # 引用主窗口，用于隐藏/显示
 
         # 存储拾取的HSV值 - 使用游戏实际测量值
@@ -53,6 +52,23 @@ class ResourceManagementWidget(QWidget):
         self.mp_circle_config = {}
 
         self._setup_ui()
+
+    def _auto_parse_initial_colors(self):
+        """自动解析初始颜色配置并显示背景条"""
+        try:
+            # 确保global_colors_edit已经创建并有内容
+            if hasattr(self, 'global_colors_edit'):
+                colors_text = self.global_colors_edit.toPlainText().strip()
+                if colors_text:
+                    # 调用解析函数显示背景条
+                    self._parse_global_colors()
+                    print("[UI初始化] 自动解析默认颜色配置并显示背景条")
+                else:
+                    print("[UI初始化] 警告：颜色配置文本框为空")
+            else:
+                print("[UI初始化] 警告：global_colors_edit未找到")
+        except Exception as e:
+            print(f"[UI初始化] 自动解析颜色配置失败: {str(e)}")
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -88,6 +104,11 @@ class ResourceManagementWidget(QWidget):
         # 移除配置说明，保持界面简洁
 
         layout.addStretch()
+        
+        # 🚀 UI初始化完成后自动解析颜色配置，显示默认背景条
+        # 使用QTimer延迟执行，确保所有UI组件都已创建完成
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, self._auto_parse_initial_colors)
 
     def _create_flask_skill_config_group(self, title, prefix, color):
         """创建药剂技能配置组"""
@@ -453,7 +474,7 @@ class ResourceManagementWidget(QWidget):
 
         # 颜色配置说明
         colors_info = QLabel(
-            "工具用途: 测试多颜色配置格式，每行一个颜色 H,S,V,H容差,S容差,V容差 (OpenCV格式)"
+            "工具用途: 显示取色工具获取的颜色，每行一个颜色 H,S,V (OpenCV格式)"
         )
         colors_info.setStyleSheet("color: #666; font-size: 10pt; font-style: italic;")
         colors_layout.addWidget(colors_info)
@@ -464,13 +485,13 @@ class ResourceManagementWidget(QWidget):
 
         self.global_colors_edit = QTextEdit()
         self.global_colors_edit.setPlaceholderText(
-            "格式：\n每行一个颜色+容差(H,S,V,H容差,S容差,V容差)\n\n例如:\n157,75,29,10,30,50\n40,84,48,15,25,35\n104,80,58,8,20,25"
+            "格式：\n每行一个颜色值(H,S,V)\n\n例如:\n157,75,29\n40,84,48"
         )
         self.global_colors_edit.setPlainText(
-            "157,75,29,10,30,50\n40,84,48,15,25,35\n104,80,58,8,20,25"
+            "157,75,29\n40,84,48"
         )
         self.global_colors_edit.setMinimumWidth(300)
-        self.global_colors_edit.setMaximumHeight(80)
+        self.global_colors_edit.setMaximumHeight(50)  # 缩小高度，适应最多2行颜色
         self.global_colors_edit.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         colors_input_layout.addWidget(self.global_colors_edit)
 
@@ -503,44 +524,51 @@ class ResourceManagementWidget(QWidget):
         container.setLayout(main_layout)
         return container
 
-    def _get_current_tolerance(self):
-        """获取当前容差设置，优先从全局容差获取，否则使用默认值"""
+    def _get_current_tolerance(self, prefix: str = None):
+        """获取HP/MP容差设置"""
+        if not prefix:
+            return [10, 30, 50]  # 默认容差
+            
         try:
-            # 尝试从全局容差输入框获取
-            if hasattr(self, "tolerance_widgets") and self.tolerance_widgets:
-                tolerance_input = self.tolerance_widgets.get("tolerance_input")
-                if tolerance_input:
-                    tolerance_text = tolerance_input.text().strip()
-                    if tolerance_text:
-                        values = [
-                            int(x.strip())
-                            for x in tolerance_text.split(",")
-                            if x.strip()
-                        ]
-                        if len(values) == 3:
-                            return values  # [h_tol, s_tol, v_tol]
-
-            # 默认容差
-            return [10, 30, 50]
+            tolerance_input = getattr(self, f"{prefix}_tolerance_input", None)
+            if tolerance_input:
+                tolerance_text = tolerance_input.text().strip()
+                if tolerance_text:
+                    values = [int(x.strip()) for x in tolerance_text.split(",") if x.strip()]
+                    if len(values) == 3:
+                        return values
+            return [10, 30, 50]  # 默认容差
         except:
             return [10, 30, 50]
 
     def _add_color_to_list(self, h, s, v, h_tol=None, s_tol=None, v_tol=None):
-        """将颜色添加到颜色列表，格式为H,S,V,H容差,S容差,V容差"""
-        if h_tol is None or s_tol is None or v_tol is None:
-            h_tol, s_tol, v_tol = self._get_current_tolerance()
-
+        """将HSV颜色值添加到颜色列表，格式为H,S,V
+        使用FIFO队列逻辑，最多保持２个颜色。容差信息不存储在颜色列表中。"""
+        # 🚀 获取当前颜色列表
         current_text = self.global_colors_edit.toPlainText().strip()
-        new_color = f"{h},{s},{v},{h_tol},{s_tol},{v_tol}"
-
+        new_color = f"{h},{s},{v}"  # 只存储HSV值
+        
+        # 🚀 解析现有颜色
         if current_text:
-            updated_text = current_text + "\n" + new_color
+            existing_colors = [line.strip() for line in current_text.split("\n") if line.strip()]
         else:
-            updated_text = new_color
-
+            existing_colors = []
+        
+        # 🚀 添加新颜色到列表末尾
+        existing_colors.append(new_color)
+        
+        # 🚀 FIFO限制：如果超过２个，移除最旧的（第一个）
+        MAX_COLORS = 2
+        if len(existing_colors) > MAX_COLORS:
+            removed_color = existing_colors.pop(0)  # 移除最旧的颜色
+            print(f"[颜色管理] 移除最旧颜色: {removed_color}")
+        
+        # 🚀 更新文本框
+        updated_text = "\n".join(existing_colors)
         self.global_colors_edit.setPlainText(updated_text)
+        
         print(
-            f"[颜色添加] 添加颜色到列表: HSV({h},{s},{v}) 容差(±{h_tol},±{s_tol},±{v_tol})"
+            f"[颜色添加] 添加颜色到列表: HSV({h},{s},{v}) | 当前总数: {len(existing_colors)}"
         )
 
     def _parse_global_colors(self):
@@ -566,21 +594,16 @@ class ResourceManagementWidget(QWidget):
 
             for i, line in enumerate(lines):
                 try:
-                    # 解析单行颜色值 H,S,V,H容差,S容差,V容差
+                    # 解析单行颜色值 H,S,V
                     values = [int(x.strip()) for x in line.split(",") if x.strip()]
 
-                    if len(values) == 3:
-                        # 兼容旧的3值格式 H,S,V，使用默认容差
-                        h, s, v = values
-                        h_tol, s_tol, v_tol = self._get_current_tolerance()
-                    elif len(values) == 6:
-                        # 新的6值格式 H,S,V,H容差,S容差,V容差
-                        h, s, v, h_tol, s_tol, v_tol = values
-                    else:
+                    if len(values) != 3:
                         self.global_colors_result.setText(
-                            f"❌ 第{i+1}行格式错误：应为H,S,V或H,S,V,H容差,S容差,V容差格式"
+                            f"❌ 第{i+1}行格式错误：必须为3个值 (H,S,V)"
                         )
                         return
+                    
+                    h, s, v = values
 
                     # 验证OpenCV HSV范围
                     if not (0 <= h <= 179):
@@ -609,7 +632,7 @@ class ResourceManagementWidget(QWidget):
                     <div style='margin: 3px 0; padding: 6px 10px; border-radius: 6px; 
                                background-color: {bg_color}; color: {text_color}; 
                                border: 1px solid #ddd; font-size: 10pt; font-weight: bold;'>
-                        颜色{i+1}: HSV({h},{s},{v}) 容差(±{h_tol},±{s_tol},±{v_tol}) → RGB({r},{g},{b})
+                        颜色{i+1}: HSV({h},{s},{v}) → RGB({r},{g},{b})
                     </div>
                     """
                     html_parts.append(color_html)
@@ -627,64 +650,21 @@ class ResourceManagementWidget(QWidget):
             self.global_colors_result.setText(f"❌ 解析错误：{str(e)}")
 
     def _start_color_analysis(self):
-        """开始颜色分析"""
-        if not self.main_window:
-            return
+        """开始颜色分析（与_start_region_color_analysis功能重复，已废弃）"""
+        # 🚀 这个函数已经被_start_region_color_analysis取代
+        print("[警告] _start_color_analysis已废弃，请使用_start_region_color_analysis")
+        self._start_region_color_analysis()
 
-        # 隐藏主窗口
-        self.main_window.hide()
-
-        # 使用QTimer延迟执行，确保界面完全隐藏
-        from PySide6.QtCore import QTimer
-
-        def show_dialog():
-            # 创建区域选择对话框
-            from .region_selection_dialog import RegionSelectionDialog
-
-            dialog = RegionSelectionDialog(None)
-            dialog.region_analyzed.connect(
-                lambda x1, y1, x2, y2, analysis: self._handle_region_analysis(
-                    x1, y1, x2, y2, analysis
-                )
-            )
-
-            # 执行对话框（showEvent会自动处理焦点）
-            result = dialog.exec()
-
-            # 恢复显示主界面
-            if self.main_window:
-                self.main_window.show()
-                self.main_window.raise_()
-                self.main_window.activateWindow()
-
-        QTimer.singleShot(100, show_dialog)
-
-    def _handle_region_analysis(
-        self, x1: int, y1: int, x2: int, y2: int, analysis: dict
-    ):
-        """处理区域分析结果"""
-        try:
-            if not analysis:
-                return
-
-            # 直接添加到颜色列表
-            if "average_hsv" in analysis:
-                h, s, v = analysis["average_hsv"]
-                current_text = self.global_colors_edit.toPlainText().strip()
-                new_color = f"{h},{s},{v}"
-                if current_text:
-                    updated_text = current_text + "\n" + new_color
-                else:
-                    updated_text = new_color
-                self.global_colors_edit.setPlainText(updated_text)
-
-        except Exception as e:
-            print(f"分析错误：{str(e)}")
+    # 🚀 已删除过时的_handle_region_analysis函数，现在统一使用_add_color_to_list方法
 
     def _start_single_color_picking(self):
         """开始单点取色，直接添加到颜色列表"""
+        if not self.main_window:
+            return
+            
         try:
             from .color_picker_dialog import ColorPickingDialog
+            from PySide6.QtCore import QTimer
 
             def on_color_picked(r, g, b):
                 # 转换为HSV并添加到颜色列表
@@ -699,12 +679,30 @@ class ResourceManagementWidget(QWidget):
                 self._add_color_to_list(int(h), int(s), int(v))
                 print(f"[单点取色] 获取颜色: RGB({r},{g},{b}) -> HSV({h},{s},{v})")
 
-            # 创建取色器
-            picker = ColorPickingDialog()
-            picker.color_picked.connect(on_color_picked)
-            picker.exec()
+            def show_picker():
+                # 创建取色器
+                picker = ColorPickingDialog()
+                picker.color_picked.connect(on_color_picked)
+                result = picker.exec()
+                
+                # 恢复显示主界面
+                if self.main_window:
+                    self.main_window.show()
+                    self.main_window.raise_()
+                    self.main_window.activateWindow()
+            
+            # 🚀 隐藏主窗口，与区域取色保持一致
+            self.main_window.hide()
+            
+            # 使用QTimer延迟执行，确保界面完全隐藏
+            QTimer.singleShot(100, show_picker)
 
         except Exception as e:
+            # 发生错误时也要恢复主界面
+            if self.main_window:
+                self.main_window.show()
+                self.main_window.raise_()
+                self.main_window.activateWindow()
             print(f"取色错误：{str(e)}")
 
     def _start_region_color_analysis(self):
@@ -725,20 +723,21 @@ class ResourceManagementWidget(QWidget):
             dialog = RegionSelectionDialog(None)
 
             def on_region_analyzed(x1, y1, x2, y2, analysis):
-                if analysis and "average_hsv" in analysis:
-                    h, s, v = analysis["average_hsv"]
-                    # 使用分析结果中的建议容差（如果有的话）
-                    if "suggested_tolerances" in analysis:
-                        suggested = analysis["suggested_tolerances"]
-                        h_tol = suggested.get("h", 10)
-                        s_tol = suggested.get("s", 30)
-                        v_tol = suggested.get("v", 50)
-                        self._add_color_to_list(
-                            int(h), int(s), int(v), h_tol, s_tol, v_tol
-                        )
+                print(f"[区域取色调试] 收到分析结果: {analysis}")
+                
+                # 🚀 修复字段名不匹配问题：使用正确的"mean_hsv"字段
+                if analysis and "mean_hsv" in analysis:
+                    h, s, v = analysis["mean_hsv"]
+                    
+                    # 只添加HSV颜色值到列表，容差由HP/MP独立管理
+                    self._add_color_to_list(int(h), int(s), int(v))
+                    if "tolerance" in analysis:
+                        h_tol, s_tol, v_tol = analysis["tolerance"]
+                        print(f"[区域取色] 获取平均颜色: HSV({h},{s},{v})，分析建议容差: ±({h_tol},{s_tol},{v_tol})")
                     else:
-                        self._add_color_to_list(int(h), int(s), int(v))
-                    print(f"[区域分析] 获取平均颜色: HSV({h},{s},{v})")
+                        print(f"[区域取色] 获取平均颜色: HSV({h},{s},{v})")
+                else:
+                    print(f"[区域取色警告] 分析结果中没有找到mean_hsv字段")
 
             dialog.region_analyzed.connect(on_region_analyzed)
 
@@ -870,8 +869,8 @@ class ResourceManagementWidget(QWidget):
             "cooldown": self._get_cooldown_from_timing_settings("hp"),
         }
 
-        # 添加容差配置 - 从容差输入框解析
-        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance()
+        # 添加容差配置 - 从 HP 容差输入框解析
+        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance("hp")
         hp_config.update(
             {
                 "tolerance_h": tolerance_h,
@@ -1074,8 +1073,8 @@ class ResourceManagementWidget(QWidget):
             "cooldown": self._get_cooldown_from_timing_settings("mp"),
         }
 
-        # 添加容差配置 - 从容差输入框解析
-        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance()
+        # 添加容差配置 - 从 MP 容差输入框解析
+        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance("mp")
         mp_config.update(
             {
                 "tolerance_h": tolerance_h,
@@ -1442,18 +1441,24 @@ class ResourceManagementWidget(QWidget):
         # if hasattr(self, "check_interval_spinbox"):
         #     self.check_interval_spinbox.setValue(check_interval)
 
-        # 更新容差设置（从HP或MP配置中取第一个有效值，默认使用HP配置的容差）
-        tolerance_h = hp_config.get("tolerance_h", 10)
-        tolerance_s = hp_config.get("tolerance_s", 20)
-        tolerance_v = hp_config.get("tolerance_v", 20)
-
-        if hasattr(self, "tolerance_widgets") and self.tolerance_widgets:
-            tolerance_input = self.tolerance_widgets.get("tolerance_input")
-            if tolerance_input:
-                tolerance_input.setText(f"{tolerance_h},{tolerance_s},{tolerance_v}")
-                print(
-                    f"[配置加载] HSV容差配置: H={tolerance_h}, S={tolerance_s}, V={tolerance_v}"
-                )
+        # 🚀 更新HP/MP容差输入框
+        # HP容差
+        hp_tolerance_h = hp_config.get("tolerance_h", 10)
+        hp_tolerance_s = hp_config.get("tolerance_s", 30)
+        hp_tolerance_v = hp_config.get("tolerance_v", 50)
+        hp_tolerance_input = getattr(self, "hp_tolerance_input", None)
+        if hp_tolerance_input:
+            hp_tolerance_input.setText(f"{hp_tolerance_h},{hp_tolerance_s},{hp_tolerance_v}")
+            print(f"[配置加载] HP容差: {hp_tolerance_h},{hp_tolerance_s},{hp_tolerance_v}")
+        
+        # MP容差
+        mp_tolerance_h = mp_config.get("tolerance_h", 10)
+        mp_tolerance_s = mp_config.get("tolerance_s", 30)
+        mp_tolerance_v = mp_config.get("tolerance_v", 50)
+        mp_tolerance_input = getattr(self, "mp_tolerance_input", None)
+        if mp_tolerance_input:
+            mp_tolerance_input.setText(f"{mp_tolerance_h},{mp_tolerance_s},{mp_tolerance_v}")
+            print(f"[配置加载] MP容差: {mp_tolerance_h},{mp_tolerance_s},{mp_tolerance_v}")
 
     def _colors_list_to_text(self, colors_list: list) -> str:
         """将颜色列表转换为文本格式（纯颜色列表格式）"""
@@ -1904,7 +1909,7 @@ class ResourceManagementWidget(QWidget):
                 f"[球体检测] {orb_key.upper()}球体: 圆心({center_x},{center_y}), 半径{radius}"
             )
 
-            # 如果检测结果包含颜色信息，添加到颜色列表
+            # 如果检测结果包含颜色信息，同时更新颜色列表和容差输入框
             if "color" in orb_data:
                 color_info = orb_data["color"]
                 if "h" in color_info and "s" in color_info and "v" in color_info:
@@ -1916,12 +1921,22 @@ class ResourceManagementWidget(QWidget):
                     s_tol = color_info.get("s_tolerance", 30)
                     v_tol = color_info.get("v_tolerance", 50)
 
+                    # 更新对应的HP/MP容差输入框
+                    if orb_key in ["hp", "mp"]:
+                        tolerance_input = getattr(self, f"{orb_key}_tolerance_input", None)
+                        if tolerance_input:
+                            tolerance_input.setText(f"{h_tol},{s_tol},{v_tol}")
+                            print(
+                                f"[球体检测] {orb_key.upper()}容差框已更新: {h_tol},{s_tol},{v_tol}"
+                            )
+
+                    # 添加颜色到颜色列表
                     if hasattr(self, "global_colors_edit"):
                         self._add_color_to_list(
-                            int(h), int(s), int(v), h_tol, s_tol, v_tol
+                            int(h), int(s), int(v)
                         )
                         print(
-                            f"[球体检测] 添加{orb_key}颜色到列表: HSV({h},{s},{v}) 容差(±{h_tol},±{s_tol},±{v_tol})"
+                            f"[球体检测] 添加{orb_key}颜色到列表: HSV({h},{s},{v})，容差已更新到输入框: ±({h_tol},{s_tol},{v_tol})"
                         )
 
     def _on_color_analysis_result(
@@ -1990,18 +2005,23 @@ class ResourceManagementWidget(QWidget):
         total_pixels = analysis["total_pixels"]
         region_size = analysis["region_size"]
 
-        # 使用分析结果中的容差值添加颜色到列表
+        # 🚀 更新对应的HP/MP容差输入框
+        tolerance_input = getattr(self, f"{prefix}_tolerance_input", None)
+        if tolerance_input:
+            tolerance_input.setText(f"{tolerance_h},{tolerance_s},{tolerance_v}")
+            print(
+                f"[选择区域] {prefix.upper()}容差框已更新: {tolerance_h},{tolerance_s},{tolerance_v}"
+            )
+
+        # 添加颜色到列表，容差已经在HP/MP独立管理
         if hasattr(self, "global_colors_edit"):
             self._add_color_to_list(
                 int(mean_h),
                 int(mean_s),
-                int(mean_v),
-                int(tolerance_h),
-                int(tolerance_s),
-                int(tolerance_v),
+                int(mean_v)
             )
             print(
-                f"[选择区域] 颜色分析完成: HSV({mean_h},{mean_s},{mean_v}) 容差(±{tolerance_h},±{tolerance_s},±{tolerance_v})"
+                f"[选择区域] 颜色分析完成: HSV({mean_h},{mean_s},{mean_v})，容差已更新到{prefix.upper()}输入框: ±({tolerance_h},{tolerance_s},{tolerance_v})"
             )
 
         # 自动解析并显示
