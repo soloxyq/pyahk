@@ -126,6 +126,7 @@
         "debug_mode": {
             "enabled": false
         },
+        "input_mode": "control",
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
@@ -139,7 +140,7 @@
         "window_activation": {
             "enabled": true,
             "ahk_class": "Qt5156QWindowIcon",
-            "ahk_exe": "MuMuNxDevice.exe"
+            "ahk_exe": ""
         },
         "stationary_mode_config": {
             "hotkey": "",

@@ -85,6 +85,17 @@ class TopControlsWidget(QWidget):
         self.debug_mode_checkbox.setMaximumHeight(28)
         layout.addWidget(self.debug_mode_checkbox)
 
+        # Input Mode选择
+        layout.addWidget(QLabel("输入模式:"))
+        self.input_mode_combo = ConfigComboBox()
+        self.input_mode_combo.setMaximumHeight(28)
+        self.input_mode_combo.addItems(["Direct", "Control"])
+        self.input_mode_combo.setToolTip(
+            "Direct: 直接发送 (SendInput), 需要窗口激活\n"
+            "Control: 控件发送 (ControlSend), 后台发送不需要激活"
+        )
+        layout.addWidget(self.input_mode_combo)
+
         layout.addStretch()
 
     def set_current_config(self, filename: str):
@@ -95,7 +106,8 @@ class TopControlsWidget(QWidget):
         """获取配置"""
         return {
             "sequence_enabled": self.mode_combo.currentText() == "序列",
-            "debug_mode": {"enabled": self.debug_mode_checkbox.isChecked()}
+            "debug_mode": {"enabled": self.debug_mode_checkbox.isChecked()},
+            "input_mode": self.input_mode_combo.currentText().lower()  # "direct" or "control"
         }
 
     def update_from_config(self, config: Dict[str, Any]):
@@ -108,6 +120,12 @@ class TopControlsWidget(QWidget):
         # DEBUG MODE
         debug_config = config.get("debug_mode", {})
         self.debug_mode_checkbox.setChecked(debug_config.get("enabled", False))
+
+        # INPUT MODE
+        input_mode = config.get("input_mode", "direct")
+        self.input_mode_combo.blockSignals(True)
+        self.input_mode_combo.setCurrentText(input_mode.capitalize())
+        self.input_mode_combo.blockSignals(False)
 
 
 class TimingSettingsWidget(QWidget):

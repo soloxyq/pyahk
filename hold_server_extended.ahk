@@ -64,6 +64,9 @@ global ForceMoveKey := ""  ; 由Python设置，默认为空（未启用）
 global ForceMoveActive := false  ; 强制移动键是否处于按下状态
 global ForceMoveReplacementKey := ""  ; 强制移动时的替换键，由Python设置，默认为空
 
+; 发送模式
+global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控件发送(ControlSend)
+
 ; 🎯 异步延迟机制
 global DelayUntil := 0  ; 延迟到什么时间（毫秒），0表示没有延迟
 
@@ -367,6 +370,16 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 参数格式: "hp_key:1,mp_key:2,stationary_type:shift_modifier"
             UpdateBatchConfig(param)
             return 1
+
+        case CMD_SET_SEND_MODE:
+            ; SET_SEND_MODE - 设置发送模式
+            ; 参数格式: "direct" 或 "control"
+            global SendKeyMode
+            if (param = "direct" || param = "control") {
+                SendKeyMode := param
+                return 1
+            }
+            return 0
     }
 
     ; 未识别的命令
@@ -648,19 +661,48 @@ ExecuteAction(action) {
 
 SendPress(key) {
     ; 发送按键 (按下并释放，最小延时)
-    global ForceMoveActive, ForceMoveReplacementKey
+    global ForceMoveActive, ForceMoveReplacementKey, SendKeyMode, TargetWin
 
     ; 如果强制移动键按下，所有队列中的按键都替换为配置的替换键
     if (ForceMoveActive) {
-        ; 所有按键在强制移动时都替换为配置的替换键
-        Send "{" ForceMoveReplacementKey "}"
-        return  ; 已经处理完毕，直接返回
+        SendKeyInternal(ForceMoveReplacementKey)
+        return
     }
 
-    ; 正常按键处理（没有强制移动或不是技能键）
+    ; 正常按键处理
     if (ShouldAddShiftModifier(key)) {
-        Send "+{" key "}"  ; 带shift修饰符
+        ; 带shift修饰符
+        SendKeyInternal("+" . key)
     } else {
+        SendKeyInternal(key)
+    }
+}
+
+SendKeyInternal(key) {
+    ; 内部发送函数 - 根据模式选择发送方式
+    global SendKeyMode, TargetWin
+    
+    if (SendKeyMode = "control" && TargetWin != "") {
+        ; ControlSend模式 - 直接发送到目标窗口
+        try {
+            ControlSend "{" key "}", , TargetWin
+        } catch {
+            ; 如果ControlSend失败，回退到直接模式
+            SendDirect(key)
+        }
+    } else {
+        ; 直接发送模式 (SendInput)
+        SendDirect(key)
+    }
+}
+
+SendDirect(key) {
+    ; 直接发送模式 - 使用SendInput
+    if (InStr(key, "+")) {
+        ; 带修饰符的按键
+        Send "{" key "}"
+    } else {
+        ; 普通按键
         Send "{" key " down}"
         Sleep 5
         Send "{" key " up}"

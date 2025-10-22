@@ -8,6 +8,7 @@ from torchlight_assistant.config.ahk_commands import (
     CMD_PING, CMD_SET_TARGET, CMD_ACTIVATE, CMD_ENQUEUE,
     CMD_CLEAR_QUEUE, CMD_PAUSE, CMD_RESUME,
     CMD_HOOK_REGISTER, CMD_HOOK_UNREGISTER,
+    CMD_SET_SEND_MODE,
     get_command_name
 )
 from torchlight_assistant.utils.debug_log import LOG_INFO
@@ -46,6 +47,21 @@ class AHKCommandSender:
     def set_target_window(self, target: str) -> bool:
         """设置AHK的目标窗口标识符 (例如 'ahk_exe notepad++.exe')"""
         return send_ahk_cmd(self.window_title, CMD_SET_TARGET, target)
+    
+    def set_send_mode(self, mode: str) -> bool:
+        """设置按键发送模式
+        
+        Args:
+            mode: 发送模式
+                - "direct": 直接发送 (SendInput), 需要窗口激活
+                - "control": 控件发送 (ControlSend), 后台发送不需要激活
+        
+        Returns:
+            是否成功
+        """
+        if mode not in ["direct", "control"]:
+            raise ValueError(f"Invalid send mode: {mode}. Must be 'direct' or 'control'")
+        return send_ahk_cmd(self.window_title, CMD_SET_SEND_MODE, mode)
 
     def activate_window(self) -> bool:
         """请求AHK激活当前设置的目标窗口"""

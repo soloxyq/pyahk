@@ -580,11 +580,21 @@ class MacroEngine:
             LOG_INFO(f"[热键] 是否有配置: {full_config is not None}")
             with self._transition_lock:
                 if self._state == MacroState.STOPPED:
-                    LOG_INFO("[热键] F8 - 从STOPPED状态启动")
+                    LOG_INFO("【热键】 F8 - 从 STOPPED状态启动")
                     if full_config:
                         self._skills_config = full_config.get("skills", {})
                         self._global_config = full_config.get("global", {})
                         self.sound_manager.update_config(self._global_config)
+                        
+                        # 设置输入模式
+                        input_mode = self._global_config.get("input_mode", "direct")
+                        if hasattr(self.input_handler, "command_sender") and self.input_handler.command_sender:
+                            try:
+                                self.input_handler.command_sender.set_send_mode(input_mode)
+                                LOG_INFO(f"【输入模式】 已设置为: {input_mode}")
+                            except Exception as e:
+                                LOG_ERROR(f"【输入模式】 设置失败: {e}")
+                        
                         event_bus.publish(
                             "engine:config_updated",
                             self._skills_config,
