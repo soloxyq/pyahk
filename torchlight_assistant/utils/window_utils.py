@@ -5,6 +5,8 @@ Window management utilities
 import time
 from typing import Optional, Tuple, Dict
 from .debug_log import LOG, LOG_ERROR, LOG_INFO
+from torchlight_assistant.utils.debug_log import LOG_INFO, LOG
+
 
 try:
     import psutil
@@ -42,8 +44,8 @@ class WindowUtils:
                 try:
                     if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd):
                         return hwnd
-                except:
-                    pass
+                except Exception as e:
+                    LOG_INFO(f"[异常] 捕获到Exception: {e}")
                 del WindowUtils._window_cache[cache_key]
 
         try:
@@ -69,8 +71,8 @@ class WindowUtils:
                 try:
                     if win32gui.IsWindow(hwnd) and win32gui.IsWindowVisible(hwnd):
                         return hwnd
-                except:
-                    pass
+                except Exception as e:
+                    LOG_INFO(f"[异常] 捕获到Exception: {e}")
                 del WindowUtils._window_cache[cache_key]
 
         try:
@@ -164,8 +166,8 @@ class WindowUtils:
                             class_name = win32gui.GetClassName(hwnd)
                             if class_name:
                                 lParam.append(class_name)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+                    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                        LOG_INFO(f"[异常] 捕获到(psutil.NoSuchProcess, psutil.AccessDenied): {e}")
                 return True
 
             class_names = []
@@ -223,8 +225,8 @@ class WindowUtils:
             hwnd = win32gui.GetForegroundWindow()
             if hwnd:
                 return win32gui.GetWindowText(hwnd)
-        except Exception:
-            pass
+        except Exception as e:
+            LOG_INFO(f"[异常] 捕获到Exception: {e}")
 
         return ""
 
@@ -276,8 +278,8 @@ class WindowUtils:
                         process = psutil.Process(pid)
                         if process.name().lower() == process_name.lower():
                             lParam.append(hwnd)
-                    except (psutil.NoSuchProcess, psutil.AccessDenied):
-                        pass
+                    except (psutil.NoSuchProcess, psutil.AccessDenied) as e:
+                        LOG_INFO(f"[异常] 捕获到(psutil.NoSuchProcess, psutil.AccessDenied): {e}")
                 return True
 
             windows = []
@@ -336,15 +338,15 @@ class WindowUtils:
                 # 所有条件都满足，添加到结果列表
                 matching_windows.append(hwnd)
 
-            except Exception:
-                pass
+            except Exception as e:
+                LOG_INFO(f"[异常] 捕获到Exception: {e}")
 
             return True
 
         try:
             win32gui.EnumWindows(enum_windows_proc, None)
-        except Exception:
-            pass
+        except Exception as e:
+            LOG_INFO(f"[异常] 捕获到Exception: {e}")
 
         return matching_windows
 
@@ -389,7 +391,7 @@ class WindowUtils:
                 )
 
             except Exception as e:
-                pass
+                LOG_INFO(f"[异常] 捕获到Exception as e: {e}")
 
             # 验证激活结果
             time.sleep(0.1)
@@ -421,7 +423,7 @@ class WindowUtils:
                         win32con.SWP_NOMOVE | win32con.SWP_NOSIZE,
                     )
                 except Exception as e:
-                    pass
+                    LOG_INFO(f"[异常] 捕获到Exception as e: {e}")
 
             return success
 

@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QRect, Signal as QSignal
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor
 from typing import Dict, Any, Optional
+from ..utils.debug_log import LOG_INFO, LOG
 
 from .custom_widgets import (
     ConfigSpinBox,
@@ -64,13 +65,13 @@ class ResourceManagementWidget(QWidget):
                 if colors_text:
                     # 调用解析函数显示背景条
                     self._parse_global_colors()
-                    print("[UI初始化] 自动解析默认颜色配置并显示背景条")
+                    LOG_INFO("[UI初始化] 自动解析默认颜色配置并显示背景条")
                 else:
-                    print("[UI初始化] 警告：颜色配置文本框为空")
+                    LOG_INFO("[UI初始化] 警告：颜色配置文本框为空")
             else:
-                print("[UI初始化] 警告：global_colors_edit未找到")
+                LOG_INFO("[UI初始化] 警告：global_colors_edit未找到")
         except Exception as e:
-            print(f"[UI初始化] 自动解析颜色配置失败: {str(e)}")
+            LOG_INFO(f"[UI初始化] 自动解析颜色配置失败: {str(e)}")
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
@@ -566,7 +567,7 @@ class ResourceManagementWidget(QWidget):
     def _start_color_analysis(self):
         """开始颜色分析（与_start_region_color_analysis功能重复，已废弃）"""
         # 🚀 这个函数已经被_start_region_color_analysis取代
-        print("[警告] _start_color_analysis已废弃，请使用_start_region_color_analysis")
+        LOG_INFO("[警告] _start_color_analysis已废弃，请使用_start_region_color_analysis")
         self._start_region_color_analysis()
 
     # 🚀 已删除过时的_handle_region_analysis函数，现在统一使用_add_color_to_list方法
@@ -620,18 +621,17 @@ class ResourceManagementWidget(QWidget):
         # 延迟100ms执行，确保窗口完全隐藏
         from PySide6.QtCore import QTimer
         QTimer.singleShot(100, show_dialog)
-
     def _parse_colors_input(self, prefix: str, colors_text: str):
         """解析颜色配置输入并显示带实际颜色的结果"""
+        # 获取对应的结果显示控件
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+
+        if not widgets or "colors_result" not in widgets:
+            return
+
+        result_label = widgets["colors_result"]
+
         try:
-            # 获取对应的结果显示控件
-            widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
-
-            if not widgets or "colors_result" not in widgets:
-                return
-
-            result_label = widgets["colors_result"]
-
             if not colors_text.strip():
                 result_label.setText("请输入颜色配置")
                 return
@@ -647,7 +647,7 @@ class ResourceManagementWidget(QWidget):
 
             color_count = len(values) // 6
 
-            # 构建HTML格式的结果文本
+            # 构建 HTML格式的结果文本
             html_parts = [
                 f"<div style='margin-bottom: 8px; font-weight: bold;'>✅ 解析成功：{color_count}种颜色</div>"
             ]
@@ -686,12 +686,12 @@ class ResourceManagementWidget(QWidget):
             result_html = "".join(html_parts)
             result_label.setText(result_html)
 
-        except ValueError:
-            if "result_label" in locals():
-                result_label.setText("❌ 格式错误：请输入数字，用逗号分隔")
+        except ValueError as e:
+            result_label.setText("❌ 格式错误：请输入数字，用逗号分隔")
+        except (AttributeError, KeyError) as e:
+            result_label.setText(f"❌ 配置错误：{str(e)}")
         except Exception as e:
-            if "result_label" in locals():
-                result_label.setText(f"❌ 解析错误：{str(e)}")
+            result_label.setText(f"❌ 解析错误：{str(e)}")
 
     def _get_cooldown_from_timing_settings(self, cooldown_type: str) -> int:
         """从时间间隔设置获取冷却时间值"""
@@ -980,12 +980,12 @@ class ResourceManagementWidget(QWidget):
                 coord_input.setPlaceholderText("x,y,r (圆心X,圆心Y,半径)")
                 if coords_from_config:
                     coords_to_use = coords_from_config
-                    print(
+                    LOG_INFO(
                         f"[坐标更新] {prefix.upper()} 圆形模式使用配置坐标: {coords_from_config}"
                     )
                 else:
                     coords_to_use = "174,957,47" if prefix == "hp" else "1738,957,47"
-                    print(
+                    LOG_INFO(
                         f"[坐标更新] {prefix.upper()} 圆形模式使用默认坐标: {coords_to_use}"
                     )
 
@@ -993,14 +993,14 @@ class ResourceManagementWidget(QWidget):
                 coord_input.setPlaceholderText("x1,y1,x2,y2 (文本区域)")
                 if coords_from_config:
                     coords_to_use = coords_from_config
-                    print(
+                    LOG_INFO(
                         f"[坐标更新] {prefix.upper()} Text OCR模式使用配置坐标: {coords_from_config}"
                     )
                 else:
                     coords_to_use = (
                         "97,814,218,835" if prefix == "hp" else "1767,814,1894,835"
                     )
-                    print(
+                    LOG_INFO(
                         f"[坐标更新] {prefix.upper()} Text OCR模式使用默认坐标: {coords_to_use}"
                     )
 
@@ -1008,14 +1008,14 @@ class ResourceManagementWidget(QWidget):
                 coord_input.setPlaceholderText("x1,y1,x2,y2 (矩形区域)")
                 if coords_from_config:
                     coords_to_use = coords_from_config
-                    print(
+                    LOG_INFO(
                         f"[坐标更新] {prefix.upper()} 矩形模式使用配置坐标: {coords_from_config}"
                     )
                 else:
                     coords_to_use = (
                         "136,910,213,1004" if prefix == "hp" else "1552,910,1560,1004"
                     )
-                    print(
+                    LOG_INFO(
                         f"[坐标更新] {prefix.upper()} 矩形模式使用默认坐标: {coords_to_use}"
                     )
 
@@ -1023,7 +1023,7 @@ class ResourceManagementWidget(QWidget):
             if coords_to_use:
                 coord_input.setText(coords_to_use)
 
-        print(f"[检测模式] {prefix.upper()} 切换到 {selected_mode} 模式")
+        LOG_INFO(f"[检测模式] {prefix.upper()} 切换到 {selected_mode} 模式")
 
         # 根据模式显示/隐藏容差控件
         tolerance_label = getattr(self, f"{prefix}_tolerance_label", None)
@@ -1080,7 +1080,7 @@ class ResourceManagementWidget(QWidget):
     ):
         """球体检测完成回调 - 仅更新坐标和颜色"""
         orb_count = len(detection_result)
-        print(f"[球体检测] 检测完成，共找到 {orb_count} 个球体")
+        LOG_INFO(f"[球体检测] 检测完成，共找到 {orb_count} 个球体")
 
         # 保存检测结果供后续使用
         if prefix == "hp":
@@ -1101,7 +1101,7 @@ class ResourceManagementWidget(QWidget):
             coord_input = widgets.get("coord_input")
             if coord_input:
                 coord_input.setText(f"{center_x},{center_y},{radius}")
-                print(
+                LOG_INFO(
                     f"[球体检测] {prefix.upper()}坐标已更新: {center_x},{center_y},{radius}"
                 )
 
@@ -1109,7 +1109,7 @@ class ResourceManagementWidget(QWidget):
             center_x = orb_data["center_x"]
             center_y = orb_data["center_y"]
             radius = orb_data["radius"]
-            print(
+            LOG_INFO(
                 f"[球体检测] {orb_key.upper()}球体: 圆心({center_x},{center_y}), 半径{radius}"
             )
 
@@ -1130,7 +1130,7 @@ class ResourceManagementWidget(QWidget):
                         tolerance_input = getattr(self, f"{orb_key}_tolerance_input", None)
                         if tolerance_input:
                             tolerance_input.setText(f"{h_tol},{s_tol},{v_tol}")
-                            print(
+                            LOG_INFO(
                                 f"[球体检测] {orb_key.upper()}容差框已更新: {h_tol},{s_tol},{v_tol}"
                             )
 
@@ -1139,7 +1139,7 @@ class ResourceManagementWidget(QWidget):
                         self._add_color_to_list(
                             int(h), int(s), int(v)
                         )
-                        print(
+                        LOG_INFO(
                             f"[球体检测] 添加{orb_key}颜色到列表: HSV({h},{s},{v})，容差已更新到输入框: ±({h_tol},{s_tol},{v_tol})"
                         )
 
@@ -1165,12 +1165,12 @@ class ResourceManagementWidget(QWidget):
             "color: #333; font-size: 10pt; padding: 8px; border: 1px solid #28a745; border-radius: 3px; background-color: #f8fff8;"
         )
 
-        print(f"🎨 颜色分析完成！")
-        print(f"  区域: ({x1},{y1}) -> ({x2},{y2})")
-        print(
+        LOG_INFO(f"🎨 颜色分析完成！")
+        LOG_INFO(f"  区域: ({x1},{y1}) -> ({x2},{y2})")
+        LOG_INFO(
             f"  主色调: HSV({dominant_color.get('h', 0)}, {dominant_color.get('s', 0)}, {dominant_color.get('v', 0)})"
         )
-        print(
+        LOG_INFO(
             f"  建议容差: H±{suggested_tolerances.get('h', 10)}, S±{suggested_tolerances.get('s', 20)}, V±{suggested_tolerances.get('v', 30)}"
         )
 
@@ -1182,7 +1182,7 @@ class ResourceManagementWidget(QWidget):
         coord_input = widgets.get("coord_input")
         if coord_input:
             coord_input.setText(f"{x1},{y1},{x2},{y2}")
-            print(
+            LOG_INFO(
                 f"[区域选择] {prefix.upper()}区域坐标已更新: ({x1},{y1}) -> ({x2},{y2})"
             )
 
@@ -1199,7 +1199,7 @@ class ResourceManagementWidget(QWidget):
         coord_input = widgets.get("coord_input")
         if coord_input:
             coord_input.setText(f"{x1},{y1},{x2},{y2}")
-            print(
+            LOG_INFO(
                 f"[区域更新] {prefix.upper()}区域坐标已更新: ({x1},{y1}) -> ({x2},{y2})"
             )
 
@@ -1213,7 +1213,7 @@ class ResourceManagementWidget(QWidget):
         tolerance_input = getattr(self, f"{prefix}_tolerance_input", None)
         if tolerance_input:
             tolerance_input.setText(f"{tolerance_h},{tolerance_s},{tolerance_v}")
-            print(
+            LOG_INFO(
                 f"[选择区域] {prefix.upper()}容差框已更新: {tolerance_h},{tolerance_s},{tolerance_v}"
             )
 
@@ -1224,7 +1224,7 @@ class ResourceManagementWidget(QWidget):
                 int(mean_s),
                 int(mean_v)
             )
-            print(
+            LOG_INFO(
                 f"[选择区域] 颜色分析完成: HSV({mean_h},{mean_s},{mean_v})，容差已更新到{prefix.upper()}输入框: ±({tolerance_h},{tolerance_s},{tolerance_v})"
             )
 
@@ -1247,14 +1247,14 @@ class ResourceManagementWidget(QWidget):
 💡 容差基于区域内颜色分布自动计算，覆盖约95%的像素"""
 
         # 使用简单的print输出替代消息框，避免UI问题
-        print("=" * 50)
-        print("🎯 智能颜色分析完成！")
-        print(f"📊 区域大小: {region_size[0]}×{region_size[1]} 像素")
-        print(f"📊 总像素数: {total_pixels:,} 个")
-        print(f"🎨 平均颜色: HSV({mean_h}, {mean_s}, {mean_v})")
-        print(f"⚙️  智能容差: ±({tolerance_h}, {tolerance_s}, {tolerance_v})")
-        print(f"✅ 已追加到颜色配置")
-        print("=" * 50)
+        LOG_INFO("=" * 50)
+        LOG_INFO("🎯 智能颜色分析完成！")
+        LOG_INFO(f"📊 区域大小: {region_size[0]}×{region_size[1]} 像素")
+        LOG_INFO(f"📊 总像素数: {total_pixels:,} 个")
+        LOG_INFO(f"🎨 平均颜色: HSV({mean_h}, {mean_s}, {mean_v})")
+        LOG_INFO(f"⚙️  智能容差: ±({tolerance_h}, {tolerance_s}, {tolerance_v})")
+        LOG_INFO(f"✅ 已追加到颜色配置")
+        LOG_INFO("=" * 50)
 
     def _test_text_ocr(self, prefix: str):
         """测试Text OCR识别功能"""
@@ -1430,13 +1430,13 @@ class ResourceManagementWidget(QWidget):
                     self, f"Text OCR 测试成功 ({engine_name})", result_msg
                 )
 
-                print("=" * 60)
-                print(f"[Text OCR测试] {prefix.upper()} 识别成功")
-                print(f"  引擎: {engine_name}")
-                print(f"  文本: {text}")
-                print(f"  百分比: {percentage:.1f}%")
-                print(f"  耗时: {recognition_time:.1f} ms")
-                print("=" * 60)
+                LOG_INFO("=" * 60)
+                LOG_INFO(f"[Text OCR测试] {prefix.upper()} 识别成功")
+                LOG_INFO(f"  引擎: {engine_name}")
+                LOG_INFO(f"  文本: {text}")
+                LOG_INFO(f"  百分比: {percentage:.1f}%")
+                LOG_INFO(f"  耗时: {recognition_time:.1f} ms")
+                LOG_INFO("=" * 60)
             else:
                 result_msg = f"""❌ 识别失败
 
@@ -1458,10 +1458,10 @@ class ResourceManagementWidget(QWidget):
 
                 QMessageBox.warning(self, "Text OCR 测试失败", result_msg)
 
-                print("=" * 60)
-                print(f"[Text OCR测试] {prefix.upper()} 识别失败")
-                print(f"  区域: ({x1},{y1}) → ({x2},{y2})")
-                print("=" * 60)
+                LOG_INFO("=" * 60)
+                LOG_INFO(f"[Text OCR测试] {prefix.upper()} 识别失败")
+                LOG_INFO(f"  区域: ({x1},{y1}) → ({x2},{y2})")
+                LOG_INFO("=" * 60)
 
         except Exception as e:
             import traceback
@@ -1470,5 +1470,5 @@ class ResourceManagementWidget(QWidget):
             QMessageBox.critical(
                 self, "测试出错", f"Text OCR测试过程中出错:\n{str(e)}\n\n{error_trace}"
             )
-            print(f"[Text OCR测试] 错误: {e}")
-            print(error_trace)
+            LOG_INFO(f"[Text OCR测试] 错误: {e}")
+            LOG_INFO(error_trace)

@@ -4,6 +4,7 @@ AHK输入系统配置
 """
 
 import os
+from torchlight_assistant.utils.debug_log import LOG_INFO
 
 
 class AHKConfig:
@@ -63,7 +64,7 @@ class AHKConfig:
         
         if errors:
             for error in errors:
-                print(f"[配置错误] {error}")
+                LOG_INFO(f"[配置错误] {error}")
             return False
         
         return True
@@ -71,14 +72,14 @@ class AHKConfig:
     @classmethod
     def print_config(cls):
         """打印配置信息"""
-        print("\n" + "="*60)
-        print("AHK输入系统配置")
-        print("="*60)
-        print(f"AHK路径: {cls.AHK_PATH}")
-        print(f"服务器脚本: {cls.SERVER_SCRIPT}")
-        print(f"窗口标题: {cls.WINDOW_TITLE}")
-        print("通信方式: WM_COPYDATA")
-        print(f"队列处理间隔: {cls.QUEUE_PROCESS_INTERVAL}ms")
-        print(f"优先级按键: {', '.join(cls.PRIORITY_KEYS)}")
-        print(f"前置延迟: {cls.PRIORITY_KEY_DELAY}ms")
-        print("="*60 + "\n")
+        LOG_INFO("\n" + "="*60)
+        LOG_INFO("AHK输入系统配置")
+        LOG_INFO("="*60)
+        LOG_INFO(f"AHK路径: {cls.AHK_PATH}")
+        LOG_INFO(f"服务器脚本: {cls.SERVER_SCRIPT}")
+        LOG_INFO(f"窗口标题: {cls.WINDOW_TITLE}")
+        LOG_INFO("通信方式: WM_COPYDATA")
+        LOG_INFO(f"队列处理间隔: {cls.QUEUE_PROCESS_INTERVAL}ms")
+        LOG_INFO(f"系统热键: {', '.join(cls.SYSTEM_HOTKEYS)}")
+        LOG_INFO(f"前置延迟: {cls.PRIORITY_KEY_DELAY}ms")
+        LOG_INFO("="*60 + "\n")

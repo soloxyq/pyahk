@@ -7,6 +7,8 @@ import numpy as np
 from typing import Optional, Callable, Tuple
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QTextEdit, QLabel
+from torchlight_assistant.utils.debug_log import LOG_INFO, LOG
+
 
 
 class ColorAnalysisTools:
@@ -32,7 +34,7 @@ class ColorAnalysisTools:
                 if callback:
                     callback(int(h), int(s), int(v))
 
-                print(f"[单点取色] 获取颜色: RGB({r},{g},{b}) -> HSV({h},{s},{v})")
+                LOG_INFO(f"[单点取色] 获取颜色: RGB({r},{g},{b}) -> HSV({h},{s},{v})")
 
             def show_picker():
                 picker = ColorPickingDialog()
@@ -74,7 +76,7 @@ class ColorAnalysisTools:
             dialog = RegionSelectionDialog(None)
 
             def on_region_analyzed(x1, y1, x2, y2, analysis):
-                print(f"[区域取色调试] 收到分析结果: {analysis}")
+                LOG(f"[区域取色调试] 收到分析结果: {analysis}")
 
                 if analysis and "mean_hsv" in analysis:
                     h, s, v = analysis["mean_hsv"]
@@ -84,13 +86,13 @@ class ColorAnalysisTools:
 
                     if "tolerance" in analysis:
                         h_tol, s_tol, v_tol = analysis["tolerance"]
-                        print(
+                        LOG_INFO(
                             f"[区域取色] 获取平均颜色: HSV({h},{s},{v})，分析建议容差: ±({h_tol},{s_tol},{v_tol})"
                         )
                     else:
-                        print(f"[区域取色] 获取平均颜色: HSV({h},{s},{v})")
+                        LOG_INFO(f"[区域取色] 获取平均颜色: HSV({h},{s},{v})")
                 else:
-                    print("[区域取色警告] 分析结果中没有找到mean_hsv字段")
+                    LOG_INFO("[区域取色警告] 分析结果中没有找到mean_hsv字段")
 
             dialog.region_analyzed.connect(on_region_analyzed)
 
@@ -157,13 +159,13 @@ class ColorListManager:
         # FIFO限制：如果超过最大数量，移除最旧的
         if len(existing_colors) > self.max_colors:
             removed_color = existing_colors.pop(0)
-            print(f"[颜色管理] 移除最旧颜色: {removed_color}")
+            LOG_INFO(f"[颜色管理] 移除最旧颜色: {removed_color}")
 
         # 更新文本框
         updated_text = "\n".join(existing_colors)
         self.colors_edit.setPlainText(updated_text)
 
-        print(
+        LOG_INFO(
             f"[颜色添加] 添加颜色到列表: HSV({h},{s},{v}) | 当前总数: {len(existing_colors)}"
         )
 

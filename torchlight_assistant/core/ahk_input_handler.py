@@ -12,6 +12,7 @@ from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
 # AHKEventReceiver已移除，使用WM_COPYDATA通信
 from torchlight_assistant.config.ahk_config import AHKConfig
 from torchlight_assistant.core.signal_bridge import ahk_signal_bridge # 导入信号桥
+from torchlight_assistant.utils.debug_log import LOG_INFO, LOG
 
 
 class AHKInputHandler:
@@ -40,7 +41,7 @@ class AHKInputHandler:
         
         self._init_ahk_system()
         
-        print("[AHK输入] 初始化完成")
+        LOG_INFO("[AHK输入] 初始化完成")
     
     def _init_ahk_system(self):
         """初始化AHK系统"""
@@ -78,11 +79,11 @@ class AHKInputHandler:
     def _start_ahk_server(self) -> bool:
         """启动AHK服务器"""
         if not os.path.exists(self.server_script):
-            print(f"[AHK输入] 脚本不存在: {self.server_script}")
+            LOG_INFO(f"[AHK输入] 脚本不存在: {self.server_script}")
             return False
         
         if not os.path.exists(self.ahk_path):
-            print(f"[AHK输入] AHK不存在: {self.ahk_path}")
+            LOG_INFO(f"[AHK输入] AHK不存在: {self.ahk_path}")
             return False
         
         try:
@@ -92,14 +93,14 @@ class AHKInputHandler:
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
             )
             
-            print(f"[AHK输入] AHK服务器已启动 (PID: {self.ahk_process.pid})")
+            LOG_INFO(f"[AHK输入] AHK服务器已启动 (PID: {self.ahk_process.pid})")
             
             time.sleep(AHKConfig.AHK_STARTUP_WAIT)
             
             return True
             
         except Exception as e:
-            print(f"[AHK输入] 启动AHK失败: {e}")
+            LOG_INFO(f"[AHK输入] 启动AHK失败: {e}")
             return False
     
     def _register_f8_hook(self):
@@ -107,11 +108,11 @@ class AHKInputHandler:
         try:
             result = self.command_sender.register_hook("F8", "intercept")
             if result:
-                print("[AHK输入] [OK] F8主控键注册成功")
+                LOG_INFO("[AHK输入] [OK] F8主控键注册成功")
             else:
-                print("[AHK输入] [FAIL] F8主控键注册失败 (AHK窗口未找到)")
+                LOG_INFO("[AHK输入] [FAIL] F8主控键注册失败 (AHK窗口未找到)")
         except Exception as e:
-            print(f"[AHK输入] [ERROR] F8主控键注册异常: {e}")
+            LOG_INFO(f"[AHK输入] [ERROR] F8主控键注册异常: {e}")
 
     def register_all_hooks_on_f8_ready(self, special_keys=None, managed_keys=None, other_hooks=None):
         """
@@ -130,33 +131,33 @@ class AHKInputHandler:
         
         # 1. 先注册其他系统热键 (z, F7, F9)
         system_keys = ["z", "F7", "F9"]  # F8已经在启动时注册了
-        print(f"[AHK输入] 注册 {len(system_keys)} 个系统热键...")
+        LOG_INFO(f"[AHK输入] 注册 {len(system_keys)} 个系统热键...")
         for key in system_keys:
             try:
                 result = self.command_sender.register_hook(key, "intercept")
                 if result:
-                    print(f"[AHK输入] [OK] 系统热键注册成功: {key}")
+                    LOG_INFO(f"[AHK输入] [OK] 系统热键注册成功: {key}")
                 else:
-                    print(f"[AHK输入] [FAIL] 系统热键注册失败: {key}")
+                    LOG_INFO(f"[AHK输入] [FAIL] 系统热键注册失败: {key}")
             except Exception as e:
-                print(f"[AHK输入] [ERROR] 系统热键注册异常 ({key}): {e}")
+                LOG_INFO(f"[AHK输入] [ERROR] 系统热键注册异常 ({key}): {e}")
         
         # 2. 注册特殊按键 (special模式)
         if special_keys:
-            print(f"[AHK输入] 注册 {len(special_keys)} 个特殊按键...")
+            LOG_INFO(f"[AHK输入] 注册 {len(special_keys)} 个特殊按键...")
             for key in special_keys:
                 try:
                     result = self.command_sender.register_hook(key, "special")
                     if result:
-                        print(f"[AHK输入] [OK] 特殊按键注册成功: {key}")
+                        LOG_INFO(f"[AHK输入] [OK] 特殊按键注册成功: {key}")
                     else:
-                        print(f"[AHK输入] [FAIL] 特殊按键注册失败: {key}")
+                        LOG_INFO(f"[AHK输入] [FAIL] 特殊按键注册失败: {key}")
                 except Exception as e:
-                    print(f"[AHK输入] [ERROR] 特殊按键注册异常 ({key}): {e}")
+                    LOG_INFO(f"[AHK输入] [ERROR] 特殊按键注册异常 ({key}): {e}")
         
         # 3. 注册管理按键 (priority模式)
         if managed_keys:
-            print(f"[AHK输入] 注册 {len(managed_keys)} 个管理按键...")
+            LOG_INFO(f"[AHK输入] 注册 {len(managed_keys)} 个管理按键...")
             for key, config in managed_keys.items():
                 try:
                     result = self.command_sender.register_hook(key, "priority")
@@ -167,54 +168,54 @@ class AHKInputHandler:
                         # 发送管理按键配置到AHK
                         config_result = self.command_sender.set_managed_key_config(key, target, delay)
                         if config_result:
-                            print(f"[AHK输入] [OK] 管理按键注册成功: {key} -> {target} (延迟: {delay}ms)")
+                            LOG_INFO(f"[AHK输入] [OK] 管理按键注册成功: {key} -> {target} (延迟: {delay}ms)")
                         else:
-                            print(f"[AHK输入] [FAIL] 管理按键配置失败: {key}")
+                            LOG_INFO(f"[AHK输入] [FAIL] 管理按键配置失败: {key}")
                     else:
-                        print(f"[AHK输入] [FAIL] 管理按键注册失败: {key}")
+                        LOG_INFO(f"[AHK输入] [FAIL] 管理按键注册失败: {key}")
                 except Exception as e:
-                    print(f"[AHK输入] [ERROR] 管理按键注册异常 ({key}): {e}")
+                    LOG_INFO(f"[AHK输入] [ERROR] 管理按键注册异常 ({key}): {e}")
         
         # 4. 注册其他业务按键
         if other_hooks:
-            print(f"[AHK输入] 注册 {len(other_hooks)} 个其他业务按键...")
+            LOG_INFO(f"[AHK输入] 注册 {len(other_hooks)} 个其他业务按键...")
             for key, mode in other_hooks.items():
                 try:
                     result = self.command_sender.register_hook(key, mode)
                     if result:
-                        print(f"[AHK输入] [OK] 业务按键注册成功: {key} ({mode}模式)")
+                        LOG_INFO(f"[AHK输入] [OK] 业务按键注册成功: {key} ({mode}模式)")
                     else:
-                        print(f"[AHK输入] [FAIL] 业务按键注册失败: {key}")
+                        LOG_INFO(f"[AHK输入] [FAIL] 业务按键注册失败: {key}")
                 except Exception as e:
-                    print(f"[AHK输入] [ERROR] 业务按键注册异常 ({key}): {e}")
+                    LOG_INFO(f"[AHK输入] [ERROR] 业务按键注册异常 ({key}): {e}")
         
-        print("[AHK输入] F8准备 - 所有业务按键注册完成")
+        LOG_INFO("[AHK输入] F8准备 - 所有业务按键注册完成")
         
         system_hotkeys = AHKConfig.SYSTEM_HOTKEYS
         
-        print(f"[AHK输入] 开始注册 {len(system_hotkeys)} 个系统热键Hook...")
+        LOG_INFO(f"[AHK输入] 开始注册 {len(system_hotkeys)} 个系统热键Hook...")
         
         for key in system_hotkeys:
             try:
                 result = self.command_sender.register_hook(key, "intercept")
                 if result:
-                    print(f"[AHK输入] [OK] 系统热键Hook注册成功: {key}")
+                    LOG_INFO(f"[AHK输入] [OK] 系统热键Hook注册成功: {key}")
                 else:
-                    print(f"[AHK输入] [FAIL] 系统热键Hook注册失败: {key} (AHK窗口未找到)")
+                    LOG_INFO(f"[AHK输入] [FAIL] 系统热键Hook注册失败: {key} (AHK窗口未找到)")
             except Exception as e:
-                print(f"[AHK输入] [ERROR] 系统热键Hook注册异常 ({key}): {e}")
+                LOG_INFO(f"[AHK输入] [ERROR] 系统热键Hook注册异常 ({key}): {e}")
     
     def send_key(self, key_str: str) -> bool:
         """
         发送按键
         """
-        print(f"[AHK输入][DEBUG] send_key called with: {key_str}")
+        LOG(f"[AHK输入][DEBUG] send_key called with: {key_str}")
         if self.dry_run_mode:
             if self.debug_display_manager:
                 try:
                     self.debug_display_manager.add_action(f"Key:{key_str}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
         
         # 特殊按键激活时，丢弃所有非紧急入队（send_key 视为非紧急）
@@ -228,12 +229,12 @@ class AHKInputHandler:
     
     def activate_target_window(self):
         """请求AHK激活目标窗口"""
-        print(f"[AHK输入] 正在请求AHK激活窗口...")
+        LOG_INFO(f"[AHK输入] 正在请求AHK激活窗口...")
         return self.command_sender.activate_window()
 
     def set_target_window(self, target: str):
         """设置AHK的目标窗口"""
-        print(f"[AHK输入] 正在设置AHK目标窗口: {target}")
+        LOG_INFO(f"[AHK输入] 正在设置AHK目标窗口: {target}")
         return self.command_sender.set_target_window(target)
 
     def click_mouse(self, button: str = "left", hold_time: Optional[float] = None) -> bool:
@@ -244,8 +245,8 @@ class AHKInputHandler:
             if self.debug_display_manager:
                 try:
                     self.debug_display_manager.add_action(f"Mouse:{button}")
-                except Exception:
-                    pass
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
         
         # 特殊按键激活时，丢弃非紧急入队（鼠标点击视为非紧急）
@@ -340,7 +341,7 @@ class AHKInputHandler:
         self.stop()
     
     def stop(self):
-        print("[AHK输入] 正在停止...")
+        LOG_INFO("[AHK输入] 正在停止...")
         
         # 事件接收现在通过主窗口的WM_COPYDATA处理
         
@@ -348,22 +349,22 @@ class AHKInputHandler:
             try:
                 self.ahk_process.terminate()
                 self.ahk_process.wait(timeout=3)
-                print("[AHK输入] AHK进程已终止")
+                LOG_INFO("[AHK输入] AHK进程已终止")
             except Exception as e:
-                print(f"[AHK输入] 终止AHK进程失败: {e}")
+                LOG_INFO(f"[AHK输入] 终止AHK进程失败: {e}")
                 try:
                     self.ahk_process.kill()
-                except Exception:
-                    pass
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 强制终止AHK进程失败: {e}")
         
-        print("[AHK输入] 已停止")
+        LOG_INFO("[AHK输入] 已停止")
     
     def set_dry_run_mode(self, enabled: bool):
         self.dry_run_mode = enabled
-        print(f"[AHK输入] 干跑模式已 {'开启' if enabled else '关闭'}")
+        LOG_INFO(f"[AHK输入] 干跑模式已 {'\u5f00\u542f' if enabled else '\u5173\u95ed'}")
     
     def __del__(self):
         try:
             self.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            LOG_INFO(f"[AHK输入] 清理资源失败: {e}")

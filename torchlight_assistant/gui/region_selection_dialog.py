@@ -5,6 +5,8 @@
 from PySide6.QtWidgets import QDialog, QApplication
 from PySide6.QtCore import Qt, QRect, Signal as QSignal
 from PySide6.QtGui import QPainter, QPen, QColor
+from torchlight_assistant.utils.debug_log import LOG_INFO, LOG
+
 
 
 class RegionSelectionDialog(QDialog):
@@ -93,7 +95,7 @@ class RegionSelectionDialog(QDialog):
                 rect = QRect(self.start_pos, self.end_pos).normalized()
                 x1, y1, x2, y2 = rect.left(), rect.top(), rect.right(), rect.bottom()
 
-                print(f"[调试] 区域选择完成: ({x1},{y1}) -> ({x2},{y2})")
+                LOG(f"[调试] 区域选择完成: ({x1},{y1}) -> ({x2},{y2})")
 
                 # 立即发送区域选择信号
                 self.region_selected.emit(x1, y1, x2, y2)
@@ -115,7 +117,7 @@ class RegionSelectionDialog(QDialog):
             return
 
         x1, y1, x2, y2 = self._selected_region
-        print(f"[调试] 开始颜色分析: ({x1},{y1}) -> ({x2},{y2})")
+        LOG(f"[调试] 开始颜色分析: ({x1},{y1}) -> ({x2},{y2})")
 
         try:
             # 执行颜色分析
@@ -123,13 +125,13 @@ class RegionSelectionDialog(QDialog):
 
             # 发送颜色分析信号
             if color_analysis:
-                print("[调试] 发送颜色分析结果")
+                LOG(f"[调试] 发送颜色分析结果")
                 self.region_analyzed.emit(x1, y1, x2, y2, color_analysis)
             else:
-                print("[调试] 颜色分析失败")
+                LOG(f"[调试] 颜色分析失败")
 
         except Exception as e:
-            print(f"[调试] 颜色分析异常: {e}")
+            LOG(f"[调试] 颜色分析异常: {e}")
             import traceback
 
             traceback.print_exc()
@@ -143,15 +145,15 @@ class RegionSelectionDialog(QDialog):
             import cv2
             import numpy as np
 
-            print(f"[调试] 开始分析区域: ({x1},{y1}) -> ({x2},{y2})")
+            LOG(f"[调试] 开始分析区域: ({x1},{y1}) -> ({x2},{y2})")
 
             # 从截图中提取区域
             screenshot_array = self._pixmap_to_array(self.screenshot)
             if screenshot_array is None:
-                print("[调试] 截图转换失败")
+                LOG(f"[调试] 截图转换失败")
                 return None
 
-            print(f"[调试] 截图数组形状: {screenshot_array.shape}")
+            LOG(f"[调试] 截图数组形状: {screenshot_array.shape}")
 
             # 确保坐标在有效范围内
             height, width = screenshot_array.shape[:2]
@@ -174,14 +176,14 @@ class RegionSelectionDialog(QDialog):
             # S > 25 and V > 25
             filtered_pixels = pixels[(pixels[:, 1] > 25) & (pixels[:, 2] > 25)]
 
-            print(f"[调试] 总像素: {len(pixels)}, 过滤后: {len(filtered_pixels)}")
+            LOG(f"[调试] 总像素: {len(pixels)}, 过滤后: {len(filtered_pixels)}")
 
             if len(filtered_pixels) < 10:  # 如果有效像素太少，使用全部像素
                 filtered_pixels = pixels
-                print("[调试] 有效像素太少，使用全部像素")
+                LOG(f"[调试] 有效像素太少，使用全部像素")
 
             if len(filtered_pixels) == 0:
-                print("[调试] 没有有效像素")
+                LOG(f"[调试] 没有有效像素")
                 return None
 
             # --- 正确计算平均值 ---
@@ -229,14 +231,14 @@ class RegionSelectionDialog(QDialog):
                 "analysis_success": True,
             }
 
-            print(
+            LOG_INFO(
                 f"[调试] 分析结果: 平均HSV({mean_h},{mean_s},{mean_v}), 容差({tolerance_h},{tolerance_s},{tolerance_v})"
             )
 
             return result
 
         except Exception as e:
-            print(f"颜色分析失败: {e}")
+            LOG_INFO(f"颜色分析失败: {e}")
             return None
 
     def _pixmap_to_array(self, pixmap):
@@ -245,7 +247,7 @@ class RegionSelectionDialog(QDialog):
             import cv2
             import numpy as np
 
-            print(f"[调试] 开始转换QPixmap, 大小: {pixmap.width()}x{pixmap.height()}")
+            LOG(f"[调试] 开始转换QPixmap, 大小: {pixmap.width()}x{pixmap.height()}")
 
             # 转换为QImage
             image = pixmap.toImage()
@@ -255,31 +257,31 @@ class RegionSelectionDialog(QDialog):
 
             if image.format() != QImage.Format_ARGB32:
                 image = image.convertToFormat(QImage.Format_ARGB32)
-                print("[调试] 转换图像格式为ARGB32")
+                LOG(f"[调试] 转换图像格式为ARGB32")
 
             # 转换为numpy数组
             width = image.width()
             height = image.height()
 
-            print(f"[调试] 图像尺寸: {width}x{height}")
+            LOG(f"[调试] 图像尺寸: {width}x{height}")
 
             # 获取图像数据
             ptr = image.bits()
             # PySide6返回memoryview对象，直接使用
             arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
 
-            print(f"[调试] numpy数组形状: {arr.shape}")
+            LOG(f"[调试] numpy数组形状: {arr.shape}")
 
             # PySide6/Qt的ARGB32实际上是BGRA字节顺序
             # 直接提取BGR通道，忽略Alpha通道
             bgr_array = arr[:, :, [0, 1, 2]]  # B, G, R通道
 
-            print(f"[调试] BGR数组形状: {bgr_array.shape}")
+            LOG(f"[调试] BGR数组形状: {bgr_array.shape}")
 
             return bgr_array
 
         except Exception as e:
-            print(f"[调试] 图像转换失败: {e}")
+            LOG(f"[调试] 图像转换失败: {e}")
             import traceback
 
             traceback.print_exc()

@@ -4,7 +4,7 @@ from PySide6.QtGui import QFont
 from typing import Optional
 import ctypes
 from ctypes import wintypes
-from ..utils.debug_log import LOG, LOG_ERROR
+from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 
 # Windows API常量
 WM_COPYDATA = 0x004A
@@ -34,8 +34,8 @@ class OSDStatusWindow(QWidget):
         try:
             # Qt 5.12+ 可用，PySide6 支持；若不可用则忽略异常
             self.setWindowFlag(Qt.WindowType.WindowTransparentForInput, True)
-        except Exception:
-            pass
+        except Exception as e:
+            LOG_INFO(f"[异常] 捕获到Exception: {e}")
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setWindowOpacity(0.8)
 

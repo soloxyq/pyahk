@@ -10,6 +10,7 @@ from torchlight_assistant.config.ahk_commands import (
     CMD_HOOK_REGISTER, CMD_HOOK_UNREGISTER,
     get_command_name
 )
+from torchlight_assistant.utils.debug_log import LOG_INFO
 
 
 class AHKCommandSender:
@@ -117,9 +118,9 @@ class AHKCommandSender:
             
             return result
         except Exception as e:
-            print(f"【AHKCommandSender】 批量更新配置失败: {e}")
+            LOG_INFO(f"【AHKCommandSender】 批量更新配置失败: {e}")
             import traceback
-            print(f"【AHKCommandSender】 异常详情:\n{traceback.format_exc()}")
+            LOG_INFO(f"【AHKCommandSender】 异常详情:\n{traceback.format_exc()}")
             return False
         
     def is_stationary_mode_active(self) -> bool:

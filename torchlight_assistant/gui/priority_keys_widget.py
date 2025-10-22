@@ -1031,8 +1031,8 @@ class PriorityKeysWidget(QWidget):
             # 断开文本变化信号
             try:
                 self.key_input.textChanged.disconnect(self._on_manual_input_changed)
-            except:
-                pass
+            except Exception as e:
+                LOG_INFO(f"[异常] 捕获到Exception: {e}")
 
     def _on_manual_input_changed(self):
         """手动输入文本变化处理"""
@@ -1066,5 +1066,5 @@ class PriorityKeysWidget(QWidget):
         """析构函数，确保清理资源"""
         try:
             self._stop_key_listening()
-        except:
-            pass
+        except Exception as e:
+            LOG_INFO(f"[异常] 捕获到Exception: {e}")

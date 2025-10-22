@@ -3,6 +3,7 @@
 """资源配置管理器 - 统一HP/MP配置构建和解析逻辑"""
 
 from typing import Dict, Any, Tuple
+from torchlight_assistant.utils.debug_log import LOG_INFO
 
 
 class ResourceConfigManager:
@@ -19,7 +20,7 @@ class ResourceConfigManager:
             "rectangle": (1552, 910, 1560, 1004),
             "circle": (1746, 957, 47),
             "text_ocr": (1767, 814, 1894, 835),
-        }
+        },
     }
 
     @staticmethod
@@ -28,11 +29,11 @@ class ResourceConfigManager:
         widgets: Dict[str, Any],
         detection_mode: str,
         circle_config: Dict[str, Any],
-        timing_manager=None
+        timing_manager=None,
     ) -> Dict[str, Any]:
         """
         统一的资源配置构建方法，消除HP/MP重复逻辑
-        
+
         Args:
             resource_type: "hp" 或 "mp"
             widgets: 对应的UI控件字典
@@ -51,20 +52,24 @@ class ResourceConfigManager:
         }
 
         # 添加容差配置
-        tolerance_h, tolerance_s, tolerance_v = ResourceConfigManager._get_tolerance_from_widgets(
-            resource_type, widgets
+        tolerance_h, tolerance_s, tolerance_v = (
+            ResourceConfigManager._get_tolerance_from_widgets(resource_type, widgets)
         )
-        config.update({
-            "tolerance_h": tolerance_h,
-            "tolerance_s": tolerance_s,
-            "tolerance_v": tolerance_v,
-        })
+        config.update(
+            {
+                "tolerance_h": tolerance_h,
+                "tolerance_s": tolerance_s,
+                "tolerance_v": tolerance_v,
+            }
+        )
 
         # 根据检测模式添加相应配置
         if detection_mode == "text_ocr":
             ResourceConfigManager._add_text_ocr_config(config, resource_type, widgets)
         elif detection_mode == "circle":
-            ResourceConfigManager._add_circle_config(config, resource_type, widgets, circle_config)
+            ResourceConfigManager._add_circle_config(
+                config, resource_type, widgets, circle_config
+            )
         else:  # rectangle
             ResourceConfigManager._add_rectangle_config(config, resource_type, widgets)
 
@@ -83,35 +88,43 @@ class ResourceConfigManager:
                     return timing_config.get("hp_cooldown", 5000)
                 elif resource_type == "mp":
                     return timing_config.get("mp_cooldown", 8000)
-            except (AttributeError, KeyError):
-                pass
+            except (AttributeError, KeyError) as e:
+                LOG_INFO(f"[异常] 捕获到(AttributeError, KeyError): {e}")
         # 默认值
         return 5000 if resource_type == "hp" else 8000
 
     @staticmethod
-    def _get_tolerance_from_widgets(resource_type: str, widgets: Dict[str, Any]) -> Tuple[int, int, int]:
+    def _get_tolerance_from_widgets(
+        resource_type: str, widgets: Dict[str, Any]
+    ) -> Tuple[int, int, int]:
         """从UI控件获取容差设置"""
         tolerance_input = widgets.get("tolerance_input")
         if tolerance_input:
             try:
                 tolerance_text = tolerance_input.text().strip()
                 if tolerance_text:
-                    values = [int(x.strip()) for x in tolerance_text.split(",") if x.strip()]
+                    values = [
+                        int(x.strip()) for x in tolerance_text.split(",") if x.strip()
+                    ]
                     if len(values) == 3:
                         return tuple(values)
-            except (ValueError, AttributeError):
-                pass
+            except (ValueError, AttributeError) as e:
+                LOG_INFO(f"[异常] 捕获到(ValueError, AttributeError): {e}")
         # 默认容差
         return (10, 30, 50)
 
     @staticmethod
-    def _add_text_ocr_config(config: Dict[str, Any], resource_type: str, widgets: Dict[str, Any]):
+    def _add_text_ocr_config(
+        config: Dict[str, Any], resource_type: str, widgets: Dict[str, Any]
+    ):
         """添加文本OCR配置"""
         coord_input = widgets.get("coord_input")
         coords = ResourceConfigManager._parse_coordinates(
-            coord_input, 4, ResourceConfigManager.DEFAULT_COORDS[resource_type]["text_ocr"]
+            coord_input,
+            4,
+            ResourceConfigManager.DEFAULT_COORDS[resource_type]["text_ocr"],
         )
-        
+
         text_x1, text_y1, text_x2, text_y2 = coords
 
         # OCR引擎选择
@@ -120,67 +133,96 @@ class ResourceConfigManager:
         if ocr_combo:
             ocr_engine = ocr_combo.currentData() or "template"
 
-        config.update({
-            "detection_mode": "text_ocr",
-            "text_x1": text_x1,
-            "text_y1": text_y1,
-            "text_x2": text_x2,
-            "text_y2": text_y2,
-            "ocr_engine": ocr_engine,
-            "match_threshold": 0.70,
-            # 保留矩形配置作为备份
-            "region_x1": ResourceConfigManager.DEFAULT_COORDS[resource_type]["rectangle"][0],
-            "region_y1": ResourceConfigManager.DEFAULT_COORDS[resource_type]["rectangle"][1],
-            "region_x2": ResourceConfigManager.DEFAULT_COORDS[resource_type]["rectangle"][2],
-            "region_y2": ResourceConfigManager.DEFAULT_COORDS[resource_type]["rectangle"][3],
-        })
+        config.update(
+            {
+                "detection_mode": "text_ocr",
+                "text_x1": text_x1,
+                "text_y1": text_y1,
+                "text_x2": text_x2,
+                "text_y2": text_y2,
+                "ocr_engine": ocr_engine,
+                "match_threshold": 0.70,
+                # 保留矩形配置作为备份
+                "region_x1": ResourceConfigManager.DEFAULT_COORDS[resource_type][
+                    "rectangle"
+                ][0],
+                "region_y1": ResourceConfigManager.DEFAULT_COORDS[resource_type][
+                    "rectangle"
+                ][1],
+                "region_x2": ResourceConfigManager.DEFAULT_COORDS[resource_type][
+                    "rectangle"
+                ][2],
+                "region_y2": ResourceConfigManager.DEFAULT_COORDS[resource_type][
+                    "rectangle"
+                ][3],
+            }
+        )
 
     @staticmethod
-    def _add_circle_config(config: Dict[str, Any], resource_type: str, widgets: Dict[str, Any], circle_config: Dict[str, Any]):
+    def _add_circle_config(
+        config: Dict[str, Any],
+        resource_type: str,
+        widgets: Dict[str, Any],
+        circle_config: Dict[str, Any],
+    ):
         """添加圆形配置"""
         if circle_config and resource_type in circle_config:
             # 使用自动检测的圆形配置
             circle_data = circle_config[resource_type]
-            config.update({
-                "detection_mode": "circle",
-                "center_x": circle_data.get("center_x"),
-                "center_y": circle_data.get("center_y"),
-                "radius": circle_data.get("radius"),
-            })
+            config.update(
+                {
+                    "detection_mode": "circle",
+                    "center_x": circle_data.get("center_x"),
+                    "center_y": circle_data.get("center_y"),
+                    "radius": circle_data.get("radius"),
+                }
+            )
         else:
             # 从输入框解析手动输入的圆形坐标
             coord_input = widgets.get("coord_input")
             coords = ResourceConfigManager._parse_coordinates(
-                coord_input, 3, ResourceConfigManager.DEFAULT_COORDS[resource_type]["circle"]
+                coord_input,
+                3,
+                ResourceConfigManager.DEFAULT_COORDS[resource_type]["circle"],
             )
             center_x, center_y, radius = coords
 
-            config.update({
-                "detection_mode": "circle",
-                "center_x": center_x,
-                "center_y": center_y,
-                "radius": radius,
-            })
+            config.update(
+                {
+                    "detection_mode": "circle",
+                    "center_x": center_x,
+                    "center_y": center_y,
+                    "radius": radius,
+                }
+            )
 
     @staticmethod
-    def _add_rectangle_config(config: Dict[str, Any], resource_type: str, widgets: Dict[str, Any]):
+    def _add_rectangle_config(
+        config: Dict[str, Any], resource_type: str, widgets: Dict[str, Any]
+    ):
         """添加矩形配置"""
         coord_input = widgets.get("coord_input")
         coords = ResourceConfigManager._parse_coordinates(
-            coord_input, 4, ResourceConfigManager.DEFAULT_COORDS[resource_type]["rectangle"]
+            coord_input,
+            4,
+            ResourceConfigManager.DEFAULT_COORDS[resource_type]["rectangle"],
         )
         x1, y1, x2, y2 = coords
 
-        config.update({
-            "detection_mode": "rectangle",
-            "region_x1": x1,
-            "region_y1": y1,
-            "region_x2": x2,
-            "region_y2": y2,
-        })
+        config.update(
+            {
+                "detection_mode": "rectangle",
+                "region_x1": x1,
+                "region_y1": y1,
+                "region_x2": x2,
+                "region_y2": y2,
+            }
+        )
 
     @staticmethod
-    def _parse_coordinates(coord_input, expected_count: int, default_coords: Tuple) -> Tuple:
+    def _parse_coordinates(
+        coord_input, expected_count: int, default_coords: Tuple
+    ) -> Tuple:
         """解析坐标输入框，返回坐标元组"""
         if not coord_input:
             return default_coords
@@ -191,9 +233,9 @@ class ResourceConfigManager:
                 coords = [int(x.strip()) for x in coord_text.split(",")]
                 if len(coords) >= expected_count:
                     return tuple(coords[:expected_count])
-        except (ValueError, AttributeError):
-            pass
-        
+        except (ValueError, AttributeError) as e:
+            LOG_INFO(f"[异常] 捕获到(ValueError, AttributeError): {e}")
+
         return default_coords
 
     @staticmethod
@@ -209,11 +251,15 @@ class ResourceConfigManager:
         config["colors"] = colors
 
     @staticmethod
-    def _parse_colors_to_list(colors_text: str, default_tolerance: Tuple[int, int, int] = (10, 30, 50)) -> list:
+    def _parse_colors_to_list(
+        colors_text: str, default_tolerance: Tuple[int, int, int] = (10, 30, 50)
+    ) -> list:
         """将颜色配置文本解析为颜色列表"""
         colors = []
         try:
-            lines = [line.strip() for line in colors_text.strip().split("\n") if line.strip()]
+            lines = [
+                line.strip() for line in colors_text.strip().split("\n") if line.strip()
+            ]
 
             for i, line in enumerate(lines, 1):
                 color_values = [int(x.strip()) for x in line.split(",") if x.strip()]
@@ -230,36 +276,38 @@ class ResourceConfigManager:
                         "tolerance_v": v_tol,
                     }
                     colors.append(color)
-        except (ValueError, AttributeError):
-            pass
+        except (ValueError, AttributeError) as e:
+            LOG_INFO(f"[异常] 捕获到(ValueError, AttributeError): {e}")
 
         # 如果解析失败，返回默认配置
         if not colors:
             h_tol, s_tol, v_tol = default_tolerance
-            colors = [{
-                "name": "Default",
-                "target_h": 314 if "157" in colors_text else 104,  # HP红色或MP蓝色
-                "target_s": 75 if "157" in colors_text else 80,
-                "target_v": 29 if "157" in colors_text else 58,
-                "tolerance_h": h_tol,
-                "tolerance_s": s_tol,
-                "tolerance_v": v_tol,
-            }]
+            colors = [
+                {
+                    "name": "Default",
+                    "target_h": 314 if "157" in colors_text else 104,  # HP红色或MP蓝色
+                    "target_s": 75 if "157" in colors_text else 80,
+                    "target_v": 29 if "157" in colors_text else 58,
+                    "tolerance_h": h_tol,
+                    "tolerance_s": s_tol,
+                    "tolerance_v": v_tol,
+                }
+            ]
 
         return colors
 
     @staticmethod
     def update_widget_from_config(
-        widgets: Dict[str, Any], 
-        resource_config: Dict[str, Any], 
+        widgets: Dict[str, Any],
+        resource_config: Dict[str, Any],
         detection_mode_attr_name: str,
         circle_config_attr_name: str,
         resource_type: str,
-        widget_owner
+        widget_owner,
     ):
         """
         从配置更新UI控件
-        
+
         Args:
             widgets: UI控件字典
             resource_config: 资源配置字典
@@ -273,24 +321,30 @@ class ResourceConfigManager:
 
         # 更新基础配置
         widgets["enabled"].setChecked(resource_config.get("enabled", True))
-        widgets["key"].setText(resource_config.get("key", "1" if resource_type == "hp" else "2"))
+        widgets["key"].setText(
+            resource_config.get("key", "1" if resource_type == "hp" else "2")
+        )
         widgets["threshold"].setValue(resource_config.get("threshold", 50))
 
         # 更新容差输入框
         tolerance_h = resource_config.get("tolerance_h", 10)
         tolerance_s = resource_config.get("tolerance_s", 30)
         tolerance_v = resource_config.get("tolerance_v", 50)
-        tolerance_input = getattr(widget_owner, f"{resource_type}_tolerance_input", None)
+        tolerance_input = getattr(
+            widget_owner, f"{resource_type}_tolerance_input", None
+        )
         if tolerance_input:
             tolerance_input.setText(f"{tolerance_h},{tolerance_s},{tolerance_v}")
 
         # 根据检测模式更新配置
         detection_mode = resource_config.get("detection_mode", "rectangle")
-        
+
         # 设置模式下拉框
         mode_combo = widgets.get("mode_combo")
         if mode_combo:
-            mode_index = {"rectangle": 0, "circle": 1, "text_ocr": 2}.get(detection_mode, 0)
+            mode_index = {"rectangle": 0, "circle": 1, "text_ocr": 2}.get(
+                detection_mode, 0
+            )
             mode_combo.setCurrentIndex(mode_index)
 
         # 更新检测模式状态
@@ -307,8 +361,10 @@ class ResourceConfigManager:
                     resource_config.get("text_y2"),
                 )
                 if all(c is not None for c in text_coords):
-                    coord_input.setText(f"{text_coords[0]},{text_coords[1]},{text_coords[2]},{text_coords[3]}")
-                    
+                    coord_input.setText(
+                        f"{text_coords[0]},{text_coords[1]},{text_coords[2]},{text_coords[3]}"
+                    )
+
                 # 设置OCR引擎
                 ocr_engine = resource_config.get("ocr_engine", "template")
                 ocr_combo = widgets.get("ocr_engine_combo")
@@ -325,15 +381,21 @@ class ResourceConfigManager:
                     resource_config.get("radius"),
                 )
                 if all(c is not None for c in circle_coords):
-                    coord_input.setText(f"{circle_coords[0]},{circle_coords[1]},{circle_coords[2]}")
-                    
+                    coord_input.setText(
+                        f"{circle_coords[0]},{circle_coords[1]},{circle_coords[2]}"
+                    )
+
                     # 更新圆形配置缓存
                     circle_data = {
                         "center_x": circle_coords[0],
                         "center_y": circle_coords[1],
                         "radius": circle_coords[2],
                     }
-                    setattr(widget_owner, circle_config_attr_name, {resource_type: circle_data})
+                    setattr(
+                        widget_owner,
+                        circle_config_attr_name,
+                        {resource_type: circle_data},
+                    )
 
             else:  # rectangle
                 rect_coords = (
@@ -343,7 +405,9 @@ class ResourceConfigManager:
                     resource_config.get("region_y2"),
                 )
                 if all(c is not None for c in rect_coords):
-                    coord_input.setText(f"{rect_coords[0]},{rect_coords[1]},{rect_coords[2]},{rect_coords[3]}")
+                    coord_input.setText(
+                        f"{rect_coords[0]},{rect_coords[1]},{rect_coords[2]},{rect_coords[3]}"
+                    )
 
     @staticmethod
     def colors_list_to_text(colors_list: list) -> str:
