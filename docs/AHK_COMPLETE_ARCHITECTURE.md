@@ -9,24 +9,20 @@
 
 ## 📊 架构对比
 
-### 当前架构（存在问题）
+### 当前架构（已实现）
 ```
-Python
-  ├─ 图像检测 ✓
-  ├─ 条件判断 ✓
-  ├─ Hook拦截 ✗ (自拦截问题)
-  ├─ 按键队列 ✓
-  └─ 输入执行 ✗ (游戏兼容性问题)
-```
-
-### 新架构（完美解决）
-```
-Python                          AHK
-  ├─ 图像检测 ✓                  
-  ├─ 条件判断 ✓                  
-  └─ 发送命令 ──WM_COPYDATA──> ├─ Hook拦截 ✓ (无自拦截)
-                                ├─ 按键队列 ✓ (精确时序)
-                                └─ 输入执行 ✓ (完美兼容)
+Python (PySide6主线程)              AHK (hold_server_extended.ahk)
+  ├─ 图像检测 ✓                       
+  ├─ 条件判断 ✓                       
+  ├─ 决策逻辑 ✓                       
+  │                                  
+  ├─ WM_COPYDATA发送命令 ───────> ├─ Hook管理 ✓ ($ 前缀防自拦截)
+  │                 (0.069ms)    ├─ 四级优先队列 ✓ (20ms处理)
+  │                              ├─ 特殊按键过滤 ✓ (HP/MP优先)
+  │                              └─ SendInput执行 ✓ (游戏兼容)
+  │                                  │
+  └─ Signal桥接收事件 <──WM_COPYDATA──── └─ 事件发送 ✓
+     (主线程处理)            (intercept_key_down/special_key_down等)
 ```
 
 ---
@@ -204,63 +200,77 @@ class AHKEventReceiver:
 
 ---
 
-## 🔄 通信协议
+## 🔄 通信协议 (实际实现)
 
-### Python → AHK (WM_COPYDATA)
+### Python → AHK (WM_COPYDATA - 发送命令)
 
-| 命令 | 格式 | 说明 |
-|------|------|------|
-| 入队 | `enqueue:priority:action` | 将动作加入指定优先级队列 |
-| 按键 | `press:key` | 立即发送按键（不入队） |
-| 序列 | `sequence:key1,delay50,key2` | 执行按键序列 |
-| 暂停 | `pause` | 暂停队列处理 |
-| 恢复 | `resume` | 恢复队列处理 |
-| 注册Hook | `hook_register:key:mode` | 注册按键Hook |
-| 取消Hook | `hook_unregister:key` | 取消按键Hook |
-| 清空队列 | `clear_queue:priority` | 清空指定优先级队列 |
+使用 `hold_client.send_ahk_cmd(window_title, cmd_id, param)`
 
-### AHK → Python (TCP Socket)
+| 命令ID | 命令名 | 参数格式 | 说明 |
+|--------|--------|------------|------|
+| 1 | PING | - | 测试连接 |
+| 2 | SET_TARGET | `"ahk_exe game.exe"` | 设置目标窗口 |
+| 3 | ACTIVATE | - | 激活目标窗口 |
+| 4 | ENQUEUE | `"priority:action"` | 入队动作 (0-3:级别, press:key) |
+| 5 | CLEAR_QUEUE | `"priority"` | 清空队列 (-1=全部) |
+| 6 | PAUSE | - | 暂停队列处理 |
+| 7 | RESUME | - | 恢复队列处理 |
+| 8 | HOOK_REGISTER | `"key:mode"` | 注册Hook (mode: intercept/monitor/special/priority) |
+| 9 | HOOK_UNREGISTER | `"key"` | 取消Hook |
+| 12 | SET_STATIONARY | `"active:type"` | 设置原地模式 (true:shift_modifier) |
+| 13 | SET_FORCE_MOVE_KEY | `"key"` | 设置强制移动键 |
+| 14 | SET_FORCE_MOVE_STATE | `"active"` | 设置强制移动状态 |
+| 15 | SET_MANAGED_KEY_CONFIG | `"key:target:delay"` | 设置管理按键配置 (e:+:500) |
+| 16 | CLEAR_HOOKS | - | 清空所有可配置Hook (保留F8) |
+| 18 | SET_PYTHON_WINDOW_STATE | `"main"`/`"osd"` | 设置Python窗口状态 |
+| 19 | BATCH_UPDATE_CONFIG | `"hp_key:1,mp_key:2"` | 批量配置更新 |
 
-| 事件 | 格式 | 说明 |
-|------|------|------|
-| 优先级按键按下 | `priority_key_down:key` | 优先级按键被按下 |
-| 优先级按键释放 | `priority_key_up:key` | 优先级按键被释放 |
-| 队列状态 | `queue_status:e,h,n,l` | 各队列长度 |
-| Hook状态 | `hook_status:key:active` | Hook状态变化 |
+### AHK → Python (WM_COPYDATA - 发送事件)
+
+AHK通过 `SendToPython(event_str)` 发送事件,Python通过 `signal_bridge` 在主线程处理
+
+| 事件类型 | 格式 | 说明 |
+|----------|------|------|
+| intercept_key_down | `"intercept_key_down:F8"` | 系统热键拦截 (F8/F7/F9/z) |
+| special_key_down | `"special_key_down:space"` | 特殊按键按下 (状态跟踪) |
+| special_key_up | `"special_key_up:space"` | 特殊按键释放 |
+| special_key_pause | `"special_key_pause:start"`/`"end"` | 特殊按键暂停/恢夏 |
+| managed_key_down | `"managed_key_down:e"` | 管理按键按下 (延迟+映射) |
+| managed_key_complete | `"managed_key_complete:e"` | 管理按键处理完成 |
+| priority_key_down | `"priority_key_down:key"` | 优先级按键按下 (兼容旧版) |
+| priority_key_up | `"priority_key_up:key"` | 优先级按键释放 (兼容旧版) |
+| monitor_key_down | `"monitor_key_down:a"` | 监控按键按下 (不拦截) |
+| monitor_key_up | `"monitor_key_up:a"` | 监控按键释放 |
 
 ---
 
-## 📋 实施计划
+## 💚 实施状态
 
-### 阶段1：扩展AHK Server（3-4天）
+### ✅ 已完成功能
 
-#### 任务清单
-- [ ] 实现四级优先队列
-- [ ] 实现队列处理器（定时器驱动）
-- [ ] 实现按键序列解析
-- [ ] 实现Hook管理系统
-- [ ] 实现暂停/恢复机制
-- [ ] 实现TCP服务器（发送事件到Python）
-- [ ] 测试各个功能模块
+#### AHK Server (`hold_server_extended.ahk`)
+- ✅ 四级优先队列 (Emergency/High/Normal/Low)
+- ✅ 20ms定时器驱动的队列处理器
+- ✅ 按键序列支持 (delay,press,hold,release)
+- ✅ 动态Hook管理 (intercept/monitor/special/priority)
+- ✅ 特殊按键过滤机制 (只允许HP/MP通过)
+- ✅ 暂停/恢复机制
+- ✅ 性能优化 (队列计数器+字符串缓存+异步延迟)
+- ✅ 原地模式支持 (shift_modifier/force_shift/toggle)
+- ✅ WM_COPYDATA通信 (19个命令)
 
-#### 文件
-- `hold_server_extended.ahk` - 扩展版AHK服务器
+#### Python侧 (`torchlight_assistant/`)
+- ✅ `AHKCommandSender` - WM_COPYDATA命令发送
+- ✅ `signal_bridge.py` - Qt信号桥(主线程事件处理)
+- ✅ `AHKInputHandler` - 兼容原API的输入处理器
+- ✅ 移除Python侧的Hook管理 (全部由AHK负责)
+- ✅ 命令协议 (`ahk_commands.py` + `ahk_commands.ahk`)
+- ✅ 配置系统 (`ahk_config.py`)
 
-### 阶段2：Python侧改造（3-4天）
+### 🚧 已知问题
 
-#### 任务清单
-- [ ] 实现AHKCommandSender
-- [ ] 实现AHKEventReceiver
-- [ ] 重构InputHandler使用AHK命令
-- [ ] 移除Python侧的Hook管理
-- [ ] 移除Python侧的按键队列
-- [ ] 实现降级方案（AHK不可用时）
-- [ ] 单元测试
-
-#### 文件
-- `ahk_command_sender.py` - 命令发送器
-- `ahk_event_receiver.py` - 事件接收器
-- `ahk_input_handler.py` - AHK输入处理器
+1. **没有降级方案**: AHK不可用时系统无法启动 (设计决策: 不需要降级)
+2. **特殊按键延迟窗口期清空技能**: 延迟期间清空非紧急队列,防止技能积累 (已修复)
 
 ### 阶段3：集成测试（2-3天）
 
@@ -321,21 +331,38 @@ $space::
 }
 ```
 
-### 2. 双向通信
+### 2. 通信机制 (实际实现)
 ```
-Python ──WM_COPYDATA──> AHK  (命令)
-Python <──TCP Socket─── AHK  (事件)
+Python ──WM_COPYDATA──> AHK  (命令, hold_client.py)
+Python <──WM_COPYDATA─── AHK  (事件, SendToPython函数)
+       └──Signal桥─────> 主线程处理 (signal_bridge.py)
+
+性能数据:
+- WM_COPYDATA通信延迟: 0.069ms (实测)
+- AHK窗口句柄缓存: 首次查找后永久缓存
+- Qt Signal桥: 自动转换到主线程,线程安全
 ```
 
-### 3. 队列优先级
+### 3. 队列优先级与过滤机制 (实际实现)
 ```
 Emergency (0) > High (1) > Normal (2) > Low (3)
 
-优先级按键激活时：
-- Emergency: 继续执行（药剂）
-- High: 继续执行（优先级按键本身）
-- Normal: 暂停（普通技能）
-- Low: 暂停（辅助功能）
+正常模式 (IsPaused=false, SpecialKeysPaused=false):
+- 按优先级依次处理: Emergency > High > Normal > Low
+
+手动暂停 (IsPaused=true):
+- 仅Emergency队列继续执行 (HP/MP药剂)
+- 其他全部暂停
+
+特殊按键激活 (SpecialKeysPaused=true):
+- Emergency队列: 始终执行
+- High/Normal/Low队列: 只执行紧急动作 (IsEmergencyAction判断)
+  - 紧急动作: press:缓存的HP/MP按键 (CachedHpKey/CachedMpKey)
+  - 非紧急动作: 过滤丢弃
+
+延迟窗口期 (DelayUntil > 0):
+- Emergency队列: 继续执行
+- 其他队列: 被清空 (ClearNonEmergencyQueues)
 ```
 
 ---

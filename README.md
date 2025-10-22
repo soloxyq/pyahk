@@ -25,12 +25,16 @@ pyahk 基于现代化技术架构，提供以下核心功能：
 ### 🚀 **性能优化技术**
 - **零拷贝屏幕捕获**: 基于DXGI的C++实现，毫秒级响应速度
 - **HSV模板匹配**: 0.3ms检测速度，比OCR快82-803倍，100%成功率
-- **智能暂停/恢复**: 优先级按键期间节省70-90% CPU资源
+- **AHK输入系统**: Python决策+AHK执行，WM_COPYDATA通信延迟<0.1ms
+- **四级优先队列**: 紧急(HP/MP)/高/普通/低，特殊按键激活时智能过滤
 - **事件驱动架构**: 中央事件总线，完全解耦设计
 - **统一调度器**: 单线程调度，亚毫秒级定时精度
 
 ### 🎮 **游戏自动化功能**
-- **优先级按键系统**: 基于Windows Hook的选择性拦截；特殊按键保持原生响应，管理按键程序接管；智能暂停/恢复，节省70-90%CPU资源
+- **AHK输入系统**: 
+  - Python负责决策(图像检测+条件判断)，AHK负责执行(Hook拦截+队列处理+输入发送)
+  - 4种Hook模式: intercept(拦截重发), monitor(仅监控), special(状态跟踪), priority(延迟映射)
+  - 特殊按键激活时仅允许紧急按键(HP/MP)通过，其他技能自动过滤
 - **智能药剂管理**: 
   - 矩形检测（推荐）: 0.3ms，100%成功率，96%误差<5%
   - 圆形检测: ~5ms，适合球形资源条
@@ -103,29 +107,32 @@ paddleocr==2.7.3      # OCR文字识别(固定版本)
 torchlight_assistant/
 ├── core/                           # 核心业务逻辑
 │   ├── macro_engine.py            # 主控制器和状态管理
-│   ├── event_bus.py               # 事件总线
-│   ├── unified_scheduler.py       # 统一调度器
-│   ├── input_handler.py           # 输入处理器
+│   ├── event_bus.py               # 事件总线(单例模式)
+│   ├── unified_scheduler.py       # 统一调度器(monotonic时间)
+│   ├── ahk_input_handler.py       # AHK输入处理器(兼容原API)
+│   ├── ahk_command_sender.py      # AHK命令发送器(WM_COPYDATA)
+│   ├── signal_bridge.py           # Qt信号桥(主线程事件处理)
 │   ├── skill_manager.py           # 技能管理
 │   ├── resource_manager.py        # 资源检测
 │   ├── debug_display_manager.py   # 调试显示
 │   ├── simple_affix_reroll_manager.py # 装备洗练
 │   ├── pathfinding_manager.py     # 自动寻路
 │   └── states.py                  # 状态枚举
+├── config/                        # 配置定义
+│   ├── ahk_commands.py            # AHK命令协议(19个命令)
+│   └── ahk_config.py              # AHK系统配置
 ├── gui/                           # 用户界面
 │   ├── main_window.py             # 主窗口
 │   ├── debug_osd_window.py        # 调试覆盖窗口
 │   └── ...
 ├── utils/                         # 工具类
-│   ├── multi_priority_queue.py    # 多级优先队列
-│   ├── priority_deque.py          # 优先级队列(兼容)
 │   ├── native_graphics_capture_manager.py # 图形捕获
 │   ├── border_frame_manager.py    # 边框管理
-│   ├── hotkey_manager.py          # 热键管理（Windows低级Hook，选择性拦截）
 │   └── ...
-└── native_capture/                # C++原生捕获库
-    ├── capture_lib.cpp            # DXGI捕获实现
-    ├── capture_lib.h              # C接口定义
-    ├── python_wrapper.py          # Python包装器
-    └── ...
+├── native_capture/                # C++原生捕获库
+│   ├── capture_lib.cpp            # DXGI捕获实现
+│   └── python_wrapper.py          # Python包装器
+├── hold_server_extended.ahk       # AHK服务器(四级队列+Hook管理)
+├── hold_client.py                 # WM_COPYDATA客户端(句柄缓存)
+└── ahk_commands.ahk               # AHK命令协议定义
 ```

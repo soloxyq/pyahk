@@ -3,9 +3,9 @@
         "Skill1": {
             "Enabled": false,
             "Key": "LButton",
-            "Priority": true,
-            "Timer": 150,
-            "TriggerMode": 1,
+            "Priority": false,
+            "Timer": 250,
+            "TriggerMode": 0,
             "CooldownCoordX": 815,
             "CooldownCoordY": 1000,
             "CooldownSize": 12,
@@ -31,7 +31,7 @@
             "AltKey": "2"
         },
         "Skill3": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "q",
             "Priority": false,
             "Timer": 650,
@@ -46,7 +46,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "e",
             "Priority": false,
             "Timer": 1000,
@@ -138,8 +138,8 @@
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
-            "ahk_class": "UnrealWindow",
-            "ahk_exe": "torchlight_infinite.exe"
+            "ahk_class": "Qt5156QWindowIcon",
+            "ahk_exe": "MuMuNxDevice.exe"
         },
         "stationary_mode_config": {
             "hotkey": "",
@@ -168,7 +168,7 @@
         },
         "resource_management": {
             "hp_config": {
-                "enabled": true,
+                "enabled": false,
                 "key": "c",
                 "threshold": 60,
                 "cooldown": 1000,
@@ -229,7 +229,7 @@
             "check_interval": 200
         },
         "priority_keys": {
-            "enabled": true,
+            "enabled": false,
             "special_keys": [],
             "managed_keys": {}
         },
