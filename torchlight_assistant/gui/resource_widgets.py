@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""资源管理相关UI组件"""
+"""资源管理相关UI组件 - 重构版本"""
 
 from PySide6.QtWidgets import (
     QWidget,
@@ -28,6 +28,8 @@ from .custom_widgets import (
 )
 from .color_picker_dialog import ColorPickingDialog
 from .region_selection_dialog import RegionSelectionDialog
+from .resource_config_manager import ResourceConfigManager
+from .color_analysis_tools import ColorAnalysisTools, ColorListManager
 
 
 class ResourceManagementWidget(QWidget):
@@ -39,10 +41,6 @@ class ResourceManagementWidget(QWidget):
         self.mp_widgets = {}
         self.main_window = None  # 引用主窗口，用于隐藏/显示
 
-        # 存储拾取的HSV值 - 使用游戏实际测量值
-        self.hp_hsv_values = {"h": 314, "s": 75, "v": 29}  # 血药颜色
-        self.mp_hsv_values = {"h": 208, "s": 80, "v": 58}  # 蓝药颜色
-
         # 检测模式跟踪
         self.hp_detection_mode = "rectangle"  # "rectangle" 或 "circle"
         self.mp_detection_mode = "rectangle"  # "rectangle" 或 "circle"
@@ -50,6 +48,10 @@ class ResourceManagementWidget(QWidget):
         # 圆形配置存储
         self.hp_circle_config = {}
         self.mp_circle_config = {}
+
+        # 初化工具类
+        self.color_analysis_tools = ColorAnalysisTools()
+        self.color_list_manager = None  # 在_setup_ui中初化
 
         self._setup_ui()
 
@@ -513,11 +515,21 @@ class ResourceManagementWidget(QWidget):
         self.global_colors_result.setTextFormat(Qt.TextFormat.RichText)
         colors_layout.addWidget(self.global_colors_result)
 
+        # 初始化ColorListManager
+        self.color_list_manager = ColorListManager(
+            self.global_colors_edit, 
+            self.global_colors_result,
+            max_colors=2
+        )
+
         # 连接颜色配置变化事件
-        self.global_colors_edit.textChanged.connect(self._parse_global_colors)
+        self.global_colors_edit.textChanged.connect(self.color_list_manager.parse_colors)
 
         tools_layout.addWidget(colors_group)
         main_layout.addWidget(tools_group)
+
+        # 初始化颜色分析工具的主窗口引用
+        self.color_analysis_tools.main_window = self.main_window
 
         # 创建容器Widget
         container = QWidget()
@@ -542,112 +554,14 @@ class ResourceManagementWidget(QWidget):
             return [10, 30, 50]
 
     def _add_color_to_list(self, h, s, v, h_tol=None, s_tol=None, v_tol=None):
-        """将HSV颜色值添加到颜色列表，格式为H,S,V
-        使用FIFO队列逻辑，最多保持２个颜色。容差信息不存储在颜色列表中。"""
-        # 🚀 获取当前颜色列表
-        current_text = self.global_colors_edit.toPlainText().strip()
-        new_color = f"{h},{s},{v}"  # 只存储HSV值
-        
-        # 🚀 解析现有颜色
-        if current_text:
-            existing_colors = [line.strip() for line in current_text.split("\n") if line.strip()]
-        else:
-            existing_colors = []
-        
-        # 🚀 添加新颜色到列表末尾
-        existing_colors.append(new_color)
-        
-        # 🚀 FIFO限制：如果超过２个，移除最旧的（第一个）
-        MAX_COLORS = 2
-        if len(existing_colors) > MAX_COLORS:
-            removed_color = existing_colors.pop(0)  # 移除最旧的颜色
-            print(f"[颜色管理] 移除最旧颜色: {removed_color}")
-        
-        # 🚀 更新文本框
-        updated_text = "\n".join(existing_colors)
-        self.global_colors_edit.setPlainText(updated_text)
-        
-        print(
-            f"[颜色添加] 添加颜色到列表: HSV({h},{s},{v}) | 当前总数: {len(existing_colors)}"
-        )
+        """将HSV颜色值添加到颜色列表 - 使用ColorListManager"""
+        if self.color_list_manager:
+            self.color_list_manager.add_color_to_list(h, s, v)
 
     def _parse_global_colors(self):
-        """解析全局颜色配置工具中的颜色"""
-        try:
-            colors_text = self.global_colors_edit.toPlainText().strip()
-
-            if not colors_text:
-                self.global_colors_result.setText("请输入颜色配置")
-                return
-
-            # 解析纯颜色列表格式
-            lines = [line.strip() for line in colors_text.split("\n") if line.strip()]
-
-            if not lines:
-                self.global_colors_result.setText("请输入有效的颜色配置")
-                return
-
-            # 构建HTML格式的结果文本
-            html_parts = [
-                f"<div style='margin-bottom: 8px; font-weight: bold;'>✅ 解析成功：{len(lines)}种颜色</div>"
-            ]
-
-            for i, line in enumerate(lines):
-                try:
-                    # 解析单行颜色值 H,S,V
-                    values = [int(x.strip()) for x in line.split(",") if x.strip()]
-
-                    if len(values) != 3:
-                        self.global_colors_result.setText(
-                            f"❌ 第{i+1}行格式错误：必须为3个值 (H,S,V)"
-                        )
-                        return
-                    
-                    h, s, v = values
-
-                    # 验证OpenCV HSV范围
-                    if not (0 <= h <= 179):
-                        self.global_colors_result.setText(
-                            f"❌ 第{i+1}行H值({h})超出OpenCV范围(0-179)"
-                        )
-                        return
-                    if not (0 <= s <= 255):
-                        self.global_colors_result.setText(
-                            f"❌ 第{i+1}行S值({s})超出范围(0-255)"
-                        )
-                        return
-                    if not (0 <= v <= 255):
-                        self.global_colors_result.setText(
-                            f"❌ 第{i+1}行V值({v})超出范围(0-255)"
-                        )
-                        return
-
-                    # 转换HSV到RGB
-                    r, g, b = self._hsv_to_rgb(h, s, v)
-                    bg_color = f"rgb({r},{g},{b})"
-                    text_color = self._get_contrast_color(r, g, b)
-
-                    # 创建带颜色背景的HTML块
-                    color_html = f"""
-                    <div style='margin: 3px 0; padding: 6px 10px; border-radius: 6px; 
-                               background-color: {bg_color}; color: {text_color}; 
-                               border: 1px solid #ddd; font-size: 10pt; font-weight: bold;'>
-                        颜色{i+1}: HSV({h},{s},{v}) → RGB({r},{g},{b})
-                    </div>
-                    """
-                    html_parts.append(color_html)
-
-                except ValueError:
-                    self.global_colors_result.setText(
-                        f"❌ 第{i+1}行数值格式错误：{line}"
-                    )
-                    return
-
-            result_html = "".join(html_parts)
-            self.global_colors_result.setText(result_html)
-
-        except Exception as e:
-            self.global_colors_result.setText(f"❌ 解析错误：{str(e)}")
+        """解析全局颜色配置工具中的颜色 - 使用ColorListManager"""
+        if self.color_list_manager:
+            self.color_list_manager.parse_colors()
 
     def _start_color_analysis(self):
         """开始颜色分析（与_start_region_color_analysis功能重复，已废弃）"""
@@ -658,99 +572,18 @@ class ResourceManagementWidget(QWidget):
     # 🚀 已删除过时的_handle_region_analysis函数，现在统一使用_add_color_to_list方法
 
     def _start_single_color_picking(self):
-        """开始单点取色，直接添加到颜色列表"""
-        if not self.main_window:
-            return
+        """开始单点取色 - 使用ColorAnalysisTools"""
+        def on_color_picked(h, s, v):
+            self._add_color_to_list(h, s, v)
             
-        try:
-            from .color_picker_dialog import ColorPickingDialog
-            from PySide6.QtCore import QTimer
-
-            def on_color_picked(r, g, b):
-                # 转换为HSV并添加到颜色列表
-                import cv2
-                import numpy as np
-
-                rgb_array = np.array([[[r, g, b]]], dtype=np.uint8)
-                hsv_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2HSV)
-                h, s, v = hsv_array[0][0]
-
-                # 添加到颜色列表（包含容差）
-                self._add_color_to_list(int(h), int(s), int(v))
-                print(f"[单点取色] 获取颜色: RGB({r},{g},{b}) -> HSV({h},{s},{v})")
-
-            def show_picker():
-                # 创建取色器
-                picker = ColorPickingDialog()
-                picker.color_picked.connect(on_color_picked)
-                result = picker.exec()
-                
-                # 恢复显示主界面
-                if self.main_window:
-                    self.main_window.show()
-                    self.main_window.raise_()
-                    self.main_window.activateWindow()
-            
-            # 🚀 隐藏主窗口，与区域取色保持一致
-            self.main_window.hide()
-            
-            # 使用QTimer延迟执行，确保界面完全隐藏
-            QTimer.singleShot(100, show_picker)
-
-        except Exception as e:
-            # 发生错误时也要恢复主界面
-            if self.main_window:
-                self.main_window.show()
-                self.main_window.raise_()
-                self.main_window.activateWindow()
-            print(f"取色错误：{str(e)}")
+        self.color_analysis_tools.start_single_color_picking(on_color_picked)
 
     def _start_region_color_analysis(self):
-        """开始区域取HSV平均色和容差，直接添加到颜色列表"""
-        if not self.main_window:
-            return
-
-        # 隐藏主窗口
-        self.main_window.hide()
-
-        # 使用QTimer延迟执行，确保界面完全隐藏
-        from PySide6.QtCore import QTimer
-
-        def show_dialog():
-            # 创建区域选择对话框
-            from .region_selection_dialog import RegionSelectionDialog
-
-            dialog = RegionSelectionDialog(None)
-
-            def on_region_analyzed(x1, y1, x2, y2, analysis):
-                print(f"[区域取色调试] 收到分析结果: {analysis}")
-                
-                # 🚀 修复字段名不匹配问题：使用正确的"mean_hsv"字段
-                if analysis and "mean_hsv" in analysis:
-                    h, s, v = analysis["mean_hsv"]
-                    
-                    # 只添加HSV颜色值到列表，容差由HP/MP独立管理
-                    self._add_color_to_list(int(h), int(s), int(v))
-                    if "tolerance" in analysis:
-                        h_tol, s_tol, v_tol = analysis["tolerance"]
-                        print(f"[区域取色] 获取平均颜色: HSV({h},{s},{v})，分析建议容差: ±({h_tol},{s_tol},{v_tol})")
-                    else:
-                        print(f"[区域取色] 获取平均颜色: HSV({h},{s},{v})")
-                else:
-                    print(f"[区域取色警告] 分析结果中没有找到mean_hsv字段")
-
-            dialog.region_analyzed.connect(on_region_analyzed)
-
-            # 执行对话框
-            result = dialog.exec()
-
-            # 恢复显示主界面
-            if self.main_window:
-                self.main_window.show()
-                self.main_window.raise_()
-                self.main_window.activateWindow()
-
-        QTimer.singleShot(100, show_dialog)
+        """开始区域取色 - 使用ColorAnalysisTools"""
+        def on_region_analyzed(h, s, v, x1, y1, x2, y2, analysis):
+            self._add_color_to_list(h, s, v)
+            
+        self.color_analysis_tools.start_region_color_analysis(on_region_analyzed)
 
     def _hsv_to_rgb(self, h: int, s: int, v: int) -> tuple:
         """将OpenCV HSV颜色转换为RGB (使用OpenCV确保一致性)"""
@@ -860,159 +693,11 @@ class ResourceManagementWidget(QWidget):
         return 5000 if cooldown_type == "hp" else 8000
 
     def _build_hp_config(self) -> Dict[str, Any]:
-        """构建HP配置，支持矩形和圆形两种独立配置方式"""
-        # 基础配置（冷却时间从时间间隔页面获取）
-        hp_config = {
-            "enabled": self.hp_widgets["enabled"].isChecked(),
-            "key": self.hp_widgets["key"].text().strip(),
-            "threshold": self.hp_widgets["threshold"].value(),
-            "cooldown": self._get_cooldown_from_timing_settings("hp"),
-        }
-
-        # 添加容差配置 - 从 HP 容差输入框解析
-        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance("hp")
-        hp_config.update(
-            {
-                "tolerance_h": tolerance_h,
-                "tolerance_s": tolerance_s,
-                "tolerance_v": tolerance_v,
-            }
+        """构建HP配置 - 使用ResourceConfigManager"""
+        timing_manager = getattr(self.main_window, 'timing_settings', None)
+        return ResourceConfigManager.build_resource_config(
+            "hp", self.hp_widgets, self.hp_detection_mode, self.hp_circle_config, timing_manager
         )
-
-        # 根据检测模式保存相应配置
-        if self.hp_detection_mode == "text_ocr":
-            # 使用文本OCR配置
-            coord_input = self.hp_widgets.get("coord_input")
-            if coord_input:
-                coord_text = coord_input.text().strip()
-                try:
-                    coords = [int(x.strip()) for x in coord_text.split(",")]
-                    if len(coords) >= 4:
-                        text_x1, text_y1, text_x2, text_y2 = (
-                            coords[0],
-                            coords[1],
-                            coords[2],
-                            coords[3],
-                        )
-                    else:
-                        # 默认文本坐标
-                        text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
-                except:
-                    # 解析失败，使用默认坐标
-                    text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
-            else:
-                text_x1, text_y1, text_x2, text_y2 = 97, 814, 218, 835
-
-            # OCR 引擎选择
-            ocr_engine_value = "template"
-            try:
-                ocr_combo = self.hp_widgets.get("ocr_engine_combo")
-                if ocr_combo is not None:
-                    ocr_engine_value = ocr_combo.currentData() or "template"
-            except Exception:
-                ocr_engine_value = "template"
-
-            hp_config.update(
-                {
-                    "detection_mode": "text_ocr",
-                    "text_x1": text_x1,
-                    "text_y1": text_y1,
-                    "text_x2": text_x2,
-                    "text_y2": text_y2,
-                    # OCR 引擎（template | keras | tesseract）
-                    "ocr_engine": ocr_engine_value,
-                    "match_threshold": 0.70,
-                    # 保留矩形配置作为备份
-                    "region_x1": 136,
-                    "region_y1": 910,
-                    "region_x2": 213,
-                    "region_y2": 1004,
-                }
-            )
-            print(
-                f"[配置构建] HP使用文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})"
-            )
-        elif self.hp_detection_mode == "circle":
-            # 圆形配置：优先使用自动检测的配置，否则从输入框解析
-            if self.hp_circle_config:
-                # 使用自动检测的圆形配置
-                hp_config.update(
-                    {
-                        "detection_mode": "circle",
-                        "center_x": self.hp_circle_config.get("hp", {}).get("center_x"),
-                        "center_y": self.hp_circle_config.get("hp", {}).get("center_y"),
-                        "radius": self.hp_circle_config.get("hp", {}).get("radius"),
-                    }
-                )
-                print(
-                    f"[配置构建] HP使用圆形配置(自动检测): 圆心({hp_config['center_x']},{hp_config['center_y']}), 半径{hp_config['radius']}"
-                )
-            else:
-                # 从输入框解析手动输入的圆形坐标 (x,y,r)
-                coord_input = self.hp_widgets.get("coord_input")
-                if coord_input:
-                    coord_text = coord_input.text().strip()
-                    try:
-                        coords = [int(x.strip()) for x in coord_text.split(",")]
-                        if len(coords) == 3:
-                            center_x, center_y, radius = coords[0], coords[1], coords[2]
-                        else:
-                            # 默认圆形坐标
-                            center_x, center_y, radius = 174, 957, 47
-                    except:
-                        # 解析失败，使用默认坐标
-                        center_x, center_y, radius = 174, 957, 47
-                else:
-                    center_x, center_y, radius = 174, 957, 47
-
-                hp_config.update(
-                    {
-                        "detection_mode": "circle",
-                        "center_x": center_x,
-                        "center_y": center_y,
-                        "radius": radius,
-                    }
-                )
-                print(
-                    f"[配置构建] HP使用圆形配置(手动输入): 圆心({center_x},{center_y}), 半径{radius}"
-                )
-        else:
-            # 使用矩形配置，从单行文本框解析坐标
-            coord_input = self.hp_widgets.get("coord_input")
-            if coord_input:
-                coord_text = coord_input.text().strip()
-                try:
-                    coords = [int(x.strip()) for x in coord_text.split(",")]
-                    if len(coords) >= 4:
-                        x1, y1, x2, y2 = coords[0], coords[1], coords[2], coords[3]
-                    else:
-                        # 默认坐标
-                        x1, y1, x2, y2 = 136, 910, 213, 1004
-                except:
-                    # 解析失败，使用默认坐标
-                    x1, y1, x2, y2 = 136, 910, 213, 1004
-            else:
-                # 没有找到坐标输入框，使用默认坐标
-                x1, y1, x2, y2 = 136, 910, 213, 1004
-
-            hp_config.update(
-                {
-                    "detection_mode": "rectangle",
-                    "region_x1": x1,
-                    "region_y1": y1,
-                    "region_x2": x2,
-                    "region_y2": y2,
-                }
-            )
-            print(f"[配置构建] HP使用矩形配置: ({x1},{y1}) -> ({x2},{y2})")
-
-        # 从颜色配置输入框解析颜色列表
-        # 使用默认HP颜色配置（红色+绿色）
-        default_hp_colors = "157,75,29\n40,84,48"
-        colors = self._parse_colors_to_list(default_hp_colors)
-        hp_config["colors"] = colors
-
-        return hp_config
 
     def _parse_colors_to_list(self, colors_text: str) -> list:
         """将颜色配置文本解析为颜色列表（纯颜色列表格式）"""
@@ -1064,159 +749,11 @@ class ResourceManagementWidget(QWidget):
         return colors
 
     def _build_mp_config(self) -> Dict[str, Any]:
-        """构建MP配置，支持矩形和圆形两种独立配置方式"""
-        # 基础配置（冷却时间从时间间隔页面获取）
-        mp_config = {
-            "enabled": self.mp_widgets["enabled"].isChecked(),
-            "key": self.mp_widgets["key"].text().strip(),
-            "threshold": self.mp_widgets["threshold"].value(),
-            "cooldown": self._get_cooldown_from_timing_settings("mp"),
-        }
-
-        # 添加容差配置 - 从 MP 容差输入框解析
-        tolerance_h, tolerance_s, tolerance_v = self._get_current_tolerance("mp")
-        mp_config.update(
-            {
-                "tolerance_h": tolerance_h,
-                "tolerance_s": tolerance_s,
-                "tolerance_v": tolerance_v,
-            }
+        """构建MP配置 - 使用ResourceConfigManager"""
+        timing_manager = getattr(self.main_window, 'timing_settings', None)
+        return ResourceConfigManager.build_resource_config(
+            "mp", self.mp_widgets, self.mp_detection_mode, self.mp_circle_config, timing_manager
         )
-
-        # 根据检测模式保存相应配置
-        if self.mp_detection_mode == "text_ocr":
-            # 使用文本OCR配置
-            coord_input = self.mp_widgets.get("coord_input")
-            if coord_input:
-                coord_text = coord_input.text().strip()
-                try:
-                    coords = [int(x.strip()) for x in coord_text.split(",")]
-                    if len(coords) >= 4:
-                        text_x1, text_y1, text_x2, text_y2 = (
-                            coords[0],
-                            coords[1],
-                            coords[2],
-                            coords[3],
-                        )
-                    else:
-                        # 默认文本坐标
-                        text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
-                except:
-                    # 解析失败，使用默认坐标
-                    text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
-            else:
-                text_x1, text_y1, text_x2, text_y2 = 1767, 814, 1894, 835
-
-            # OCR 引擎选择
-            ocr_engine_value = "template"
-            try:
-                ocr_combo = self.mp_widgets.get("ocr_engine_combo")
-                if ocr_combo is not None:
-                    ocr_engine_value = ocr_combo.currentData() or "template"
-            except Exception:
-                ocr_engine_value = "template"
-
-            mp_config.update(
-                {
-                    "detection_mode": "text_ocr",
-                    "text_x1": text_x1,
-                    "text_y1": text_y1,
-                    "text_x2": text_x2,
-                    "text_y2": text_y2,
-                    # OCR 引擎（template | keras | tesseract）
-                    "ocr_engine": ocr_engine_value,
-                    "match_threshold": 0.70,
-                    # 保留矩形配置作为备份
-                    "region_x1": 1552,
-                    "region_y1": 910,
-                    "region_x2": 1560,
-                    "region_y2": 1004,
-                }
-            )
-            print(
-                f"[配置构建] MP使用文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})"
-            )
-        elif self.mp_detection_mode == "circle":
-            # 圆形配置：优先使用自动检测的配置，否则从输入框解析
-            if self.mp_circle_config:
-                # 使用自动检测的圆形配置
-                mp_config.update(
-                    {
-                        "detection_mode": "circle",
-                        "center_x": self.mp_circle_config.get("mp", {}).get("center_x"),
-                        "center_y": self.mp_circle_config.get("mp", {}).get("center_y"),
-                        "radius": self.mp_circle_config.get("mp", {}).get("radius"),
-                    }
-                )
-                print(
-                    f"[配置构建] MP使用圆形配置(自动检测): 圆心({mp_config['center_x']},{mp_config['center_y']}), 半径{mp_config['radius']}"
-                )
-            else:
-                # 从输入框解析手动输入的圆形坐标 (x,y,r)
-                coord_input = self.mp_widgets.get("coord_input")
-                if coord_input:
-                    coord_text = coord_input.text().strip()
-                    try:
-                        coords = [int(x.strip()) for x in coord_text.split(",")]
-                        if len(coords) == 3:
-                            center_x, center_y, radius = coords[0], coords[1], coords[2]
-                        else:
-                            # 默认圆形坐标
-                            center_x, center_y, radius = 1746, 957, 47
-                    except:
-                        # 解析失败，使用默认坐标
-                        center_x, center_y, radius = 1746, 957, 47
-                else:
-                    center_x, center_y, radius = 1746, 957, 47
-
-                mp_config.update(
-                    {
-                        "detection_mode": "circle",
-                        "center_x": center_x,
-                        "center_y": center_y,
-                        "radius": radius,
-                    }
-                )
-                print(
-                    f"[配置构建] MP使用圆形配置(手动输入): 圆心({center_x},{center_y}), 半径{radius}"
-                )
-        else:
-            # 使用矩形配置，从单行文本框解析坐标
-            coord_input = self.mp_widgets.get("coord_input")
-            if coord_input:
-                coord_text = coord_input.text().strip()
-                try:
-                    coords = [int(x.strip()) for x in coord_text.split(",")]
-                    if len(coords) >= 4:
-                        x1, y1, x2, y2 = coords[0], coords[1], coords[2], coords[3]
-                    else:
-                        # 默认坐标
-                        x1, y1, x2, y2 = 1552, 910, 1560, 1004
-                except:
-                    # 解析失败，使用默认坐标
-                    x1, y1, x2, y2 = 1552, 910, 1560, 1004
-            else:
-                # 没有找到坐标输入框，使用默认坐标
-                x1, y1, x2, y2 = 1552, 910, 1560, 1004
-
-            mp_config.update(
-                {
-                    "detection_mode": "rectangle",
-                    "region_x1": x1,
-                    "region_y1": y1,
-                    "region_x2": x2,
-                    "region_y2": y2,
-                }
-            )
-            print(f"[配置构建] MP使用矩形配置: ({x1},{y1}) -> ({x2},{y2})")
-
-        # 从颜色配置输入框解析颜色列表
-        # 使用默认MP颜色配置（蓝色）
-        default_mp_colors = "104,80,58"
-        colors = self._parse_colors_to_list(default_mp_colors)
-        mp_config["colors"] = colors
-
-        return mp_config
 
     def get_config(self) -> Dict[str, Any]:
         """获取配置（匹配ResourceManager期望的格式）"""
@@ -1543,6 +1080,9 @@ class ResourceManagementWidget(QWidget):
     def set_main_window(self, main_window):
         """设置主窗口引用，用于隐藏/显示界面"""
         self.main_window = main_window
+        # 更新ColorAnalysisTools实例的主窗口引用
+        if hasattr(self, 'color_analysis_tools') and self.color_analysis_tools:
+            self.color_analysis_tools.main_window = main_window
 
     def _start_auto_detect_orbs(self, prefix: str):
         """开始自动检测球体，使用状态标签进行反馈"""
