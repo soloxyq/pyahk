@@ -365,38 +365,337 @@ def switch_to_poe2(self):
 
 技能系统是 pyahk 的核心功能，提供自动化的技能释放、冷却检测和优先级管理。支持多种触发模式和执行---
 
-## 💊 智能药剂系统
+## 💊 智能药剂系统 (v2025.01 全面升级)
 
 ### 概述
 
-智能药剂系统提供自动化的 HP/MP 检测和药剂使用功能。支持**三大类检测方式**，每类都有其独特的优势和适用场景。
+智能药剂系统提供自动化的 HP/MP 检测和药剂使用功能。**v2025.01版本引入ResourceConfigManager中央化配置管理和ColorAnalysisTools可视化工具**，大幅简化配置流程和提升用户体验。支持**三大类检测方式**，每类都有其独特的优势和适用场景。
 
-### 三大类检测方式总览
+### 三大类检测方式总览 (实测478次基准数据)
 
-| 类别         | 子类型     | 技术         | 性能   | 准确率  | 成功率 | 速度优势 | 适用场景                   |
-| ------------ | ---------- | ------------ | ------ | ------- | ------ | -------- | -------------------------- |
-| **矩形检测** ⭐ | -          | HSV模板匹配 | **0.3ms** | **96%误差<5%** | **100%** | **基准** | **推荐**，最快最准，条形资源条 |
-| **圆形检测** | -          | HSV 颜色匹配 | ~5ms   | 95%+    | 99%+ | 慢17倍 | 球形/圆形资源条            |
-| **Text OCR** | 模板匹配   | 模板匹配     | ~25ms   | 90-95%  | 98.3% | 慢82倍 | 数字显示，无额外依赖 |
-| **Text OCR** | Keras 模型 | 深度学习     | ~99ms  | >99%    | 98.5% | 慢330倍 | 最高准确率                 |
-| **Text OCR** | Tesseract  | OCR 引擎     | ~241ms | 95-100% | 99.0% | 慢803倍 | 通用性强，无需训练         |
+|| 类别         | 子类型     | 技术         | 性能   | 准确率  | 成功率 | 速度优势 | 适用场景                   |
+|| ------------ | ---------- | ------------ | ------ | ------- | ------ | -------- | -------------------------- |
+|| **矩形检测** ⭐ | -          | HSV模板匹配 | **0.3ms** | **96%误差<5%** | **100%** | **基准** | **推荐**，最快最准，条形资源条 |
+|| **圆形检测** | -          | HSV 颜色匹配 | ~5ms   | 95%+    | 99%+ | 慢17倍 | 球形/圆形资源条            |
+|| **Text OCR** | 模板匹配   | 模板匹配     | ~25ms   | 90-95%  | 98.3% | 慢82倍 | 数字显示，无额外依赖 |
+|| **Text OCR** | Keras 模型 | 深度学习     | ~99ms  | >99%    | 98.5% | 慢330倍 | 最高准确率                 |
+|| **Text OCR** | Tesseract  | OCR 引擎     | ~241ms | 95-100% | 99.0% | 慢803倍 | 通用性强，无需训练         |
 
 **性能对比**：矩形检测比最快的OCR快82倍，比最慢的OCR快803倍！所有数据来自478次真实测试。
 
-### 一、矩形检测模式 ⭐ 推荐
+### v2025.01 架构升级亮点
+
+#### ResourceConfigManager 中央化管理
+```python
+class ResourceConfigManager:
+    """统一的资源配置管理器 - v2025.01新增"""
+    
+    def update_widget_from_config(self, widget, config):
+        """统一的从配置更新Widget，消除重复代码"""
+        
+    def generate_config_from_widget(self, widget):
+        """统一的从Widget生成配置，支持所有检测模式"""
+        
+    def parse_colors_from_config(self, config):
+        """统一的颜色解析，支持多种格式"""
+```
+
+#### ColorAnalysisTools 可视化配置
+```python
+class ColorAnalysisTools:
+    """颜色分析工具 - 提供直观的配置体验"""
+    
+    def start_region_selection(self, callback, detection_mode="rectangle"):
+        """启动区域选择模式，支持矩形和圆形"""
+        
+    def start_color_picking_for_region(self, region, callback):
+        """对指定区域进行颜色采样和HSV优化"""
+        
+    def optimize_hsv_parameters(self, region, sample_colors):
+        """基于颜色样本优化HSV容差参数"""
+        
+    def preview_detection_result(self, widget_config):
+        """实时预览检测效果"""
+```
+
+### 一、矩形检测模式 ⭐ 推荐 (v2025.01算法优化)
 
 #### 工作原理
 
 基于 **HSV模板匹配** 技术，通过以下流程实现高精度检测：
 
-1. **模板捕获（F8）**：在满血满蓝状态下截取HP/MP条区域，转换为HSV作为"黄金模板"
+1. **智能模板捕获**：
+   - 传统方式：F8键在满血满蓝状态下自动截取
+   - **新增方式**：ColorAnalysisTools可视化选择区域和采样颜色
 2. **实时对比**：运行时将当前HP/MP条与模板进行逐像素HSV容差匹配
-3. **百分比计算**：统计总填充行数，计算资源百分比
+3. **算法优化**：从"最长连续段"算法优化为"总填充行数"算法，准确率提升至96%
+4. **百分比计算**：统计总填充行数，计算资源百分比
 
 **核心优势**：
-- 自适应：每个用户在自己的游戏环境中按F8，自动适应不同光照和分辨率
-- 鲁棒性强：对中间遮挡（debuff图标、伤害数字）有很强的抵抗力
-- 性能卓越：0.3ms检测速度，比OCR快82-803倍
+- **自适应**：每个用户在自己的游戏环境中建立模板，自动适应不同光照和分辨率
+- **鲁棒性强**：对中间遮挡（debuff图标、伤害数字）有很强的抵抗力
+- **性能卓越**：0.3ms检测速度，比OCR快82-803倍
+- **算法升级**：v2025.01优化算法，准确率从90%+提升到96%+
+- **可视化配置**：ColorAnalysisTools提供直观的区域选择和参数调优界面
+
+#### v2025.01 API 升级
+
+```python
+# 传统API（仍然支持）
+resource_manager.initialize_templates_from_capture()
+
+# 新增可视化API
+color_tools = ColorAnalysisTools()
+
+# 1. 区域选择
+def on_region_selected(region):
+    # 自动更新配置
+    self.resource_config_manager.update_region_config(widget, region)
+    # 启动颜色分析
+    color_tools.start_color_picking_for_region(region, on_colors_analyzed)
+
+color_tools.start_region_selection(on_region_selected, "rectangle")
+
+# 2. 颜色分析和HSV优化
+def on_colors_analyzed(hsv_params):
+    # 自动应用最优HSV参数
+    self.resource_config_manager.apply_hsv_params(widget, hsv_params)
+    # 预览检测效果
+    color_tools.preview_detection_result(widget.get_config())
+
+# 3. 配置生成
+optimized_config = self.resource_config_manager.generate_config_from_widget(hp_widget)
+```
+
+---
+
+## 🎨 ColorAnalysisTools API 详解 (v2025.01 新增)
+
+### 概述
+
+ColorAnalysisTools 是 v2025.01 版本引入的可视化颜色分析工具，旨在简化 HP/MP 检测的配置过程，提供直观的用户体验。通过可视化的区域选择、颜色采样和实时预览，用户可以轻松完成复杂的HSV参数调优。
+
+### 核心 API
+
+#### 1. 区域选择 API
+
+```python
+def start_region_selection(self, callback, detection_mode="rectangle", 
+                          title="选择检测区域"):
+    """
+    启动可视化区域选择模式
+    
+    Args:
+        callback: 选择完成的回调函数，接收 (x1, y1, x2, y2) 参数
+        detection_mode: 检测模式，"rectangle" 或 "circle"
+        title: 选择窗口的标题
+    
+    Returns:
+        bool: 是否成功启动选择模式
+    """
+    
+def start_circle_selection(self, callback, title="选择圆形区域"):
+    """
+    启动圆形区域选择模式
+    
+    Args:
+        callback: 选择完成的回调函数，接收 (center_x, center_y, radius) 参数
+        title: 选择窗口的标题
+    
+    Returns:
+        bool: 是否成功启动选择模式
+    """
+```
+
+#### 2. 颜色分析 API
+
+```python
+def start_color_picking_for_region(self, region, callback, 
+                                  sample_method="auto"):
+    """
+    对指定区域进行颜色分析和采样
+    
+    Args:
+        region: 区域坐标 (x1, y1, x2, y2) 或 (center_x, center_y, radius)
+        callback: 分析完成的回调函数，接收 hsv_params 参数
+        sample_method: 采样方法，"auto", "grid", "edge", "manual"
+    
+    Returns:
+        bool: 是否成功启动颜色分析
+    """
+    
+def analyze_region_colors(self, region, target_colors=None, 
+                         detection_mode="rectangle"):
+    """
+    分析区域颜色分布和推荐HSV参数
+    
+    Args:
+        region: 区域坐标
+        target_colors: 目标颜色列表，用于匹配和优化
+        detection_mode: 检测模式
+    
+    Returns:
+        dict: 包含 HSV 参数的分析结果
+            {
+                'hsv_params': {
+                    'target_h': int, 'target_s': int, 'target_v': int,
+                    'tolerance_h': int, 'tolerance_s': int, 'tolerance_v': int
+                },
+                'color_distribution': {...},
+                'confidence_score': float
+            }
+    """
+```
+
+#### 3. HSV 参数优化 API
+
+```python
+def optimize_hsv_parameters(self, region, sample_colors, 
+                           optimization_method="balanced"):
+    """
+    基于颜色样本优化HSV容差参数
+    
+    Args:
+        region: 检测区域
+        sample_colors: 颜色样本列表 [(h, s, v), ...]
+        optimization_method: 优化方法
+            - "strict": 严格模式，容差值较小，准确率高
+            - "balanced": 平衡模式，容差与准确率平衡
+            - "tolerant": 宽松模式，容差值较大，适应性强
+    
+    Returns:
+        dict: 优化后的 HSV 参数
+    """
+    
+def calculate_optimal_tolerance(self, sample_colors, target_accuracy=0.95):
+    """
+    计算最优容差参数
+    
+    Args:
+        sample_colors: 颜色样本列表
+        target_accuracy: 目标准确率 (0.0-1.0)
+    
+    Returns:
+        dict: 包含容差参数和预期准确率
+    """
+```
+
+#### 4. 实时预览 API
+
+```python
+def preview_detection_result(self, widget_config, live_update=True):
+    """
+    实时预览检测效果
+    
+    Args:
+        widget_config: Widget 配置字典
+        live_update: 是否实时更新
+    
+    Returns:
+        dict: 预览结果
+            {
+                'detection_percentage': float,
+                'match_confidence': float,
+                'preview_image': np.ndarray,
+                'status': str
+            }
+    """
+    
+def start_live_preview(self, widget_config, update_callback):
+    """
+    启动实时预览模式
+    
+    Args:
+        widget_config: Widget 配置
+        update_callback: 更新回调函数，接收预览结果
+    
+    Returns:
+        bool: 是否成功启动
+    """
+    
+def stop_live_preview(self):
+    """停止实时预览"""
+```
+
+### 使用示例
+
+#### 完整的配置流程
+
+```python
+class HPConfigurationFlow:
+    def __init__(self):
+        self.color_tools = ColorAnalysisTools()
+        self.config_manager = ResourceConfigManager()
+        self.hp_widget = None  # HP Widget 实例
+    
+    def start_hp_configuration(self):
+        """启动HP检测的完整配置流程"""
+        # 第一步：选择检测区域
+        self.color_tools.start_region_selection(
+            callback=self.on_region_selected,
+            detection_mode="rectangle",
+            title="选择 HP 检测区域"
+        )
+    
+    def on_region_selected(self, x1, y1, x2, y2):
+        """区域选择完成回调"""
+        print(f"HP区域已选择: ({x1}, {y1}) 到 ({x2}, {y2})")
+        
+        # 更新配置
+        self.config_manager.update_region_config(
+            self.hp_widget, 
+            {"region_x1": x1, "region_y1": y1, "region_x2": x2, "region_y2": y2}
+        )
+        
+        # 第二步：分析颜色和优化HSV参数
+        self.color_tools.start_color_picking_for_region(
+            region=(x1, y1, x2, y2),
+            callback=self.on_colors_analyzed,
+            sample_method="auto"
+        )
+    
+    def on_colors_analyzed(self, hsv_params):
+        """颜色分析完成回调"""
+        print(f"HSV参数优化完成: {hsv_params}")
+        
+        # 应用HSV参数
+        self.config_manager.apply_hsv_params(self.hp_widget, hsv_params)
+        
+        # 第三步：实时预览检测效果
+        self.start_live_preview()
+    
+    def start_live_preview(self):
+        """启动实时预览"""
+        widget_config = self.config_manager.generate_config_from_widget(self.hp_widget)
+        
+        self.color_tools.start_live_preview(
+            widget_config=widget_config,
+            update_callback=self.on_preview_update
+        )
+    
+    def on_preview_update(self, preview_result):
+        """预览更新回调"""
+        percentage = preview_result['detection_percentage']
+        confidence = preview_result['match_confidence']
+        
+        print(f"检测结果: {percentage:.1f}%, 置信度: {confidence:.2f}")
+        
+        # 更新UI显示
+        self.update_preview_display(preview_result)
+    
+    def finalize_configuration(self):
+        """完成配置设置"""
+        # 停止预览
+        self.color_tools.stop_live_preview()
+        
+        # 生成最终配置
+        final_config = self.config_manager.generate_config_from_widget(self.hp_widget)
+        
+        # 保存配置
+        self.save_config(final_config)
+        
+        print("配置已完成并保存")
+```
 
 #### 配置方法
 

@@ -299,7 +299,7 @@ class ResourceManagementWidget(QWidget):
             }
         """
         )
-        select_btn.clicked.connect(lambda: self._start_region_selection(prefix))
+        select_btn.clicked.connect(lambda: self._start_region_selection_for_coords(prefix))
         buttons_layout.addWidget(select_btn)
 
         # 自动检测球体按钮
@@ -585,25 +585,41 @@ class ResourceManagementWidget(QWidget):
             
         self.color_analysis_tools.start_region_color_analysis(on_region_analyzed)
 
-    def _hsv_to_rgb(self, h: int, s: int, v: int) -> tuple:
-        """将OpenCV HSV颜色转换为RGB (使用OpenCV确保一致性)"""
-        import cv2
-        import numpy as np
+    def _start_region_selection_for_coords(self, prefix: str):
+        """开始区域选择，更新坐标、HSV容差和颜色列表"""
+        if not self.main_window:
+            return
 
-        # 输入的h,s,v已经是OpenCV格式 (H: 0-179, S: 0-255, V: 0-255)
-        hsv_array = np.array([[[h, s, v]]], dtype=np.uint8)
-        rgb_array = cv2.cvtColor(hsv_array, cv2.COLOR_HSV2RGB)
-        r, g, b = rgb_array[0][0]
+        # 隐藏主窗口
+        self.main_window.hide()
 
-        return int(r), int(g), int(b)
-
-    # NOTE: 移除重复定义，保留下面的单一定义以供全局使用
-
-    def _get_contrast_color(self, r: int, g: int, b: int) -> str:
-        """根据背景色亮度返回合适的文字颜色"""
-        # 计算亮度 (使用相对亮度公式)
-        luminance = (0.299 * r + 0.587 * g + 0.114 * b) / 255
-        return "#ffffff" if luminance < 0.5 else "#000000"
+        def show_dialog():
+            from .region_selection_dialog import RegionSelectionDialog
+            
+            # 创建区域选择对话框（默认启用颜色分析）
+            dialog = RegionSelectionDialog()
+            
+            def on_region_selected(x1, y1, x2, y2):
+                self._on_region_selected(prefix, x1, y1, x2, y2)
+            
+            def on_region_analyzed(x1, y1, x2, y2, analysis):
+                self._on_region_analyzed(prefix, x1, y1, x2, y2, analysis)
+                
+            dialog.region_selected.connect(on_region_selected)
+            dialog.region_analyzed.connect(on_region_analyzed)
+            
+            # 执行对话框
+            dialog.exec()
+            
+            # 恢复显示主界面
+            if self.main_window:
+                self.main_window.show()
+                self.main_window.raise_()
+                self.main_window.activateWindow()
+        
+        # 延迟100ms执行，确保窗口完全隐藏
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(100, show_dialog)
 
     def _parse_colors_input(self, prefix: str, colors_text: str):
         """解析颜色配置输入并显示带实际颜色的结果"""
@@ -653,9 +669,9 @@ class ResourceManagementWidget(QWidget):
                     return
 
                 # 转换HSV到RGB
-                r, g, b = self._hsv_to_rgb(h, s, v)
+                r, g, b = ColorAnalysisTools.hsv_to_rgb(h, s, v)
                 bg_color = f"rgb({r},{g},{b})"
-                text_color = self._get_contrast_color(r, g, b)
+                text_color = ColorAnalysisTools.get_contrast_color(r, g, b)
 
                 # 创建带颜色背景的HTML块
                 color_html = f"""
@@ -699,54 +715,6 @@ class ResourceManagementWidget(QWidget):
             "hp", self.hp_widgets, self.hp_detection_mode, self.hp_circle_config, timing_manager
         )
 
-    def _parse_colors_to_list(self, colors_text: str) -> list:
-        """将颜色配置文本解析为颜色列表（纯颜色列表格式）"""
-        colors = []
-        try:
-            # 按行分割，每行一个颜色
-            lines = [
-                line.strip() for line in colors_text.strip().split("\n") if line.strip()
-            ]
-
-            # 从容差输入框获取容差值
-            h_tol, s_tol, v_tol = self._get_current_tolerance()
-
-            # 解析每行的颜色值
-            for i, line in enumerate(lines, 1):
-                color_values = [int(x.strip()) for x in line.split(",") if x.strip()]
-                if len(color_values) == 3:
-                    h, s, v = color_values
-                    color = {
-                        "name": f"Color{i}",
-                        "target_h": h,
-                        "target_s": s,
-                        "target_v": v,
-                        "tolerance_h": h_tol,
-                        "tolerance_s": s_tol,
-                        "tolerance_v": v_tol,
-                    }
-                    colors.append(color)
-        except:
-            pass
-
-        # 如果解析失败，返回默认配置
-        if not colors:
-            # 使用默认容差值
-            h_tol, s_tol, v_tol = self._get_current_tolerance()
-
-            colors = [
-                {
-                    "name": "Default",
-                    "target_h": 314,
-                    "target_s": 75,
-                    "target_v": 29,
-                    "tolerance_h": h_tol,
-                    "tolerance_s": s_tol,
-                    "tolerance_v": v_tol,
-                }
-            ]
-
-        return colors
 
     def _build_mp_config(self) -> Dict[str, Any]:
         """构建MP配置 - 使用ResourceConfigManager"""
@@ -766,316 +734,46 @@ class ResourceManagementWidget(QWidget):
         }
 
     def update_from_config(self, config: Dict[str, Any]):
-        """从配置更新UI"""
+        """从配置更新UI - 使用ResourceConfigManager统一处理"""
         res_config = config.get("resource_management", {})
-
-        # HP配置 - 支持圆形和矩形配置
-        hp_config = res_config.get("hp_config", {})
-        if self.hp_widgets:
-            self.hp_widgets["enabled"].setChecked(hp_config.get("enabled", True))
-            self.hp_widgets["key"].setText(hp_config.get("key", "1"))
-            self.hp_widgets["threshold"].setValue(
-                hp_config.get("threshold", 50)
-            )  # 默认50%
-
-            # 根据检测模式加载相应配置
-            detection_mode = hp_config.get("detection_mode", "rectangle")
-            center_x = hp_config.get("center_x")
-            center_y = hp_config.get("center_y")
-            radius = hp_config.get("radius")
-            text_x1 = hp_config.get("text_x1")
-            text_y1 = hp_config.get("text_y1")
-            text_x2 = hp_config.get("text_x2")
-            text_y2 = hp_config.get("text_y2")
-
-            # 设置模式下拉框
-            mode_combo = self.hp_widgets.get("mode_combo")
-            if mode_combo:
-                if detection_mode == "text_ocr":
-                    mode_combo.setCurrentIndex(2)  # Text OCR
-                elif detection_mode == "circle":
-                    mode_combo.setCurrentIndex(1)  # Circle
-                else:
-                    mode_combo.setCurrentIndex(0)  # Rectangle
-
-            if (
-                detection_mode == "text_ocr"
-                and text_x1 is not None
-                and text_y1 is not None
-                and text_x2 is not None
-                and text_y2 is not None
-            ):
-                # 加载文本OCR配置
-                self.hp_detection_mode = "text_ocr"
-                coord_input = self.hp_widgets.get("coord_input")
-                if coord_input:
-                    coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
-                # 设置OCR引擎
-                ocr_engine = hp_config.get("ocr_engine", "template")
-                ocr_combo = self.hp_widgets.get("ocr_engine_combo")
-                if ocr_combo is not None:
-                    # 根据data匹配
-                    for i in range(ocr_combo.count()):
-                        if ocr_combo.itemData(i) == ocr_engine:
-                            ocr_combo.setCurrentIndex(i)
-                            break
-                self._update_detection_mode_display("hp")
-                # 隐藏容差控件
-                self._toggle_tolerance_visibility("hp", False)
-                print(
-                    f"[配置加载] HP文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})"
-                )
-            elif (
-                detection_mode == "circle"
-                and center_x is not None
-                and center_y is not None
-                and radius is not None
-            ):
-                # 加载圆形配置
-                self.hp_detection_mode = "circle"
-                circle_data = {
-                    "center_x": center_x,
-                    "center_y": center_y,
-                    "radius": radius,
-                }
-                self.hp_circle_config = {"hp": circle_data}
-                self._update_detection_mode_display("hp", circle_data)
-                # 显示容差控件
-                self._toggle_tolerance_visibility("hp", True)
-            else:
-                # 如果没有有效坐标或不是圆形模式，切换回矩形模式
-                self.hp_detection_mode = "rectangle"
-                self._update_detection_mode_display("hp")
-                # 显示容差控件
-                self._toggle_tolerance_visibility("hp", True)
-
-                # 加载矩形配置到单行文本框
-                x1 = hp_config.get("region_x1", 136)  # 1080P血药区域
-                y1 = hp_config.get("region_y1", 910)
-                x2 = hp_config.get("region_x2", 213)
-                y2 = hp_config.get("region_y2", 1004)
-
-                coord_input = self.hp_widgets.get("coord_input")
-                if coord_input:
-                    coord_input.setText(f"{x1},{y1},{x2},{y2}")
-
-                print(f"[配置加载] HP矩形配置: ({x1},{y1}) -> ({x2},{y2})")
-
-            # 加载颜色配置
-            colors_text = self._colors_list_to_text(hp_config.get("colors", []))
-            if not colors_text:
-                # 如果没有colors配置，使用默认值
-                colors_text = "10,20,20\n157,75,29\n40,84,48"  # HP默认：容差+红色+绿色
-
-            # 注意：颜色配置现在在全局颜色工具区域管理，不再在单独的HP控件中
-            # self.hp_widgets["colors_edit"].setPlainText(colors_text)
-            self._parse_colors_input("hp", colors_text)
-
-        # MP配置 - 支持圆形和矩形配置
-        mp_config = res_config.get("mp_config", {})
-        if self.mp_widgets:
-            self.mp_widgets["enabled"].setChecked(mp_config.get("enabled", True))
-            self.mp_widgets["key"].setText(mp_config.get("key", "2"))
-            self.mp_widgets["threshold"].setValue(
-                mp_config.get("threshold", 50)
-            )  # 默认50%
-
-            # 根据检测模式加载相应配置
-            detection_mode = mp_config.get("detection_mode", "rectangle")
-            center_x = mp_config.get("center_x")
-            center_y = mp_config.get("center_y")
-            radius = mp_config.get("radius")
-            text_x1 = mp_config.get("text_x1")
-            text_y1 = mp_config.get("text_y1")
-            text_x2 = mp_config.get("text_x2")
-            text_y2 = mp_config.get("text_y2")
-
-            # 设置模式下拉框
-            mode_combo = self.mp_widgets.get("mode_combo")
-            if mode_combo:
-                if detection_mode == "text_ocr":
-                    mode_combo.setCurrentIndex(2)  # Text OCR
-                elif detection_mode == "circle":
-                    mode_combo.setCurrentIndex(1)  # Circle
-                else:
-                    mode_combo.setCurrentIndex(0)  # Rectangle
-
-            if (
-                detection_mode == "text_ocr"
-                and text_x1 is not None
-                and text_y1 is not None
-                and text_x2 is not None
-                and text_y2 is not None
-            ):
-                # 加载文本OCR配置
-                self.mp_detection_mode = "text_ocr"
-                coord_input = self.mp_widgets.get("coord_input")
-                if coord_input:
-                    coord_input.setText(f"{text_x1},{text_y1},{text_x2},{text_y2}")
-                # 设置OCR引擎
-                ocr_engine = mp_config.get("ocr_engine", "template")
-                ocr_combo = self.mp_widgets.get("ocr_engine_combo")
-                if ocr_combo is not None:
-                    for i in range(ocr_combo.count()):
-                        if ocr_combo.itemData(i) == ocr_engine:
-                            ocr_combo.setCurrentIndex(i)
-                            break
-                self._update_detection_mode_display("mp")
-                # 隐藏容差控件
-                self._toggle_tolerance_visibility("mp", False)
-                print(
-                    f"[配置加载] MP文本OCR配置: ({text_x1},{text_y1}) -> ({text_x2},{text_y2})"
-                )
-            elif (
-                detection_mode == "circle"
-                and center_x is not None
-                and center_y is not None
-                and radius is not None
-            ):
-                # 加载圆形配置
-                self.mp_detection_mode = "circle"
-                circle_data = {
-                    "center_x": center_x,
-                    "center_y": center_y,
-                    "radius": radius,
-                }
-                self.mp_circle_config = {"mp": circle_data}
-                self._update_detection_mode_display("mp", circle_data)
-                # 显示容差控件
-                self._toggle_tolerance_visibility("mp", True)
-            else:
-                # 如果没有有效坐标或不是圆形模式，切换回矩形模式
-                self.mp_detection_mode = "rectangle"
-                self._update_detection_mode_display("mp")
-                # 显示容差控件
-                self._toggle_tolerance_visibility("mp", True)
-
-                # 加载矩形配置到单行文本框
-                x1 = mp_config.get("region_x1", 1552)  # 1080P蓝药区域
-                y1 = mp_config.get("region_y1", 910)
-                x2 = mp_config.get("region_x2", 1560)
-                y2 = mp_config.get("region_y2", 1004)
-
-                coord_input = self.mp_widgets.get("coord_input")
-                if coord_input:
-                    coord_input.setText(f"{x1},{y1},{x2},{y2}")
-
-                print(f"[配置加载] MP矩形配置: ({x1},{y1}) -> ({x2},{y2})")
-
-            # 加载颜色配置
-            colors_text = self._colors_list_to_text(mp_config.get("colors", []))
-            if not colors_text:
-                # 如果没有colors配置，使用默认值
-                colors_text = "5,5,5\n104,80,58"  # MP默认：容差+蓝色
-
-            # 注意：颜色配置现在在全局颜色工具区域管理，不再在单独的MP控件中
-            # self.mp_widgets["colors_edit"].setPlainText(colors_text)
-            self._parse_colors_input("mp", colors_text)
-
-        # 更新全局设置（检测间隔现在在时间间隔页面管理）
-        check_interval = res_config.get("check_interval", 200)
-        # 注意：检测间隔现在在时间间隔页面管理，不再在资源管理页面设置
-        # if hasattr(self, "check_interval_spinbox"):
-        #     self.check_interval_spinbox.setValue(check_interval)
-
-        # 🚀 更新HP/MP容差输入框
-        # HP容差
-        hp_tolerance_h = hp_config.get("tolerance_h", 10)
-        hp_tolerance_s = hp_config.get("tolerance_s", 30)
-        hp_tolerance_v = hp_config.get("tolerance_v", 50)
-        hp_tolerance_input = getattr(self, "hp_tolerance_input", None)
-        if hp_tolerance_input:
-            hp_tolerance_input.setText(f"{hp_tolerance_h},{hp_tolerance_s},{hp_tolerance_v}")
-            print(f"[配置加载] HP容差: {hp_tolerance_h},{hp_tolerance_s},{hp_tolerance_v}")
         
-        # MP容差
-        mp_tolerance_h = mp_config.get("tolerance_h", 10)
-        mp_tolerance_s = mp_config.get("tolerance_s", 30)
-        mp_tolerance_v = mp_config.get("tolerance_v", 50)
-        mp_tolerance_input = getattr(self, "mp_tolerance_input", None)
-        if mp_tolerance_input:
-            mp_tolerance_input.setText(f"{mp_tolerance_h},{mp_tolerance_s},{mp_tolerance_v}")
-            print(f"[配置加载] MP容差: {mp_tolerance_h},{mp_tolerance_s},{mp_tolerance_v}")
-
-    def _colors_list_to_text(self, colors_list: list) -> str:
-        """将颜色列表转换为文本格式（纯颜色列表格式）"""
-        if not colors_list:
-            return ""
-
-        # 构建颜色行
-        color_lines = []
-        for color in colors_list:
-            color_line = f"{color.get('target_h', 0)},{color.get('target_s', 75)},{color.get('target_v', 29)}"
-            color_lines.append(color_line)
-
-        # 返回纯颜色列表，每行一个颜色
-        return "\n".join(color_lines)
-
-    def _start_color_picking_for_input(self, prefix: str, colors_edit):
-        """启动颜色拾取，将结果添加到输入框末尾"""
-        # 完全隐藏主窗口，就像截图工具一样
-        if self.main_window:
-            self.main_window.hide()
-            self.main_window.setWindowState(
-                self.main_window.windowState() | Qt.WindowState.WindowMinimized
+        # HP配置更新
+        hp_config = res_config.get("hp_config", {})
+        if self.hp_widgets and hp_config:
+            ResourceConfigManager.update_widget_from_config(
+                self.hp_widgets,
+                hp_config,
+                "hp_detection_mode",
+                "hp_circle_config", 
+                "hp",
+                self
             )
+            # 更新检测模式显示
+            self._update_detection_mode_display("hp")
+            
+            # 处理容差显示逻辑
+            detection_mode = hp_config.get("detection_mode", "rectangle")
+            self._toggle_tolerance_visibility("hp", detection_mode != "text_ocr")
+            
+        # MP配置更新  
+        mp_config = res_config.get("mp_config", {})
+        if self.mp_widgets and mp_config:
+            ResourceConfigManager.update_widget_from_config(
+                self.mp_widgets,
+                mp_config,
+                "mp_detection_mode",
+                "mp_circle_config",
+                "mp", 
+                self
+            )
+            # 更新检测模式显示
+            self._update_detection_mode_display("mp")
+            
+            # 处理容差显示逻辑
+            detection_mode = mp_config.get("detection_mode", "rectangle")
+            self._toggle_tolerance_visibility("mp", detection_mode != "text_ocr")
 
-        # 延迟一下确保窗口完全隐藏
-        from PySide6.QtCore import QTimer
 
-        def start_color_picking():
-            dialog = ColorPickingDialog()
-
-            def on_color_picked(r, g, b):
-                # 获取当前输入框的内容
-                current_text = colors_edit.toPlainText().strip()
-
-                # 使用OpenCV将RGB转换为HSV
-                import cv2
-                import numpy as np
-
-                rgb_array = np.array([[[r, g, b]]], dtype=np.uint8)
-                hsv_array = cv2.cvtColor(rgb_array, cv2.COLOR_RGB2HSV)
-                h, s, v = hsv_array[0][0]
-
-                # 设置默认容差
-                if prefix == "hp":
-                    default_tolerance = "10,20,20"  # HP默认容差
-                else:
-                    default_tolerance = "7,5,5"  # MP默认容差
-
-                new_color = f"{h},{s},{v},{default_tolerance}"
-
-                # 添加到输入框末尾
-                if current_text:
-                    updated_text = f"{current_text},{new_color}"
-                else:
-                    updated_text = new_color
-
-                colors_edit.setPlainText(updated_text)
-
-                # 输出调试信息
-                print(f"[颜色拾取] RGB({r},{g},{b}) -> HSV({h},{s},{v})")
-                print(f"[颜色拾取] 已追加到配置: {new_color}")
-                print(f"[颜色拾取] 完整配置: {updated_text}")
-
-                # 自动解析新的配置
-                self._parse_colors_input(prefix, updated_text)
-
-                # 恢复显示主窗口
-                if self.main_window:
-                    self.main_window.setWindowState(
-                        self.main_window.windowState() & ~Qt.WindowState.WindowMinimized
-                    )
-                    self.main_window.show()
-                    self.main_window.raise_()
-                    self.main_window.activateWindow()
-
-            dialog.color_picked.connect(on_color_picked)
-            dialog.exec()
-
-        # 延迟200ms启动，确保主窗口完全隐藏
-        QTimer.singleShot(200, start_color_picking)
 
     def set_main_window(self, main_window):
         """设置主窗口引用，用于隐藏/显示界面"""
@@ -1142,40 +840,6 @@ class ResourceManagementWidget(QWidget):
 
         QTimer.singleShot(3000, lambda: status_label.setText(""))
 
-    def _start_region_selection(self, prefix: str):
-        """开始区域选择（选择区域并自动分析颜色）"""
-        if not self.main_window:
-            return
-
-        # 使用QTimer延迟执行，确保界面完全隐藏
-        from PySide6.QtCore import QTimer
-
-        def show_dialog():
-            # 创建区域选择对话框
-            dialog = RegionSelectionDialog(None)  # 默认启用颜色分析
-            dialog.region_selected.connect(
-                lambda x1, y1, x2, y2: self._on_region_selected(prefix, x1, y1, x2, y2)
-            )
-            dialog.region_analyzed.connect(
-                lambda x1, y1, x2, y2, analysis: self._on_region_analyzed(
-                    prefix, x1, y1, x2, y2, analysis
-                )
-            )
-
-            # 直接执行对话框，无需额外提示
-            result = dialog.exec()
-
-            # 恢复显示主界面
-            if self.main_window:
-                self.main_window.show()
-                self.main_window.raise_()
-                self.main_window.activateWindow()
-
-        # 完全隐藏主界面，就像截图工具一样
-        self.main_window.hide()
-
-        # 延迟200ms执行对话框显示，确保主窗口完全隐藏
-        QTimer.singleShot(200, show_dialog)
 
     def _toggle_tolerance_visibility(self, prefix: str, visible: bool):
         """根据检测模式显示/隐藏容差控件"""
