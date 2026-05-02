@@ -119,7 +119,8 @@ class ResourceManager:
         cooldown_ms = config.get("cooldown", 5000)
         cooldown_seconds = cooldown_ms / 1000.0
 
-        current_time = time.time()
+        # 用 monotonic 避免系统校时/休眠唤醒导致冷却异常
+        current_time = time.monotonic()
         last_press_time = self._flask_cooldowns.get(resource_type, 0)
 
         return current_time - last_press_time >= cooldown_seconds
@@ -403,8 +404,8 @@ class ResourceManager:
             self.input_handler.execute_mp_potion(key)
         # 其他类型不处理
 
-        # 记录按键时间
-        self._flask_cooldowns[resource_type] = time.time()
+        # 记录按键时间(monotonic 与 _check_internal_cooldown 配对)
+        self._flask_cooldowns[resource_type] = time.monotonic()
 
         LOG_INFO(f"[ResourceManager] 已执行{resource_type.upper()}资源 - 按键: {key}")
 
@@ -502,7 +503,7 @@ class ResourceManager:
         cooldown_ms = config.get("cooldown", 5000)
         cooldown_seconds = cooldown_ms / 1000.0
 
-        current_time = time.time()
+        current_time = time.monotonic()
         last_press_time = self._flask_cooldowns.get(resource_type, 0)
 
         remaining = cooldown_seconds - (current_time - last_press_time)

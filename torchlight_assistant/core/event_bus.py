@@ -23,12 +23,17 @@ class EventBus:
         if not hasattr(self, "subscribers"):
             self.subscribers: Dict[str, List[Callable]] = defaultdict(list)
             self.subscribers_lock = threading.RLock()
-            
+
             # 增加线程池容量，提高并发处理能力
             self._executor = ThreadPoolExecutor(max_workers=6, thread_name_prefix="EventBus")
-            
+
             # 使用threading.local()为每个线程提供独立的调用栈，用于检测递归事件
             self._call_stack = threading.local()
+
+            # 异步事件并发计数器(B7修复:防止 publish_async 死循环导致线程池爆炸)
+            self._async_event_counts: Dict[str, int] = defaultdict(int)
+            self._async_lock = threading.Lock()
+            self._max_async_per_event = 8  # 同一事件名同时在飞的最大异步任务数
 
             # 性能监控
             self._event_count = 0
@@ -91,23 +96,46 @@ class EventBus:
 
 
     def publish_async(self, event_name: str, *args, **kwargs):
-        """异步发布事件（用于非关键路径的事件）"""
-        with self.subscribers_lock:
-            handlers = self.subscribers.get(event_name, [])
-            
-            if not handlers:
+        """异步发布事件（用于非关键路径的事件）
+
+        B7修复: 限制同一事件名的并发异步任务数,防止 handler 内部递归 publish_async
+        导致线程池任务无限增长(线程池默认无界队列)。超过上限直接丢弃并记录错误。
+        """
+        # 并发上限检查
+        with self._async_lock:
+            cnt = self._async_event_counts[event_name]
+            if cnt >= self._max_async_per_event:
+                LOG_ERROR(
+                    f"[EventBus] 异步事件 '{event_name}' 并发超过上限 "
+                    f"({self._max_async_per_event}),已丢弃。可能存在递归 publish_async"
+                )
                 return
-                
-            # 异步执行所有处理器
-            for handler in handlers:
-                self._executor.submit(self._safe_async_handler, event_name, handler, *args, **kwargs)
-    
+
+        with self.subscribers_lock:
+            handlers = self.subscribers.get(event_name, []).copy()
+
+        if not handlers:
+            return
+
+        # 提交前递增计数(每个 handler 一次,完成时递减)
+        with self._async_lock:
+            self._async_event_counts[event_name] += len(handlers)
+
+        for handler in handlers:
+            self._executor.submit(self._safe_async_handler, event_name, handler, *args, **kwargs)
+
     def _safe_async_handler(self, event_name: str, handler: Callable, *args, **kwargs):
         """安全地执行异步事件处理器"""
         try:
             handler(*args, **kwargs)
         except Exception as e:
             LOG_ERROR(f"Error in async event bus handler for '{event_name}': {e}")
+        finally:
+            # 完成后递减并发计数
+            with self._async_lock:
+                self._async_event_counts[event_name] -= 1
+                if self._async_event_counts[event_name] <= 0:
+                    self._async_event_counts.pop(event_name, None)
     
     def cleanup(self):
         """清理资源"""

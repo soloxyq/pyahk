@@ -94,7 +94,7 @@ class MacroEngine:
         self._setup_event_subscriptions()
         self.load_config(self.current_config_file)  # 先加载配置
 
-        # 只注册F8根热键
+        # 注册 F8/F7/F9 永久根热键
         self._setup_primary_hotkey()
 
     def _setup_event_subscriptions(self):
@@ -110,16 +110,23 @@ class MacroEngine:
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
 
     def _setup_primary_hotkey(self):
-        """设置F8根热键（唯一的永久热键）"""
-        try:
-            LOG_INFO("[热键管理] 注册F8根热键...")
+        """设置永久根热键 (F8/F7/F9)
 
-            # 只注册F8主控键
-            result = self.input_handler.register_hook("F8", "intercept")
-            if result:
-                LOG_INFO("[热键管理] [OK] F8根热键注册成功")
-            else:
-                LOG_ERROR("[热键管理] [FAIL] F8根热键注册失败")
+        F8: STOPPED ↔ READY 主控键
+        F7: 装备词缀洗练 (要求 STOPPED 状态才能启动,故必须常驻)
+        F9: 自动寻路准备/停止 (同上,handler 在 STOPPED 进入 pathfinding 模式)
+
+        Z 不在此列 —— Z 仅在 RUNNING/PAUSED/READY 有意义,延迟到 _register_secondary_hotkeys 注册。
+        """
+        try:
+            LOG_INFO("[热键管理] 注册永久根热键 (F8/F7/F9)...")
+
+            for key in ("F8", "F7", "F9"):
+                result = self.input_handler.register_root_hook(key)
+                if result:
+                    LOG_INFO(f"[热键管理] [OK] 永久根热键注册成功: {key}")
+                else:
+                    LOG_ERROR(f"[热键管理] [FAIL] 永久根热键注册失败: {key}")
 
             # 订阅AHK拦截事件（系统热键）
             event_bus.subscribe("intercept_key_down", self._handle_ahk_intercept_key)
@@ -143,28 +150,17 @@ class MacroEngine:
             event_bus.subscribe("monitor_key_up", self._handle_ahk_monitor_key_up)
 
         except Exception as e:
-            LOG_ERROR(f"[热键管理] 注册F8根热键时发生错误: {e}")
+            LOG_ERROR(f"[热键管理] 注册 F8/F7/F9 永久根热键时发生错误: {e}")
 
     def _register_secondary_hotkeys(self):
-        """注册所有动态热键（在READY状态时调用）"""
+        """注册所有动态热键（在READY状态时调用）
+
+        F7/F9 已改为永久根热键(_setup_primary_hotkey 处理),此处不再重复注册。
+        """
         try:
             LOG_INFO("[热键管理] ========== 开始注册动态热键 ==========")
 
-            # 注册洗练键 (F7)
-            LOG_INFO("[热键管理] 准备注册洗练键 (F7)...")
-            if self.input_handler.register_hook("F7", "intercept"):
-                LOG_INFO("[热键管理] [OK] 洗练键 (F7) 注册成功")
-            else:
-                LOG_ERROR("[热键管理] [FAIL] 洗练键 (F7) 注册失败")
-
-            # 注册寻路键 (F9)
-            LOG_INFO("[热键管理] 准备注册寻路键 (F9)...")
-            if self.input_handler.register_hook("F9", "intercept"):
-                LOG_INFO("[热键管理] [OK] 寻路键 (F9) 注册成功")
-            else:
-                LOG_ERROR("[热键管理] [FAIL] 寻路键 (F9) 注册失败")
-
-            # 注册执行/暂停键 (z)
+            # 注册执行/暂停键 (z) —— 仅在 READY/RUNNING/PAUSED 有意义,故是动态热键
             LOG_INFO("[热键管理] 准备注册执行/暂停键 (z)...")
             if self.input_handler.register_hook("z", "intercept"):
                 LOG_INFO("[热键管理] [OK] 执行/暂停键 (z) 注册成功")
@@ -327,12 +323,11 @@ class MacroEngine:
             {"reason": f"managed_key_down:{key}", "active_keys": [key]},
         )
         
-        # 🎯 清空输入队列中的待处理动作
-        queue_length = self.input_handler.get_queue_length()
-        if queue_length > 0:
-            LOG_INFO(f"[管理按键] 清空输入队列，当前长度: {queue_length}")
-            self.input_handler.clear_queue()
-        
+        # 🎯 清空非紧急队列中的待处理动作(AHK 端 HandleManagedKey 已先清过,
+        # 这里再清一次确保 Python 侧后续提交的也被丢弃)
+        # 🔧 BUG修复(#4): 必须保留 emergency 队列,否则 HP/MP 救命药剂会被误清
+        self.input_handler.clear_non_emergency_queue()
+
         LOG_INFO(f"[管理按键] 管理按键处理完成")
 
     def _handle_ahk_managed_key_complete(self, key: str):
@@ -490,11 +485,11 @@ class MacroEngine:
             self.border_manager.pause_capture()
 
         elif state == MacroState.STOPPED:
-            # 进入STOPPED状态时清理所有动态热键（保留F8根热键）
+            # 进入STOPPED状态时清理所有动态热键（保留 F8/F7/F9 永久根热键）
             try:
                 self.input_handler.clear_all_configurable_hooks()
-                LOG_INFO("[热键管理] 已清理所有动态热键（F8根热键保留）")
-                LOG_INFO("[热键管理] AHK进程保持运行，F8根热键保持监听")
+                LOG_INFO("[热键管理] 已清理所有动态热键（F8/F7/F9 永久根热键保留）")
+                LOG_INFO("[热键管理] AHK进程保持运行，F8/F7/F9 永久根热键保持监听")
             except Exception as e:
                 LOG_ERROR(f"[热键管理] 清理动态热键失败: {e}")
 
@@ -535,7 +530,6 @@ class MacroEngine:
         """发布当前完整的状态信息，确保状态同步"""
         status_info = {
             "state": self._state,
-            "queue_length": self.input_handler.get_queue_length(),
             "stationary_mode": self._stationary_mode_active,
             "force_move_active": self._force_move_active,
         }
@@ -580,6 +574,11 @@ class MacroEngine:
             LOG_INFO(f"[热键] 是否有配置: {full_config is not None}")
             with self._transition_lock:
                 if self._state == MacroState.STOPPED:
+                    # 🔧 三模式硬互斥(combat/pathfinding/洗练):洗练运行时拒绝启动主功能,
+                    # 与 _on_f9_key_press 保持对称(F9 也有此检查)
+                    if self.affix_reroll_manager.status.is_running:
+                        LOG_INFO("[MacroEngine] 洗练进行中,无法启动主功能。请先按 F7 停止洗练。")
+                        return
                     LOG_INFO("【热键】 F8 - 从 STOPPED状态启动")
                     if full_config:
                         self._skills_config = full_config.get("skills", {})
@@ -1077,124 +1076,3 @@ class MacroEngine:
                 LOG_INFO(f"  - {component_name}.stop_listening() 调用成功")
         except Exception as e:
             LOG_ERROR(f"  - 清理组件 {component_name} 时发生错误: {e}")
-
-    def _update_priority_keys_config(self, priority_keys_config: Dict[str, Any]):
-        """更新优先级按键配置到AHK输入处理器"""
-        try:
-            special_keys = set(priority_keys_config.get("special_keys", []))
-            managed_keys = priority_keys_config.get("managed_keys", {})
-
-            LOG_INFO(
-                f"[优先级按键] 开始更新配置 - 特殊按键: {special_keys}, 管理按键: {list(managed_keys.keys())}"
-            )
-
-            # 🎯 关键：重新注册所有优先级按键Hook
-            if (
-                hasattr(self.input_handler, "command_sender")
-                and self.input_handler.command_sender
-            ):
-
-                # 1. 注册特殊按键（不拦截，持续状态检测）
-                for key in special_keys:
-                    try:
-                        # 🎯 特殊按键使用special模式（不拦截，持续状态检测）
-                        result = self.input_handler.command_sender.register_hook(
-                            key, "special"
-                        )
-                        if result:
-                            LOG_INFO(
-                                f"[优先级按键] 特殊按键注册成功: {key} (special模式)"
-                            )
-                        else:
-                            LOG_ERROR(f"[优先级按键] 特殊按键注册失败: {key}")
-                    except Exception as e:
-                        LOG_ERROR(f"[优先级按键] 特殊按键注册异常 ({key}): {e}")
-
-                # 2. 注册管理按键（完全拦截，延迟+映射）
-                for key, config in managed_keys.items():
-                    try:
-                        # 🎯 管理按键使用priority模式（拦截+延迟+映射）
-                        result = self.input_handler.command_sender.register_hook(
-                            key, "priority"
-                        )
-                        if result:
-                            target = (
-                                config.get("target", key)
-                                if isinstance(config, dict)
-                                else key
-                            )
-                            delay = (
-                                config.get("delay", 0)
-                                if isinstance(config, dict)
-                                else 0
-                            )
-                            # 🎯 发送管理按键配置到AHK
-                            config_result = self.input_handler.command_sender.set_managed_key_config(
-                                key, target, delay
-                            )
-                            if config_result:
-                                LOG_INFO(
-                                    f"[优先级按键] 管理按键注册成功: {key} -> {target} (延迟: {delay}ms)"
-                                )
-                            else:
-                                LOG_ERROR(f"[优先级按键] 管理按键配置发送失败: {key}")
-                        else:
-                            LOG_ERROR(f"[优先级按键] 管理按键注册失败: {key}")
-                    except Exception as e:
-                        LOG_ERROR(f"[优先级按键] 管理按键注册异常 ({key}): {e}")
-
-                LOG_INFO("[优先级按键] 配置更新完成")
-            else:
-                LOG_ERROR("[优先级按键] AHK命令发送器不可用，无法更新配置")
-
-        except Exception as e:
-            LOG_ERROR(f"[优先级按键] 配置更新失败: {e}")
-            import traceback
-
-            LOG_ERROR(f"[优先级按键] 详细错误: {traceback.format_exc()}")
-
-    def _register_business_hooks_on_ready(self):
-        """F8准备时注册所有业务按键"""
-        try:
-            # 从当前配置中提取按键信息
-            priority_keys_config = self._global_config.get("priority_keys", {})
-            if not priority_keys_config.get("enabled", False):
-                LOG_INFO("[F8准备] 优先级按键功能未启用，跳过业务按键注册")
-                return
-
-            special_keys = priority_keys_config.get("special_keys", [])
-            managed_keys = priority_keys_config.get("managed_keys", {})
-
-            # 收集其他业务按键配置
-            stationary_config = self._global_config.get("stationary_mode_config", {})
-            stationary_key = stationary_config.get("hotkey", "").lower()
-            force_move_key = stationary_config.get("force_move_hotkey", "").lower()
-
-            other_hooks = {}
-
-            # 添加固定的业务按键
-            other_hooks["RButton"] = "intercept"  # 右键攻击
-
-            # 添加原地模式和强制移动按键
-            if stationary_key:
-                other_hooks[stationary_key] = "intercept"
-            if force_move_key:
-                other_hooks[force_move_key] = "monitor"
-
-            # 调用AHK输入处理器的方法注册所有业务按键
-            if hasattr(self.input_handler, "register_all_hooks_on_f8_ready"):
-                self.input_handler.register_all_hooks_on_f8_ready(
-                    special_keys=special_keys,
-                    managed_keys=managed_keys,
-                    other_hooks=other_hooks,
-                )
-            else:
-                LOG_ERROR(
-                    "[F8准备] AHK输入处理器不支持register_all_hooks_on_f8_ready方法"
-                )
-
-        except Exception as e:
-            LOG_ERROR(f"[F8准备] 业务按键注册失败: {e}")
-            import traceback
-
-            LOG_ERROR(f"[F8准备] 详细错误: {traceback.format_exc()}")

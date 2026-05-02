@@ -3,7 +3,7 @@
         "Skill1": {
             "Enabled": false,
             "Key": "LButton",
-            "Priority": true,
+            "Priority": false,
             "Timer": 150,
             "TriggerMode": 1,
             "CooldownCoordX": 815,
@@ -31,7 +31,7 @@
             "AltKey": "2"
         },
         "Skill3": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "q",
             "Priority": false,
             "Timer": 650,
@@ -46,7 +46,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "e",
             "Priority": false,
             "Timer": 1000,
@@ -126,6 +126,7 @@
         "debug_mode": {
             "enabled": false
         },
+        "input_mode": "control",
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
@@ -168,18 +169,18 @@
         },
         "resource_management": {
             "hp_config": {
-                "enabled": true,
+                "enabled": false,
                 "key": "c",
                 "threshold": 60,
                 "cooldown": 1000,
-                "tolerance_h": 10,
-                "tolerance_s": 30,
-                "tolerance_v": 50,
+                "tolerance_h": 5,
+                "tolerance_s": 45,
+                "tolerance_v": 48,
                 "detection_mode": "rectangle",
-                "region_x1": 747,
-                "region_y1": 978,
+                "region_x1": 748,
+                "region_y1": 979,
                 "region_x2": 753,
-                "region_y2": 1049,
+                "region_y2": 1048,
                 "colors": [
                     {
                         "name": "Color1",

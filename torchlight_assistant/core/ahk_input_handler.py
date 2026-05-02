@@ -12,14 +12,17 @@ from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
 # AHKEventReceiver已移除，使用WM_COPYDATA通信
 from torchlight_assistant.config.ahk_config import AHKConfig
 from torchlight_assistant.core.signal_bridge import ahk_signal_bridge # 导入信号桥
-from torchlight_assistant.utils.debug_log import LOG_INFO, LOG
+from torchlight_assistant.utils.debug_log import LOG_INFO, LOG, LOG_ERROR
 
 
 class AHKInputHandler:
     """
     基于AHK的完整输入处理器
     """
-    
+
+    # 永久根热键(F8 主控 / F7 洗练 / F9 寻路) — 业务配置侧禁止注册,避免覆盖 STOPPED 时的状态机 handler
+    RESERVED_ROOT_KEYS = frozenset({"f8", "f7", "f9"})
+
     def __init__(self, event_bus=None, debug_display_manager=None):
         self.event_bus = event_bus
         self.debug_display_manager = debug_display_manager
@@ -103,108 +106,6 @@ class AHKInputHandler:
             LOG_INFO(f"[AHK输入] 启动AHK失败: {e}")
             return False
     
-    def _register_f8_hook(self):
-        """注册F8主控键（程序启动时立即注册，永远不变）"""
-        try:
-            result = self.command_sender.register_hook("F8", "intercept")
-            if result:
-                LOG_INFO("[AHK输入] [OK] F8主控键注册成功")
-            else:
-                LOG_INFO("[AHK输入] [FAIL] F8主控键注册失败 (AHK窗口未找到)")
-        except Exception as e:
-            LOG_INFO(f"[AHK输入] [ERROR] F8主控键注册异常: {e}")
-
-    def register_all_hooks_on_f8_ready(self, special_keys=None, managed_keys=None, other_hooks=None):
-        """
-        用户按F8准备时注册所有其他按键
-        
-        Args:
-            special_keys: 特殊按键列表 (special模式) - 如 ["space", "RButton"]
-            managed_keys: 管理按键字典 (priority模式) - 如 {"e": {"target": "+", "delay": 500}}
-            other_hooks: 其他Hook配置 - 如 {"x": "intercept", "a": "monitor", "RButton": "intercept"}
-        """
-        special_keys = special_keys or []
-        managed_keys = managed_keys or {}
-        other_hooks = other_hooks or {}
-        
-        print("[AHK输入] F8准备 - 开始注册所有业务按键...")
-        
-        # 1. 先注册其他系统热键 (z, F7, F9)
-        system_keys = ["z", "F7", "F9"]  # F8已经在启动时注册了
-        LOG_INFO(f"[AHK输入] 注册 {len(system_keys)} 个系统热键...")
-        for key in system_keys:
-            try:
-                result = self.command_sender.register_hook(key, "intercept")
-                if result:
-                    LOG_INFO(f"[AHK输入] [OK] 系统热键注册成功: {key}")
-                else:
-                    LOG_INFO(f"[AHK输入] [FAIL] 系统热键注册失败: {key}")
-            except Exception as e:
-                LOG_INFO(f"[AHK输入] [ERROR] 系统热键注册异常 ({key}): {e}")
-        
-        # 2. 注册特殊按键 (special模式)
-        if special_keys:
-            LOG_INFO(f"[AHK输入] 注册 {len(special_keys)} 个特殊按键...")
-            for key in special_keys:
-                try:
-                    result = self.command_sender.register_hook(key, "special")
-                    if result:
-                        LOG_INFO(f"[AHK输入] [OK] 特殊按键注册成功: {key}")
-                    else:
-                        LOG_INFO(f"[AHK输入] [FAIL] 特殊按键注册失败: {key}")
-                except Exception as e:
-                    LOG_INFO(f"[AHK输入] [ERROR] 特殊按键注册异常 ({key}): {e}")
-        
-        # 3. 注册管理按键 (priority模式)
-        if managed_keys:
-            LOG_INFO(f"[AHK输入] 注册 {len(managed_keys)} 个管理按键...")
-            for key, config in managed_keys.items():
-                try:
-                    result = self.command_sender.register_hook(key, "priority")
-                    if result:
-                        target = config.get("target", key) if isinstance(config, dict) else key
-                        delay = config.get("delay", 0) if isinstance(config, dict) else 0
-                        
-                        # 发送管理按键配置到AHK
-                        config_result = self.command_sender.set_managed_key_config(key, target, delay)
-                        if config_result:
-                            LOG_INFO(f"[AHK输入] [OK] 管理按键注册成功: {key} -> {target} (延迟: {delay}ms)")
-                        else:
-                            LOG_INFO(f"[AHK输入] [FAIL] 管理按键配置失败: {key}")
-                    else:
-                        LOG_INFO(f"[AHK输入] [FAIL] 管理按键注册失败: {key}")
-                except Exception as e:
-                    LOG_INFO(f"[AHK输入] [ERROR] 管理按键注册异常 ({key}): {e}")
-        
-        # 4. 注册其他业务按键
-        if other_hooks:
-            LOG_INFO(f"[AHK输入] 注册 {len(other_hooks)} 个其他业务按键...")
-            for key, mode in other_hooks.items():
-                try:
-                    result = self.command_sender.register_hook(key, mode)
-                    if result:
-                        LOG_INFO(f"[AHK输入] [OK] 业务按键注册成功: {key} ({mode}模式)")
-                    else:
-                        LOG_INFO(f"[AHK输入] [FAIL] 业务按键注册失败: {key}")
-                except Exception as e:
-                    LOG_INFO(f"[AHK输入] [ERROR] 业务按键注册异常 ({key}): {e}")
-        
-        LOG_INFO("[AHK输入] F8准备 - 所有业务按键注册完成")
-        
-        system_hotkeys = AHKConfig.SYSTEM_HOTKEYS
-        
-        LOG_INFO(f"[AHK输入] 开始注册 {len(system_hotkeys)} 个系统热键Hook...")
-        
-        for key in system_hotkeys:
-            try:
-                result = self.command_sender.register_hook(key, "intercept")
-                if result:
-                    LOG_INFO(f"[AHK输入] [OK] 系统热键Hook注册成功: {key}")
-                else:
-                    LOG_INFO(f"[AHK输入] [FAIL] 系统热键Hook注册失败: {key} (AHK窗口未找到)")
-            except Exception as e:
-                LOG_INFO(f"[AHK输入] [ERROR] 系统热键Hook注册异常 ({key}): {e}")
-    
     def send_key(self, key_str: str) -> bool:
         """
         发送按键
@@ -248,23 +149,53 @@ class AHKInputHandler:
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        
+
         # 特殊按键激活时，丢弃非紧急入队（鼠标点击视为非紧急）
         if self._drop_non_emergency:
             return False
-        
+
         return self.command_sender.send_mouse_click(button, priority=2)
+
+    def click_mouse_at(self, x: int, y: int, hold_time: Optional[float] = None) -> bool:
+        """点击屏幕指定坐标
+
+        ⚠️ 暂未实现 - 当前 AHK 命令协议中没有定义带坐标的鼠标点击命令。
+        洗练(SimpleAffixRerollManager)和寻路(PathfindingManager)调用本方法,
+        在新增 AHK 命令支持前会返回 False 并记录错误,而不会抛 AttributeError。
+
+        TODO: 新增 CMD_MOUSE_CLICK_AT 命令,AHK 端用 `Click x, y` 实现。
+        """
+        LOG_ERROR(
+            f"[AHK输入] click_mouse_at 暂未实现 (x={x}, y={y}, hold_time={hold_time})。"
+            f"洗练/寻路功能需要新增 AHK 命令才能正常工作。"
+        )
+        return False
     
     def execute_skill_normal(self, key: str):
-        if key and not self._drop_non_emergency:
+        # 🔧 BUG修复: 配置中 Key 字段允许序列(如 "delay50,1,delay100,2"),
+        # 之前直接 send_normal 会把整串当作单个按键名 press: 出去导致无效。
+        # 现在检测逗号自动走 send_sequence(AHK 端在 EnqueueAction 入口展开为原子动作)。
+        if not key or self._drop_non_emergency:
+            return
+        if "," in key:
+            self.command_sender.send_sequence(key, priority=2)
+        else:
             self.command_sender.send_normal(key)
-    
+
     def execute_skill_high(self, key: str):
-        if key and not self._drop_non_emergency:
+        if not key or self._drop_non_emergency:
+            return
+        if "," in key:
+            self.command_sender.send_sequence(key, priority=1)
+        else:
             self.command_sender.send_high_priority(key)
-    
+
     def execute_utility(self, key: str):
-        if key and not self._drop_non_emergency:
+        if not key or self._drop_non_emergency:
+            return
+        if "," in key:
+            self.command_sender.send_sequence(key, priority=3)
+        else:
             self.command_sender.send_low_priority(key)
     
     def execute_hp_potion(self, key: str):
@@ -276,25 +207,43 @@ class AHKInputHandler:
             self.command_sender.send_emergency(key)
     
     def clear_queue(self):
+        """清空所有队列(含 emergency)。用于 PAUSED 状态完全停下。"""
         self.command_sender.clear_queue(-1)
-    
-    def get_queue_length(self) -> int:
-        return 0
-    
+
+    def clear_non_emergency_queue(self):
+        """只清非紧急队列,保留 emergency。用于管理按键期间保留 HP/MP 救命动作。"""
+        self.command_sender.clear_queue(-2)
+
     def get_queue_stats(self) -> dict:
         return {"wm_copydata_mode": True}
     
+    def register_root_hook(self, key: str):
+        """注册永久根热键(F8/F7/F9 专用,intercept 模式)。
+
+        绕过两层 register_hook 的保留键检查,仅供 MacroEngine._setup_primary_hotkey 调用。
+        """
+        return self.command_sender.register_root_hook(key)
+
     def register_hook(self, key: str, mode: str = "intercept"):
         """
-        注册热键Hook
-        
+        注册业务热键 Hook
+
         Args:
             key: 按键名（使用AHK标准名称，如 "RButton", "space"）
             mode: Hook模式
-            
+
         Returns:
-            注册是否成功
+            注册是否成功;若 key 是保留根热键(F8/F7/F9),返回 False
         """
+        # 🔧 保留键防御:F8/F7/F9 是永久根热键,业务侧禁止注册
+        # 即使 AHK 端 RegisterHook 不会把它们记入 RegisteredHooks,Hotkey 绑定仍会被覆盖,
+        # 导致 STOPPED 时按 F8/F7/F9 走错 handler。永久注册请用 register_root_hook。
+        if key and key.lower() in self.RESERVED_ROOT_KEYS:
+            LOG_ERROR(
+                f"[register_hook] 拒绝注册保留根热键 '{key}' (mode={mode})。"
+                f"F8/F7/F9 是永久根热键,业务配置不可覆盖。"
+            )
+            return False
         return self.command_sender.register_hook(key, mode)
     
     def unregister_hook(self, key: str):
@@ -319,7 +268,7 @@ class AHKInputHandler:
         return self.command_sender.set_force_move_replacement_key(key)
     
     def clear_all_configurable_hooks(self) -> bool:
-        """清空所有可配置的Hook（保留F8根热键）"""
+        """清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）"""
         return self.command_sender.clear_all_configurable_hooks()
     
     def set_python_window_state(self, state: str) -> bool:
@@ -342,9 +291,9 @@ class AHKInputHandler:
     
     def stop(self):
         LOG_INFO("[AHK输入] 正在停止...")
-        
-        # 事件接收现在通过主窗口的WM_COPYDATA处理
-        
+
+        # 事件接收由 ahk_event_filter.AHKEventFilter 全局过滤器处理,无需在此清理
+
         if self.ahk_process:
             try:
                 self.ahk_process.terminate()

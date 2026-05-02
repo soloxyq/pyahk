@@ -1,0 +1,29 @@
+# 强制所有文本文件用 LF 行尾, 防止 WSL/Windows 之间编辑导致 CRLF 污染。
+# 这与仓库 HEAD 现状一致(全部 LF), 也避免 git diff 出现海量"行尾噪音"。
+
+* text=auto eol=lf
+
+# 二进制文件显式标记, 避免被错误转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.zip binary
+*.exe binary
+*.dll binary
+*.pyd binary
+*.so binary
+*.pdf binary
+*.ttf binary
+*.otf binary
+*.woff binary
+*.woff2 binary
+*.h5 binary
+*.keras binary
+*.pkl binary
+*.npy binary
+*.npz binary
+*.onnx binary
+*.pb binary
+*.tflite binary

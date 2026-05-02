@@ -11,7 +11,7 @@ from torchlight_assistant.config.ahk_commands import (
     CMD_SET_SEND_MODE,
     get_command_name
 )
-from torchlight_assistant.utils.debug_log import LOG_INFO
+from torchlight_assistant.utils.debug_log import LOG_INFO, LOG_ERROR
 
 
 class AHKCommandSender:
@@ -98,7 +98,7 @@ class AHKCommandSender:
         return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_REPLACEMENT_KEY, key)
     
     def clear_all_configurable_hooks(self) -> bool:
-        """清空所有可配置的Hook（保留F8根热键）"""
+        """清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）"""
         from torchlight_assistant.config.ahk_commands import CMD_CLEAR_HOOKS
         return send_ahk_cmd(self.window_title, CMD_CLEAR_HOOKS, "")
     
@@ -234,9 +234,12 @@ class AHKCommandSender:
     def clear_queue(self, priority: int = -1) -> bool:
         """
         清空队列
-        
+
         Args:
-            priority: 要清空的队列 (-1=全部, 0-3=指定队列)
+            priority: 要清空的队列
+                -1 = 全部(包括 emergency)
+                -2 = 仅非紧急(high/normal/low,保留 emergency 救命药剂)
+                0-3 = 指定单个优先级队列
         """
         return send_ahk_cmd(self.window_title, CMD_CLEAR_QUEUE, str(priority))
     
@@ -244,16 +247,39 @@ class AHKCommandSender:
     # Hook管理
     # ========================================================================
     
-    def register_hook(self, key: str, mode: str = "intercept") -> bool:
-        """
-        注册Hook
-        
-        Args:
-            key: 按键名称
-            mode: 模式 ("intercept"=拦截, "monitor"=监控, "block"=阻止)
-        """
+    # 永久根热键(F8 主控 / F7 洗练 / F9 寻路) — 与 AHKInputHandler 同形,深度防御
+    # 任何调用方(包括误用底层 sender)用 register_hook 注册 F8/F7/F9 都会被拒绝;
+    # 永久根热键注册请走 register_root_hook。
+    RESERVED_ROOT_KEYS = frozenset({"f8", "f7", "f9"})
+
+    def _send_hook_register(self, key: str, mode: str) -> bool:
+        """实际发送注册命令到 AHK,无保留键检查 — 仅 register_hook / register_root_hook 内部使用。"""
         param = f"{key}:{mode}"
         return send_ahk_cmd(self.window_title, CMD_HOOK_REGISTER, param)
+
+    def register_root_hook(self, key: str) -> bool:
+        """注册永久根热键(F8/F7/F9 专用,intercept 模式)。绕过保留键检查。"""
+        return self._send_hook_register(key, "intercept")
+
+    def register_hook(self, key: str, mode: str = "intercept") -> bool:
+        """
+        注册业务 Hook
+
+        Args:
+            key: 按键名称
+            mode: 模式 ("intercept"=拦截, "priority"=管理, "special"=特殊, "monitor"=监控, "block"=阻止)
+
+        Returns:
+            注册是否成功;若 key 是保留根热键(F8/F7/F9),返回 False
+        """
+        # 🔧 深度防御:即使有调用方绕过 AHKInputHandler 直接拿 command_sender,这里也拒绝保留键
+        if key and key.lower() in self.RESERVED_ROOT_KEYS:
+            LOG_ERROR(
+                f"[AHKCommandSender.register_hook] 拒绝注册保留根热键 '{key}' (mode={mode})。"
+                f"F8/F7/F9 是永久根热键,业务配置不可覆盖;永久注册请用 register_root_hook。"
+            )
+            return False
+        return self._send_hook_register(key, mode)
     
     def unregister_hook(self, key: str) -> bool:
         """

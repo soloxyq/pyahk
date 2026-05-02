@@ -125,7 +125,7 @@ class SkillManager:
         is_sequence_mode = self._global_config.get("sequence_enabled", False)
 
         if is_sequence_mode:
-            # 序列模式：只添加序列任务
+            # 序列模式：只添加序列任务（不需要冷却检查）
             seq_interval = (
                 self._global_config.get("sequence_timer_interval", 1000) / 1000.0
             )
@@ -151,16 +151,16 @@ class SkillManager:
                 f"[统一调度器] 进入技能模式，添加冷却检查任务，间隔: {cooldown_interval:.3f}s"
             )
 
-            # 3. 添加资源管理任务（独立调度）
-            if self.resource_manager:
-                resource_config = self._global_config.get("resource_management", {})
-                resource_interval = resource_config.get("check_interval", 200) / 1000.0
-                self.unified_scheduler.add_task(
-                    "resource_checker", resource_interval, self.check_resources
-                )
-                LOG_INFO(
-                    f"[统一调度器] 添加资源管理任务，间隔: {resource_interval:.3f}s"
-                )
+        # 3. 添加资源管理任务（独立调度，序列/技能模式都需要 HP/MP 自动药剂）
+        if self.resource_manager:
+            resource_config = self._global_config.get("resource_management", {})
+            resource_interval = resource_config.get("check_interval", 200) / 1000.0
+            self.unified_scheduler.add_task(
+                "resource_checker", resource_interval, self.check_resources
+            )
+            LOG_INFO(
+                f"[统一调度器] 添加资源管理任务，间隔: {resource_interval:.3f}s"
+            )
 
     def _setup_timed_skills_tasks(self):
         """设置定时技能任务"""
@@ -308,7 +308,7 @@ class SkillManager:
                     ):
                         LOG_INFO(f"[统一调度器] 更新序列任务间隔: {seq_interval:.3f}s")
                 else:
-                    # 技能模式：更新冷却检查间隔和资源管理间隔
+                    # 技能模式：更新冷却检查间隔
                     cooldown_interval = (
                         global_config.get("cooldown_checker_interval", 100) / 1000.0
                     )
@@ -319,18 +319,18 @@ class SkillManager:
                             f"[统一调度器] 更新冷却检查间隔: {cooldown_interval:.3f}s"
                         )
 
-                    # 更新资源管理间隔
-                    if self.resource_manager:
-                        resource_config = global_config.get("resource_management", {})
-                        resource_interval = (
-                            resource_config.get("check_interval", 200) / 1000.0
+                # 更新资源管理间隔（序列/技能模式都需要）
+                if self.resource_manager:
+                    resource_config = global_config.get("resource_management", {})
+                    resource_interval = (
+                        resource_config.get("check_interval", 200) / 1000.0
+                    )
+                    if self.unified_scheduler.update_task_interval(
+                        "resource_checker", resource_interval
+                    ):
+                        LOG_INFO(
+                            f"[统一调度器] 更新资源管理间隔: {resource_interval:.3f}s"
                         )
-                        if self.unified_scheduler.update_task_interval(
-                            "resource_checker", resource_interval
-                        ):
-                            LOG_INFO(
-                                f"[统一调度器] 更新资源管理间隔: {resource_interval:.3f}s"
-                            )
 
     def execute_timed_skill(self, skill_name: str):
         """执行定时技能 - 统一帧管理版本"""

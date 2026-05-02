@@ -7,6 +7,7 @@ import traceback
 from PySide6.QtWidgets import QApplication
 
 from torchlight_assistant.core.macro_engine import MacroEngine
+from torchlight_assistant.core.ahk_event_filter import AHKEventFilter
 from torchlight_assistant.utils.sound_manager import SoundManager
 from torchlight_assistant.gui.main_window import GameSkillConfigUI
 from torchlight_assistant.utils.debug_log import LOG_INFO, LOG_ERROR
@@ -30,6 +31,11 @@ def main():
 
     try:
         app = QApplication(sys.argv)
+
+        # 安装全局 AHK 事件过滤器(替代 main_window / status_window 各自的 nativeEvent)
+        # attach 到 app 防 GC,确保过滤器在整个应用生命周期内存活
+        app._ahk_event_filter = AHKEventFilter()
+        app.installNativeEventFilter(app._ahk_event_filter)
 
         sound_manager = SoundManager()
         macro_engine = MacroEngine(sound_manager=sound_manager)

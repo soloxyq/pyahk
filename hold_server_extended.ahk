@@ -69,6 +69,7 @@ global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控
 
 ; 🎯 异步延迟机制
 global DelayUntil := 0  ; 延迟到什么时间（毫秒），0表示没有延迟
+global DelayClearOthers := false  ; 当前 delay 期间是否需要清空非紧急队列(管理按键专用)
 
 ; 🎯 基于F8状态的智能窗口句柄缓存
 global CurrentPythonWindow := "TorchLightAssistant_MainWindow_12345"  ; 启动时默认主窗口
@@ -115,7 +116,11 @@ OnMessage(0x4A, WM_COPYDATA)
 ; 队列处理器 (20ms定时器)
 ; ===============================================================================
 ProcessQueue() {
-    global DelayUntil, TotalQueueCount, QueueCounts
+    ; 🔧 BUG修复(AHK v2 作用域): 必须显式声明所有用到的全局变量
+    ; 否则函数内对其赋值会创建局部变量,读取也会读到未初始化的局部变量
+    global DelayUntil, DelayClearOthers, TotalQueueCount, QueueCounts
+    global EmergencyQueue, HighQueue, NormalQueue, LowQueue
+    global QueueStats, IsPaused, SpecialKeysPaused
 
     ; 🚀 性能优化：快速检查 - 如果没有任何任务且不在延迟中，直接返回
     if (TotalQueueCount = 0 && DelayUntil = 0) {
@@ -125,14 +130,16 @@ ProcessQueue() {
     ; 🎯 检查是否在异步延迟中
     if (DelayUntil > 0) {
         if (A_TickCount < DelayUntil) {
-            ; 🎯 关键修复：延迟期间清空所有非索急队列，防止技能积累
-            if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
+            ; 🔧 BUG修复(#2): 只在管理按键引发的 delay 期间清空非紧急队列(保护按键独占)
+            ; 普通 sequence 内的 delay 不应清掉自己后续的项,否则 "q,delay100,w" 中 w 会丢失
+            if (DelayClearOthers && (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0)) {
                 ClearNonEmergencyQueues()
             }
             return  ; 还在延迟中，不处理任何队列
         } else {
             ; 延迟结束，重置
             DelayUntil := 0
+            DelayClearOthers := false
         }
     }
 
@@ -337,7 +344,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             return 0
 
         case CMD_CLEAR_HOOKS:
-            ; CLEAR_HOOKS - 清空所有可配置的Hook（保留F8根热键）
+            ; CLEAR_HOOKS - 清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）
             ClearAllConfigurableHooks()
             return 1
 
@@ -495,6 +502,29 @@ ClearNonEmergencyQueues() {
 ; 队列操作
 ; ===============================================================================
 EnqueueAction(priority, action) {
+    ; 🔧 防御性 global 声明:虽然函数内当前只有 .Push() 方法调用(不会触发 local 化),
+    ; 但显式声明可防止未来误改导致的隐式作用域问题
+    global EmergencyQueue, HighQueue, NormalQueue, LowQueue, QueueStats
+
+    ; 🔧 BUG修复(B5+B16): 拦截 sequence 类型,展开为多个原子动作进入同一优先级队列
+    ; 这样可复用 DelayUntil 异步机制,避免 ExecuteSequence 中的同步 Sleep 阻塞所有队列
+    if (InStr(action, "sequence:") = 1) {
+        sequenceData := SubStr(action, 10)
+        parts := CachedStrSplit(sequenceData, ",")
+        for index, part in parts {
+            part := Trim(part)
+            if (part = "")
+                continue
+            if (InStr(part, "delay") = 1) {
+                ms := Integer(SubStr(part, 6))
+                EnqueueAction(priority, "delay:" ms)
+            } else {
+                EnqueueAction(priority, "press:" part)
+            }
+        }
+        return
+    }
+
     switch priority {
         case 0:
             EmergencyQueue.Push(action)
@@ -516,8 +546,13 @@ EnqueueAction(priority, action) {
 }
 
 ClearQueue(priority) {
+    ; 🔧 BUG修复(AHK v2 作用域): 必须显式声明四个队列变量为 global,
+    ; 否则函数内 EmergencyQueue := [] 等赋值实际上创建的是局部变量,
+    ; 全局队列内容不会被清空,只有计数器清零,会导致 PAUSED 状态和管理按键
+    ; 期间残留旧动作下次入队时被混合执行。
     global QueueCounts, TotalQueueCount
-    
+    global EmergencyQueue, HighQueue, NormalQueue, LowQueue
+
     switch priority {
         case 0:
             TotalQueueCount := TotalQueueCount - QueueCounts["emergency"]
@@ -546,6 +581,9 @@ ClearQueue(priority) {
             HighQueue := []
             NormalQueue := []
             LowQueue := []
+        case -2:
+            ; 🔧 清空所有非紧急队列(保留 emergency,用于管理按键期间保护 HP/MP 救命动作)
+            ClearNonEmergencyQueues()
     }
 }
 
@@ -567,18 +605,19 @@ CachedStrSplit(str, delimiter, omitChars := "", maxParts := -1) {
     result := StrSplit(str, delimiter, omitChars, maxParts)
     
     ; 缓存管理：防止内存泄露
+    ; 🔧 BUG修复(B6): 不能在 Map 迭代时同时 Delete,先收集 keys 再删除
     if (StringSplitCache.Count >= MaxCacheSize) {
-        ; 清理最早的一半缓存
-        clearCount := 0
+        keysToRemove := []
+        halfSize := MaxCacheSize // 2
         for key in StringSplitCache {
-            StringSplitCache.Delete(key)
-            clearCount++
-            if (clearCount >= MaxCacheSize // 2) {
+            keysToRemove.Push(key)
+            if (keysToRemove.Length >= halfSize)
                 break
-            }
         }
+        for index, k in keysToRemove
+            StringSplitCache.Delete(k)
     }
-    
+
     ; 添加到缓存
     StringSplitCache[cacheKey] := result
     return result
@@ -596,18 +635,19 @@ CachedStrLower(str) {
     result := StrLower(str)
     
     ; 缓存管理
+    ; 🔧 BUG修复(B6): 不能在 Map 迭代时同时 Delete,先收集 keys 再删除
     if (StringLowerCache.Count >= MaxCacheSize) {
-        ; 清理一半缓存
-        clearCount := 0
+        keysToRemove := []
+        halfSize := MaxCacheSize // 2
         for key in StringLowerCache {
-            StringLowerCache.Delete(key)
-            clearCount++
-            if (clearCount >= MaxCacheSize // 2) {
+            keysToRemove.Push(key)
+            if (keysToRemove.Length >= halfSize)
                 break
-            }
         }
+        for index, k in keysToRemove
+            StringLowerCache.Delete(k)
     }
-    
+
     StringLowerCache[str] := result
     return result
 }
@@ -619,8 +659,11 @@ CachedStrLower(str) {
 ; 动作执行
 ; ===============================================================================
 ExecuteAction(action) {
+    ; 🔧 BUG修复(AHK v2 作用域): 把分散的 global 声明统一到函数顶部,
+    ; 避免在 if 分支内零散声明导致维护困难
     global ACTION_CLEANUP, ACTION_PRESS, ACTION_SEQUENCE, ACTION_HOLD, ACTION_RELEASE, ACTION_MOUSE_CLICK, ACTION_DELAY, ACTION_NOTIFY
-    
+    global DelayUntil, DelayClearOthers
+
     ; 🚀 处理清理标记（使用常量比较）
     if (InStr(action, ACTION_CLEANUP . ":")) {
         key := StrReplace(action, ACTION_CLEANUP . ":", "")
@@ -639,10 +682,9 @@ ExecuteAction(action) {
     actionData := parts[2]
 
     ; 🚀 执行动作（直接常量比较，无函数调用开销）
+    ; 注意: sequence 已在 EnqueueAction 入口展开为多个原子动作,此处不再处理
     if (actionType = ACTION_PRESS) {
         SendPress(actionData)
-    } else if (actionType = ACTION_SEQUENCE) {
-        ExecuteSequence(actionData)
     } else if (actionType = ACTION_HOLD) {
         SendDown(actionData)
     } else if (actionType = ACTION_RELEASE) {
@@ -651,8 +693,13 @@ ExecuteAction(action) {
         ExecuteMouseClick(actionData)
     } else if (actionType = ACTION_DELAY) {
         ; 🎯 异步延迟：设置延迟结束时间，不阻塞
-        global DelayUntil
+        ; 普通 delay 不清队列,允许同优先级的后续动作继续排队
         DelayUntil := A_TickCount + Integer(actionData)
+        DelayClearOthers := false
+    } else if (actionType = "delay_clear") {
+        ; 🔧 管理按键专用延迟:延迟期间清空非紧急队列,保护按键独占执行
+        DelayUntil := A_TickCount + Integer(actionData)
+        DelayClearOthers := true
     } else if (actionType = ACTION_NOTIFY) {
         ; 🎯 发送通知到Python
         SendEventToPython(actionData)
@@ -681,11 +728,11 @@ SendPress(key) {
 SendKeyInternal(key) {
     ; 内部发送函数 - 根据模式选择发送方式
     global SendKeyMode, TargetWin
-    
+
     if (SendKeyMode = "control" && TargetWin != "") {
         ; ControlSend模式 - 直接发送到目标窗口
         try {
-            ControlSend "{" key "}", , TargetWin
+            ControlSend FormatKeyForSend(key), , TargetWin
         } catch {
             ; 如果ControlSend失败，回退到直接模式
             SendDirect(key)
@@ -698,14 +745,34 @@ SendKeyInternal(key) {
 
 SendDirect(key) {
     ; 直接发送模式 - 使用SendInput
-    if (InStr(key, "+")) {
-        ; 带修饰符的按键
-        Send "{" key "}"
+    ; 🔧 BUG修复(#3): 必须区分 "+1"(Shift+主键) 与 "+"(字面加号键,如管理按键 target="+")
+    if (StrLen(key) > 1 && SubStr(key, 1, 1) = "+") {
+        ; "+1" → "+{1}" (Shift 修饰符 + 主键花括号包装)
+        Send "+{" SubStr(key, 2) "}"
+    } else if (key = "+") {
+        ; 字面加号键(管理按键映射 target="+" 时的场景)
+        Send "{+}"
+    } else if (InStr(key, "+")) {
+        ; 其他形如 "ctrl+x" 的组合键(罕见,sequence 中可能出现)
+        Send key
     } else {
         ; 普通按键
         Send "{" key " down}"
         Sleep 5
         Send "{" key " up}"
+    }
+}
+
+FormatKeyForSend(key) {
+    ; 把内部 key 格式转换为 AHK Send 兼容字符串(用于 ControlSend)
+    if (StrLen(key) > 1 && SubStr(key, 1, 1) = "+") {
+        return "+{" SubStr(key, 2) "}"
+    } else if (key = "+") {
+        return "{+}"
+    } else if (InStr(key, "+")) {
+        return key
+    } else {
+        return "{" key "}"
     }
 }
 
@@ -739,26 +806,8 @@ ShouldAddShiftModifier(key) {
     return true
 }
 
-ExecuteSequence(sequence) {
-    global ACTION_DELAY
-    
-    ; 🚀 执行按键序列（使用缓存分割）
-    parts := CachedStrSplit(sequence, ",")
-    for index, part in parts {
-        part := Trim(part)
-        if (InStr(part, ACTION_DELAY)) {
-            ; 延迟指令
-            ms := Integer(SubStr(part, 6))
-            Sleep ms
-        } else if (InStr(part, "+")) {
-            ; 组合键: shift+q
-            Send "{" part "}"
-        } else {
-            ; 普通按键
-            Send "{" part "}"
-        }
-    }
-}
+; ExecuteSequence 已废弃: sequence 现在在 EnqueueAction 入口直接展开为
+; 多个原子动作进入同优先级队列,复用 DelayUntil 异步机制,不再需要同步执行
 
 ExecuteMouseClick(data) {
     ; 鼠标点击: "left" 或 "right" 或 "middle"
@@ -770,13 +819,13 @@ ExecuteMouseClick(data) {
 ; ===============================================================================
 RegisterHook(key, mode) {
     ; 简化版本：直接注册，不检查是否已存在
-    ; F8不加入记录（由Python端单独管理）
+    ; 永久根热键(F8/F7/F9)不加入 RegisteredHooks 记录,故 ClearAllConfigurableHooks 不会清它们
     ; 🔧 关键修复：使用"On"选项确保热键被启用（即使之前被禁用过）
 
     key_upper := StrUpper(key)
 
-    ; 记录Hook（F8除外）
-    if (key_upper != "F8") {
+    ; 记录Hook（永久根热键 F8/F7/F9 除外）
+    if (key_upper != "F8" && key_upper != "F7" && key_upper != "F9") {
         RegisteredHooks[key] := mode
     }
 
@@ -909,14 +958,14 @@ HandleManagedKey(key) {
         delay := config.delay
 
         ; 🚀 放入Emergency队列（使用EnqueueAction确保计数器同步）
-        ; 🎯 按键前后都加delay
+        ; 🎯 按键前后都加delay - 用 delay_clear 确保延迟期间非紧急队列被清空,保护管理按键独占
         if (delay > 0) {
-            EnqueueAction(0, "delay:" delay)  ; 按键前elay
+            EnqueueAction(0, "delay_clear:" delay)  ; 按键前delay,清非紧急队列
         }
         EnqueueAction(0, "press:" target)
 
         if (delay > 0) {
-            EnqueueAction(0, "delay:" delay)  ; 按键名elay
+            EnqueueAction(0, "delay_clear:" delay)  ; 按键后delay,清非紧急队列
         }
 
         ; 🎯 关键修复：添加恢复通知，让Python恢复调度器
@@ -930,13 +979,6 @@ HandleManagedKey(key) {
         EnqueueAction(0, "notify:managed_key_complete:" key)
         EnqueueAction(0, "cleanup:" key)
     }
-}
-
-RestoreManagedKey(key) {
-    ; 恢复管理按键后的队列处理
-    global IsPaused
-    IsPaused := false
-    SendEventToPython("managed_key_up:" key)
 }
 
 HandleMonitorKey(key) {
@@ -976,8 +1018,6 @@ HandleMonitorKeyUp(key) {
     ; 发送释放事件
     SendEventToPython("monitor_key_up:" key)
 }
-
-; 已移除RestorePriorityKey，替换为RestoreManagedKey
 
 ; ===============================================================================
 ; 事件发送到Python
@@ -1051,10 +1091,7 @@ SendStatsToPython() {
 ; ===============================================================================
 ; 辅助函数
 ; ===============================================================================
-Trim(str) {
-    ; 去除首尾空格
-    return RegExReplace(str, "^\s+|\s+$", "")
-}
+; 注: AHK v2 已有内置 Trim(),原自定义实现已删除以避免 shadow 内置函数
 
 ; ===============================================================================
 ; 启动信息
@@ -1065,7 +1102,8 @@ Trim(str) {
 ; Hook清理函数
 ; ===============================================================================
 ClearAllConfigurableHooks() {
-    ; 简化版本：清空所有记录的Hook（F8不在记录中，所以自动被保留）
+    ; 简化版本：清空所有记录的 Hook
+    ; F8/F7/F9 永久根热键不在 RegisteredHooks 中,自动被保留(见 RegisterHook 的 key_upper 检查)
 
     ; 收集所有要删除的键
     keysToRemove := []

@@ -3,8 +3,6 @@
 """主窗口类 - 从main.py拆分出来的核心UI类"""
 
 import os
-import ctypes
-from ctypes import wintypes
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -19,9 +17,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QTimer
 from typing import Dict, Optional, Any
-
-# Windows API常量
-WM_COPYDATA = 0x004A
 
 from ..core.macro_engine import MacroState
 from ..core.event_bus import event_bus
@@ -255,7 +250,6 @@ class GameSkillConfigUI(QMainWindow):
     def _perform_macro_status_updated_ui(self, engine_state: Dict[str, Any]):
         # 此函数现在只负责更新文本和OSD, 不播放声音
         state = engine_state.get("state", MacroState.STOPPED)
-        queue_len = engine_state.get("queue_length", 0)
         stationary_mode = engine_state.get("stationary_mode", False)
         force_move_active = engine_state.get("force_move_active", False)
 
@@ -277,7 +271,7 @@ class GameSkillConfigUI(QMainWindow):
             elif stationary_mode:
                 state_text = StatusStrings.PAUSED_STATIONARY
 
-        self.status_label.setText(f"状态: {state_text} | 按键队列: {queue_len}")
+        self.status_label.setText(f"状态: {state_text}")
         if self.osd_status_window:
             color = {"STOPPED": "red", "READY": "yellow", "RUNNING": "lime", "PAUSED": "yellow", "DEBUG": "cyan"}.get(state.name, "white")
             self.osd_status_window.update_status(state_text, color)
@@ -573,60 +567,6 @@ class GameSkillConfigUI(QMainWindow):
                 status_label.setStyleSheet("color: gray; font-size: 8pt;")
                 class_input.setText("")
 
-
-    def nativeEvent(self, eventType, message):
-        """处理Windows原生消息，特别是WM_COPYDATA"""
-        if eventType == "windows_generic_MSG":
-            try:
-                # 解析消息结构
-                msg = wintypes.MSG.from_address(message.__int__())
-                
-                if msg.message == WM_COPYDATA:
-                    # 处理WM_COPYDATA消息
-                    self._handle_wm_copydata(msg.wParam, msg.lParam)
-                    return True, 0
-                    
-            except Exception as e:
-                LOG_ERROR(f"[WM_COPYDATA] 处理原生消息失败: {e}")
-                
-        return False, 0
-    
-    def _handle_wm_copydata(self, wParam, lParam):
-        """处理WM_COPYDATA消息内容"""
-        try:
-            # 定义COPYDATASTRUCT结构
-            class COPYDATASTRUCT(ctypes.Structure):
-                _fields_ = [
-                    ("dwData", ctypes.c_void_p),
-                    ("cbData", ctypes.c_ulong),
-                    ("lpData", ctypes.c_void_p)
-                ]
-            
-            # 从lParam解析COPYDATASTRUCT
-            cds = COPYDATASTRUCT.from_address(lParam)
-            
-            # 检查是否是AHK事件消息（使用9999作为标识）
-            if cds.dwData == 9999 and cds.cbData > 0:
-                # 读取事件数据
-                event_data = ctypes.string_at(cds.lpData, cds.cbData).decode('utf-8')
-                
-                # 处理AHK事件
-                self._process_ahk_event(event_data)
-                
-                LOG(f"[WM_COPYDATA] 收到AHK事件: {event_data}")
-                
-        except Exception as e:
-            LOG_ERROR(f"[WM_COPYDATA] 解析消息失败: {e}")
-    
-    def _process_ahk_event(self, event_data: str):
-        """处理从AHK接收到的事件"""
-        try:
-            # 直接使用信号桥接发射事件
-            from ..core.signal_bridge import ahk_signal_bridge
-            ahk_signal_bridge.ahk_event.emit(event_data)
-            
-        except Exception as e:
-            LOG_ERROR(f"[WM_COPYDATA] 处理AHK事件失败: {e}")
 
     def closeEvent(self, event):
         self.macro_engine.cleanup()
