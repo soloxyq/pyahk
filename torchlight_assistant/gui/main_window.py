@@ -569,5 +569,5 @@ class GameSkillConfigUI(QMainWindow):
 
 
     def closeEvent(self, event):
-        self.macro_engine.cleanup()
+        # 实际资源释放统一由 main.py 的 QApplication.aboutToQuit 处理。
         event.accept()

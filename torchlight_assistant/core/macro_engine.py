@@ -29,6 +29,8 @@ class MacroEngine:
         self._prepared_mode = "none"  # 'none', 'combat', 'pathfinding'
         self._state_lock = threading.RLock()
         self._transition_lock = threading.Lock()
+        self._cleanup_lock = threading.Lock()
+        self._cleanup_done = False
         self._skills_config: Dict[str, Any] = {}
         self._global_config: Dict[str, Any] = {}
         self.current_config_file = config_file
@@ -1013,6 +1015,12 @@ class MacroEngine:
 
     def cleanup(self):
         """分层清理机制，确保按依赖关系安全地释放所有资源。"""
+        with self._cleanup_lock:
+            if self._cleanup_done:
+                LOG_INFO("[清理] MacroEngine 已清理过，跳过重复清理。")
+                return
+            self._cleanup_done = True
+
         LOG_INFO("[清理] 开始执行分层清理...")
 
         # 定义清理层级，从上层业务逻辑到底层系统资源

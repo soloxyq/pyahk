@@ -290,21 +290,29 @@ class AHKInputHandler:
         self.stop()
     
     def stop(self):
+        if not self.ahk_process:
+            return
+
         LOG_INFO("[AHK输入] 正在停止...")
 
         # 事件接收由 ahk_event_filter.AHKEventFilter 全局过滤器处理,无需在此清理
 
-        if self.ahk_process:
+        process = self.ahk_process
+        self.ahk_process = None
+
+        if process.poll() is None:
             try:
-                self.ahk_process.terminate()
-                self.ahk_process.wait(timeout=3)
+                process.terminate()
+                process.wait(timeout=3)
                 LOG_INFO("[AHK输入] AHK进程已终止")
             except Exception as e:
                 LOG_INFO(f"[AHK输入] 终止AHK进程失败: {e}")
                 try:
-                    self.ahk_process.kill()
+                    process.kill()
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 强制终止AHK进程失败: {e}")
+        else:
+            LOG_INFO("[AHK输入] AHK进程已退出")
         
         LOG_INFO("[AHK输入] 已停止")
     
