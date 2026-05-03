@@ -117,6 +117,12 @@ ProcessQueue() {
 - `InputHandler` (Python 类) —— **已删除**,被 `AHKInputHandler` 替代。
 - `pynput` —— 核心输入执行**不再依赖** pynput(已迁移到 AHK 子进程)。但 `requirements.txt` 仍含 `pynput>=1.7.6`,因为 GUI 的 `priority_keys_widget.py` 用它做"按住录制键名"的便捷输入(失败时回退到手动输入框)。pynput 缺失不影响主功能。
 
+### 4.5 按键命名约定 ⚠️
+
+内部存储、JSON 配置、Python→AHK 协议统一使用 **AHK 标准按键名**。鼠标键必须写 `LButton` / `RButton` / `MButton`,不要保存成 `left_mouse` / `right_mouse` / `middle_mouse`。
+
+GUI 可以接受 `right_mouse`、`leftclick`、`mouse_right` 这类别名作为输入兼容,但保存配置前必须归一化成 AHK 标准名。看到 `priority_keys` 里的 `target` 或 key 被改成下划线别名时,应按 BUG 处理。
+
 ## 5. wiki 索引
 
 | 文档 | 主题 | 何时读 |

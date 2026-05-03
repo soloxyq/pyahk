@@ -45,12 +45,12 @@ class PriorityKeysWidget(QWidget):
         # 支持映射配置的按键存储: {key_name: delay_ms 或 {target: str, delay: int}}
         self.priority_keys_config: Dict[str, Union[int, Dict[str, Union[str, int]]]] = {
             'space': 50,
-            'right_mouse': 50
+            'RButton': 50
         }
         
         # 🎯 新增：按键分类配置
         self.special_keys = {'space'}  # 特殊按键：不拦截，保持游戏原生
-        self.managed_keys = {'right_mouse'}  # 管理按键：程序完全接管
+        self.managed_keys = {'RButton'}  # 管理按键：程序完全接管
         self.protected_keys: Set[str] = set()  # 🛡️ 保护按键：用户真实按键放行+程序让路
         
         # 按键监听状态
@@ -417,7 +417,7 @@ class PriorityKeysWidget(QWidget):
         mine_btn = QPushButton("💣 布雷模式")
         mine_btn.setMinimumHeight(28)
         mine_btn.setToolTip("只配置右键布雷 (50ms延迟)")
-        mine_btn.clicked.connect(lambda: self._apply_preset({'right_mouse': 50}))
+        mine_btn.clicked.connect(lambda: self._apply_preset({'RButton': 50}))
         mine_btn.setStyleSheet("""
             QPushButton {
                 background-color: #FF9800;
@@ -435,7 +435,7 @@ class PriorityKeysWidget(QWidget):
         combat_btn = QPushButton("⚔️ 战斗模式")
         combat_btn.setMinimumHeight(28)
         combat_btn.setToolTip("配置空格键闪避(状态监控) + 右键技能(50ms延迟)")
-        combat_btn.clicked.connect(lambda: self._apply_preset({'space': 0, 'right_mouse': 50}))  # 空格无延迟，右键50ms
+        combat_btn.clicked.connect(lambda: self._apply_preset({'space': 0, 'RButton': 50}))  # 空格无延迟，右键50ms
         combat_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
@@ -470,12 +470,12 @@ class PriorityKeysWidget(QWidget):
 
         # 新的默认配置：分层结构
         self.special_keys = {"space"}  # 空格：状态监控
-        self.managed_keys = {"right_mouse"}  # 右键：程序接管
+        self.managed_keys = {"RButton"}  # 右键：程序接管
         self.protected_keys = set()  # 🛡️ 保护按键默认空,按需添加(如 c 大招)
 
         self.priority_keys_config["space"] = 0         # 特殊按键：无延迟
         # 管理按键使用对象格式，默认自映射，便于与核心对齐
-        self.priority_keys_config["right_mouse"] = {"target": "right_mouse", "delay": 50}
+        self.priority_keys_config["RButton"] = {"target": "RButton", "delay": 50}
         
         self._update_keys_display()
 
@@ -490,20 +490,7 @@ class PriorityKeysWidget(QWidget):
 
     def _format_key_display(self, key: str, config: Union[int, Dict[str, Union[str, int]]]) -> str:
         """格式化按键显示文本"""
-        key_names = {
-            'space': '空格键',
-            'left_mouse': '左键',
-            'right_mouse': '右键',
-            'middle_mouse': '中键',
-            'ctrl': 'Ctrl键',
-            'shift': 'Shift键',
-            'alt': 'Alt键',
-            'tab': 'Tab键',
-            'esc': 'Esc键',
-            'enter': '回车键',
-        }
-        
-        display_name = key_names.get(key, f'{key.upper()}键')
+        display_name = self._get_key_display_name(key)
         
         # 🛡️ 保护按键优先识别(基于集合,不依赖配置形态)
         if key in self.protected_keys:
@@ -554,7 +541,11 @@ class PriorityKeysWidget(QWidget):
             self.target_input.clear()
 
     def _normalize_key_name(self, key: str) -> str:
-        """标准化按键名称，避免大小写和格式问题"""
+        """标准化按键名称。
+
+        内部存储、JSON 和 AHK 协议统一使用 AHK 标准名。
+        right_mouse/left_mouse/middle_mouse 等只作为输入兼容别名。
+        """
         if not key:
             return ""
         
@@ -564,19 +555,22 @@ class PriorityKeysWidget(QWidget):
         # 统一按键名称映射
         key_mapping = {
             # 鼠标按键标准化
-            'leftmouse': 'left_mouse',
-            'mouse_left': 'left_mouse',
-            'lbutton': 'left_mouse',
-            'leftclick': 'left_mouse',
+            'left_mouse': 'LButton',
+            'leftmouse': 'LButton',
+            'mouse_left': 'LButton',
+            'lbutton': 'LButton',
+            'leftclick': 'LButton',
             
-            'rightmouse': 'right_mouse',
-            'mouse_right': 'right_mouse',
-            'rbutton': 'right_mouse',
-            'rightclick': 'right_mouse',
+            'right_mouse': 'RButton',
+            'rightmouse': 'RButton',
+            'mouse_right': 'RButton',
+            'rbutton': 'RButton',
+            'rightclick': 'RButton',
             
-            'middlemouse': 'middle_mouse',
-            'mouse_middle': 'middle_mouse',
-            'mbutton': 'middle_mouse',
+            'middle_mouse': 'MButton',
+            'middlemouse': 'MButton',
+            'mouse_middle': 'MButton',
+            'mbutton': 'MButton',
             
             # 特殊键标准化
             'spacebar': 'space',
@@ -593,7 +587,7 @@ class PriorityKeysWidget(QWidget):
         """添加新的优先级按键"""
         key_name = self.key_input.text().strip()
         delay = self.delay_input.value()
-        target_key = self.target_input.text().strip()
+        target_key = self._normalize_key_name(self.target_input.text().strip())
         
         if not key_name:
             QMessageBox.warning(self, "警告", "请输入按键名称")
@@ -740,7 +734,7 @@ class PriorityKeysWidget(QWidget):
         """重置为默认配置"""
         reply = QMessageBox.question(
             self, "确认重置", 
-            "确定要重置为默认配置吗？\n默认配置：space (50ms), right_mouse (50ms)",
+            "确定要重置为默认配置吗？\n默认配置：space (特殊按键), RButton (50ms)",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         
@@ -760,6 +754,7 @@ class PriorityKeysWidget(QWidget):
         self.protected_keys = set()
         
         for key, delay in preset_config.items():
+            key = self._normalize_key_name(key)
             if key == "space":
                 # 空格键默认为特殊按键
                 self.priority_keys_config[key] = 0
@@ -792,7 +787,7 @@ class PriorityKeysWidget(QWidget):
 
                 # 🔧 必须 blockSignals,否则 setText/clear 会触发 textChanged →
                 # _update_selected_key_target → _update_keys_display → setCurrentItem
-                # → 再次进入本函数 → 死循环到栈溢出 (RButton 这类会被 normalize 改名的 key 必触发)
+                # → 再次进入本函数 → 死循环到栈溢出 (旧别名配置如 right_mouse 会被 normalize 成 RButton)
                 self.edit_target_input.blockSignals(True)
                 try:
                     # 🛡️ 保护按键:用 release_delay 填 delay 输入框,target 禁用
@@ -867,33 +862,43 @@ class PriorityKeysWidget(QWidget):
         """获取当前配置 - 输出 special/managed/protected 三类"""
         managed_keys_config = {}
         protected_keys_config = {}
+        special_keys_config = set()
+        special_keys = {self._normalize_key_name(k) for k in self.special_keys}
+        managed_keys = {self._normalize_key_name(k) for k in self.managed_keys}
+        protected_keys = {self._normalize_key_name(k) for k in self.protected_keys}
 
         # 从 priority_keys_config 中提取管理 / 保护按键配置
         for key, config in self.priority_keys_config.items():
-            if key in self.protected_keys:
+            normalized_key = self._normalize_key_name(key)
+            if not normalized_key:
+                continue
+
+            if normalized_key in protected_keys:
                 # 🛡️ 保护按键:仅 release_delay
                 if isinstance(config, dict):
                     rd = int(config.get('release_delay', 150))
                 else:
                     rd = int(config) if config else 150
-                protected_keys_config[key] = {"release_delay": rd}
-            elif key in self.managed_keys:
+                protected_keys_config[normalized_key] = {"release_delay": rd}
+            elif normalized_key in managed_keys:
                 if isinstance(config, dict):
                     # 映射/管理按键：保持/输出对象格式
-                    target = str(config.get('target', key)).strip() or key
+                    target = self._normalize_key_name(str(config.get('target', normalized_key)).strip()) or normalized_key
                     delay = int(config.get('delay', 0))
                     key_config = {"target": target, "delay": delay}
                     hold_ms = int(config.get('hold_ms', 0))
                     if hold_ms > 0:
                         key_config["hold_ms"] = hold_ms
-                    managed_keys_config[key] = key_config
+                    managed_keys_config[normalized_key] = key_config
                 else:
                     # 兼容：将简单延迟转换为对象格式（默认自映射）
-                    managed_keys_config[key] = {"target": key, "delay": int(config)}
+                    managed_keys_config[normalized_key] = {"target": normalized_key, "delay": int(config)}
+            elif normalized_key in special_keys:
+                special_keys_config.add(normalized_key)
 
         return {
             "enabled": self.widgets["enabled"].isChecked(),
-            "special_keys": list(self.special_keys),
+            "special_keys": sorted(special_keys_config),
             "managed_keys": managed_keys_config,
             "protected_keys": protected_keys_config,
         }
@@ -916,31 +921,44 @@ class PriorityKeysWidget(QWidget):
 
         # 特殊按键：延迟设为0
         for key in special_keys:
-            self.priority_keys_config[key] = 0
-            self.special_keys.add(key)
+            normalized_key = self._normalize_key_name(str(key))
+            if not normalized_key:
+                continue
+            self.priority_keys_config[normalized_key] = 0
+            self.special_keys.add(normalized_key)
 
         # 管理按键：规范为对象格式
         for key, val in managed_keys_config.items():
+            normalized_key = self._normalize_key_name(str(key))
+            if not normalized_key:
+                continue
             if isinstance(val, dict):
-                target = str(val.get('target', key)).strip() or key
+                target = self._normalize_key_name(str(val.get('target', normalized_key)).strip()) or normalized_key
                 delay = int(val.get('delay', 0))
                 key_config = {"target": target, "delay": delay}
                 hold_ms = int(val.get('hold_ms', 0))
                 if hold_ms > 0:
                     key_config["hold_ms"] = hold_ms
-                self.priority_keys_config[key] = key_config
+                self.priority_keys_config[normalized_key] = key_config
             else:
-                self.priority_keys_config[key] = {"target": key, "delay": int(val)}
-            self.managed_keys.add(key)
+                self.priority_keys_config[normalized_key] = {"target": normalized_key, "delay": int(val)}
+            self.managed_keys.add(normalized_key)
+            self.special_keys.discard(normalized_key)
+            self.protected_keys.discard(normalized_key)
 
         # 🛡️ 保护按键:仅 release_delay
         for key, val in protected_keys_config.items():
+            normalized_key = self._normalize_key_name(str(key))
+            if not normalized_key:
+                continue
             if isinstance(val, dict):
                 rd = int(val.get('release_delay', 150))
             else:
                 rd = int(val) if val else 150
-            self.priority_keys_config[key] = {"release_delay": rd}
-            self.protected_keys.add(key)
+            self.priority_keys_config[normalized_key] = {"release_delay": rd}
+            self.protected_keys.add(normalized_key)
+            self.special_keys.discard(normalized_key)
+            self.managed_keys.discard(normalized_key)
 
         self._update_keys_display()
 
@@ -1086,9 +1104,9 @@ class PriorityKeysWidget(QWidget):
         """获取鼠标按钮名称"""
         try:
             button_mapping = {
-                Button.left: 'left_mouse',
-                Button.right: 'right_mouse', 
-                Button.middle: 'middle_mouse'
+                Button.left: 'LButton',
+                Button.right: 'RButton',
+                Button.middle: 'MButton'
             }
             return button_mapping.get(button, "")
         except Exception as e:
@@ -1100,7 +1118,7 @@ class PriorityKeysWidget(QWidget):
         if self.key_input.isReadOnly():
             # 切换到手动输入模式
             self.key_input.setReadOnly(False)
-            self.key_input.setPlaceholderText("手动输入按键名称 (如: space, right_mouse, ctrl)")
+            self.key_input.setPlaceholderText("手动输入按键名称 (如: space, RButton, ctrl；right_mouse 作为别名兼容)")
             self.key_input.setText("")
             self.key_input.setStyleSheet("")
             self.manual_input_btn.setText("🎧 监听模式")
@@ -1137,6 +1155,9 @@ class PriorityKeysWidget(QWidget):
         """获取按键的友好显示名称"""
         key_names = {
             'space': '空格键',
+            'LButton': '左键',
+            'RButton': '右键',
+            'MButton': '中键',
             'left_mouse': '左键',
             'right_mouse': '右键',
             'middle_mouse': '中键',
