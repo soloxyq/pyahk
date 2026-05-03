@@ -143,11 +143,24 @@ class AHKCommandSender:
         """检查原地模式是否激活"""
         return self._stationary_mode_active
     
-    def set_managed_key_config(self, key: str, target: str, delay: int):
+    def set_managed_key_config(
+        self, key: str, target: str, delay: int, hold_ms: int = 0
+    ):
         """设置管理按键配置"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_MANAGED_KEY_CONFIG
-        param = f"{key}:{target}:{delay}"
+        param = f"{key}:{target}:{delay}:{hold_ms}"
         return send_ahk_cmd(self.window_title, CMD_SET_MANAGED_KEY_CONFIG, param)
+
+    def set_protected_key_config(self, key: str, release_delay: int) -> bool:
+        """设置保护按键配置 (用户真实按键直达游戏,程序让路+延迟恢复)
+
+        Args:
+            key: 保护键名 (如 'c')
+            release_delay: 松开后保护期延长的毫秒数 (推荐 100~250)
+        """
+        from torchlight_assistant.config.ahk_commands import CMD_SET_PROTECTED_KEY
+        param = f"{key}:{release_delay}"
+        return send_ahk_cmd(self.window_title, CMD_SET_PROTECTED_KEY, param)
 
     # ========================================================================
     # 队列操作

@@ -24,6 +24,7 @@ CMD_SET_FORCE_MOVE_REPLACEMENT_KEY = 17 # 设置强制移动替换键
 CMD_SET_PYTHON_WINDOW_STATE = 18 # 设置Python窗口状态
 CMD_BATCH_UPDATE_CONFIG = 19 # 批量配置更新（Master方案学习）
 CMD_SET_SEND_MODE = 20 # 设置发送模式 (direct/control)
+CMD_SET_PROTECTED_KEY = 21 # 设置保护按键配置 (release_delay)
 
 # 命令名称映射（用于调试）
 CMD_NAMES = {
@@ -47,6 +48,7 @@ CMD_NAMES = {
     CMD_SET_PYTHON_WINDOW_STATE: "SET_PYTHON_WINDOW_STATE",
     CMD_BATCH_UPDATE_CONFIG: "BATCH_UPDATE_CONFIG",
     CMD_SET_SEND_MODE: "SET_SEND_MODE",
+    CMD_SET_PROTECTED_KEY: "SET_PROTECTED_KEY",
 }
 
 def get_command_name(cmd_id: int) -> str:

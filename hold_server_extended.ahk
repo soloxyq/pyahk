@@ -45,6 +45,13 @@ global SpecialKeysPaused := false   ; 特殊按键是否导致系统暂停
 
 ; 🎯 新增：管理按键配置存储
 global ManagedKeysConfig := Map()   ; 存储管理按键的延迟和映射配置
+
+; 🛡️ 保护按键(protected_keys):用户真实按键直达游戏,程序让路并延迟恢复
+; 与 special_keys 的区别:protected 在按下瞬间会清非紧急队列(更强保护)
+; 与 managed_keys 的区别:protected 不重发按键(用户的物理输入直接到游戏)
+global ProtectedKeysConfig := Map()      ; key → {release_delay}
+global ProtectedReleaseTimers := Map()   ; key → 一次性 timer callback,用于显式重置
+
 global TargetWin := "" ; 目标窗口标识符
 
 ; 🎯 新增：紧急按键缓存（Master方案学习）
@@ -331,14 +338,15 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
         case CMD_SET_MANAGED_KEY_CONFIG:
             ; SET_MANAGED_KEY_CONFIG - 设置管理按键配置
-            ; 参数格式: "key:target:delay" 例如: "e:+:500"
+            ; 参数格式: "key:target:delay[:hold_ms]" 例如: "e:+:500" 或 "c:c:75:50"
             global ManagedKeysConfig
             parts := CachedStrSplit(param, ":")
             if (parts.Length >= 3) {
                 key := parts[1]
                 target := parts[2]
                 delay := Integer(parts[3])
-                ManagedKeysConfig[key] := { target: target, delay: delay }
+                hold_ms := (parts.Length >= 4) ? Integer(parts[4]) : 0
+                ManagedKeysConfig[key] := { target: target, delay: delay, hold_ms: hold_ms }
                 return 1
             }
             return 0
@@ -347,6 +355,19 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; CLEAR_HOOKS - 清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）
             ClearAllConfigurableHooks()
             return 1
+
+        case CMD_SET_PROTECTED_KEY:
+            ; SET_PROTECTED_KEY - 设置保护按键配置
+            ; 参数格式: "key:release_delay" 例如: "c:150"
+            global ProtectedKeysConfig
+            parts := CachedStrSplit(param, ":")
+            if (parts.Length >= 2) {
+                key := parts[1]
+                release_delay := Integer(parts[2])
+                ProtectedKeysConfig[key] := { release_delay: release_delay }
+                return 1
+            }
+            return 0
 
         case CMD_SET_FORCE_MOVE_REPLACEMENT_KEY:
             ; SET_FORCE_MOVE_REPLACEMENT_KEY - 设置强制移动替换键
@@ -842,6 +863,11 @@ RegisterHook(key, mode) {
                 Hotkey("~" key, (*) => HandleSpecialKeyDown(key), "On")
                 Hotkey("~" key " up", (*) => HandleSpecialKeyUp(key), "On")
 
+            case "protected":
+                ; $~ 双前缀: ~ 放行真实按键给游戏, $ 防止脚本自己 Send 时反触发
+                Hotkey("$~" key, (*) => HandleProtectedKeyDown(key), "On")
+                Hotkey("$~" key " up", (*) => HandleProtectedKeyUp(key), "On")
+
             case "monitor":
                 Hotkey("~" key, (*) => HandleMonitorKey(key), "On")
                 Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key), "On")
@@ -874,9 +900,17 @@ UnregisterHook(key) {
             case "monitor", "special":
                 Hotkey("~" key, "Off")
                 Hotkey("~" key " up", "Off")
+
+            case "protected":
+                Hotkey("$~" key, "Off")
+                Hotkey("$~" key " up", "Off")
         }
     } catch {
         ; 取消失败，静默处理
+    }
+
+    if (mode = "protected") {
+        ClearProtectedKeyState(key)
     }
 
     ; 删除记录
@@ -932,6 +966,92 @@ HandleSpecialKeyUp(key) {
     SendEventToPython("special_key_up:" key)
 }
 
+; 🛡️ 保护按键处理(如c大招)
+; 用户真实按键直达游戏($~ 不拦截),程序立即清非紧急队列+暂停调度,松开后延迟恢复
+HandleProtectedKeyDown(key) {
+    global QueueCounts, SpecialKeysPressed, SpecialKeysPaused
+
+    ; 1. 取消可能挂着的释放 timer (重置语义:连按 c 时第一次的 release 不会污染第二次的保护期)
+    CancelProtectedReleaseTimer(key)
+
+    ; 2. 清非紧急队列(保留 emergency 救命药剂)
+    if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
+        ClearNonEmergencyQueues()
+    }
+
+    ; 3. 进入暂停态(复用 SpecialKeysPaused 路径,Python 侧的 drop_non_emergency 也会启用)
+    was_paused := SpecialKeysPaused
+    SpecialKeysPressed[key] := true
+    SpecialKeysPaused := true
+
+    ; 只在从"未暂停"进入"暂停中"时通知 Python(避免连按重复 start)
+    if (!was_paused) {
+        SendEventToPython("special_key_pause:start")
+    }
+}
+
+HandleProtectedKeyUp(key) {
+    global ProtectedKeysConfig, ProtectedReleaseTimers
+
+    ; 防御:配置缺失也用 150ms 默认值,不能 return 让暂停态永远卡住
+    delay := ProtectedKeysConfig.Has(key) ? ProtectedKeysConfig[key].release_delay : 150
+
+    ; delay <= 0:立即释放,不走 timer (避免 SetTimer cb, 0 的歧义)
+    if (delay <= 0) {
+        DoProtectedRelease(key)
+        return
+    }
+
+    ; 显式 timer reset:取消旧 timer,设新 timer
+    ; (新 callback 是新对象,必须显式 cancel 旧的,不能依赖"同一函数自动重置")
+    CancelProtectedReleaseTimer(key)
+    cb := (*) => DoProtectedRelease(key)
+    ProtectedReleaseTimers[key] := cb
+    SetTimer(cb, -delay)   ; 负数 = 一次性
+}
+
+DoProtectedRelease(key) {
+    global ProtectedReleaseTimers, SpecialKeysPressed, SpecialKeysPaused
+
+    if (ProtectedReleaseTimers.Has(key)) {
+        ProtectedReleaseTimers.Delete(key)
+    }
+
+    if (SpecialKeysPressed.Has(key)) {
+        SpecialKeysPressed.Delete(key)
+    }
+
+    ; 全部松开 → 解除暂停 (兼容 protected 与 space 共存场景)
+    if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
+        SpecialKeysPaused := false
+        SendEventToPython("special_key_pause:end")
+    }
+}
+
+CancelProtectedReleaseTimer(key) {
+    global ProtectedReleaseTimers
+    if (ProtectedReleaseTimers.Has(key)) {
+        SetTimer(ProtectedReleaseTimers[key], 0)
+        ProtectedReleaseTimers.Delete(key)
+    }
+}
+
+; 切配置 / unregister 时统一清理保护态,防止旧 timer 触发污染新配置
+ClearProtectedKeyState(key) {
+    global ProtectedKeysConfig, SpecialKeysPressed, SpecialKeysPaused
+    CancelProtectedReleaseTimer(key)
+    if (ProtectedKeysConfig.Has(key)) {
+        ProtectedKeysConfig.Delete(key)
+    }
+    if (SpecialKeysPressed.Has(key)) {
+        SpecialKeysPressed.Delete(key)
+    }
+    if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
+        SpecialKeysPaused := false
+        SendEventToPython("special_key_pause:end")
+    }
+}
+
 ; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射 + 去重
 HandleManagedKey(key) {
     global ManagedKeysConfig, EmergencyQueue, HighQueue, NormalQueue, LowQueue, IsPaused
@@ -956,13 +1076,20 @@ HandleManagedKey(key) {
         config := ManagedKeysConfig[key]
         target := config.target
         delay := config.delay
+        hold_ms := config.HasOwnProp("hold_ms") ? config.hold_ms : 0
 
         ; 🚀 放入Emergency队列（使用EnqueueAction确保计数器同步）
         ; 🎯 按键前后都加delay - 用 delay_clear 确保延迟期间非紧急队列被清空,保护管理按键独占
         if (delay > 0) {
             EnqueueAction(0, "delay_clear:" delay)  ; 按键前delay,清非紧急队列
         }
-        EnqueueAction(0, "press:" target)
+        if (hold_ms > 0) {
+            EnqueueAction(0, "hold:" target)
+            EnqueueAction(0, "delay_clear:" hold_ms)
+            EnqueueAction(0, "release:" target)
+        } else {
+            EnqueueAction(0, "press:" target)
+        }
 
         if (delay > 0) {
             EnqueueAction(0, "delay_clear:" delay)  ; 按键后delay,清非紧急队列

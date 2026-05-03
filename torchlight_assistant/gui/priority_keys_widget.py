@@ -51,6 +51,7 @@ class PriorityKeysWidget(QWidget):
         # 🎯 新增：按键分类配置
         self.special_keys = {'space'}  # 特殊按键：不拦截，保持游戏原生
         self.managed_keys = {'right_mouse'}  # 管理按键：程序完全接管
+        self.protected_keys: Set[str] = set()  # 🛡️ 保护按键：用户真实按键放行+程序让路
         
         # 按键监听状态
         self._key_listening = False
@@ -73,7 +74,8 @@ class PriorityKeysWidget(QWidget):
         info_label = QLabel(
             "优先级按键：当这些按键被按下时，所有技能执行会暂停，确保优先级操作不被打断。\n"
             "🎯 特殊按键：保持游戏原生响应，程序仅监控状态（如空格闪避）\n"
-            "🔧 管理按键：程序完全接管，处理延迟和执行（如E键、右键技能）"
+            "🔧 管理按键：程序完全接管，处理延迟和执行（如E键、右键技能）\n"
+            "🛡️ 保护按键：用户真实按键直达游戏，程序清队列+让路+延迟恢复（如C大招）"
         )
         info_label.setWordWrap(True)
         info_label.setStyleSheet("color: #666; font-size: 9pt; margin-bottom: 5px;")
@@ -188,16 +190,20 @@ class PriorityKeysWidget(QWidget):
         self.managed_radio.setToolTip("程序完全接管，处理延迟和执行")
         self.mapping_radio = QRadioButton("🔁 映射按键")
         self.mapping_radio.setToolTip("拦截源按键，发送目标按键（解决Hook拦截问题）")
+        self.protected_radio = QRadioButton("🛡️ 保护按键")
+        self.protected_radio.setToolTip("用户真实按键直达游戏，程序清队列+让路+松开后延迟恢复（适合大招）")
         self.managed_radio.setChecked(True)  # 默认为管理按键
-        
+
         self.key_type_group.addButton(self.special_radio, 0)
         self.key_type_group.addButton(self.managed_radio, 1)
         self.key_type_group.addButton(self.mapping_radio, 2)
-        
+        self.key_type_group.addButton(self.protected_radio, 3)
+
         type_layout.addWidget(type_label)
         type_layout.addWidget(self.special_radio)
         type_layout.addWidget(self.managed_radio)
         type_layout.addWidget(self.mapping_radio)
+        type_layout.addWidget(self.protected_radio)
         type_layout.addStretch()
         add_layout.addLayout(type_layout)
         
@@ -238,6 +244,7 @@ class PriorityKeysWidget(QWidget):
         self.special_radio.toggled.connect(self._on_key_type_changed)
         self.managed_radio.toggled.connect(self._on_key_type_changed)
         self.mapping_radio.toggled.connect(self._on_key_type_changed)
+        self.protected_radio.toggled.connect(self._on_key_type_changed)
         
         # 添加按钮
         self.add_key_btn = QPushButton("➕ 添加按键")
@@ -460,10 +467,11 @@ class PriorityKeysWidget(QWidget):
         """加载默认按键配置 - 使用新格式"""
         # 清空当前配置
         self.priority_keys_config.clear()
-        
+
         # 新的默认配置：分层结构
         self.special_keys = {"space"}  # 空格：状态监控
         self.managed_keys = {"right_mouse"}  # 右键：程序接管
+        self.protected_keys = set()  # 🛡️ 保护按键默认空,按需添加(如 c 大招)
 
         self.priority_keys_config["space"] = 0         # 特殊按键：无延迟
         # 管理按键使用对象格式，默认自映射，便于与核心对齐
@@ -497,6 +505,14 @@ class PriorityKeysWidget(QWidget):
         
         display_name = key_names.get(key, f'{key.upper()}键')
         
+        # 🛡️ 保护按键优先识别(基于集合,不依赖配置形态)
+        if key in self.protected_keys:
+            if isinstance(config, dict):
+                rd = int(config.get('release_delay', 150))
+            else:
+                rd = int(config) if config else 150
+            return f"🛡️ {display_name} ({key}) - 释放保护 {rd}ms"
+
         if isinstance(config, dict):
             # 映射/管理按键（对象格式）
             target = str(config.get('target', '')).strip()
@@ -518,11 +534,17 @@ class PriorityKeysWidget(QWidget):
         """处理按键类型变化"""
         is_special = self.special_radio.isChecked()
         is_mapping = self.mapping_radio.isChecked()
-        
+        is_protected = self.protected_radio.isChecked()
+
         # 特殊按键：禁用延迟和目标输入
+        # 保护按键：复用 delay 输入框作为 release_delay,但禁用 target
         self.delay_input.setEnabled(not is_special)
         self.target_input.setEnabled(is_mapping)
-        
+
+        # 保护按键:延迟语义改成"释放保护",默认 150
+        if is_protected and self.delay_input.value() < 50:
+            self.delay_input.setValue(150)
+
         # 映射按键：显示提示
         if is_mapping:
             self.target_input.setFocus()
@@ -589,13 +611,14 @@ class PriorityKeysWidget(QWidget):
             self.priority_keys_config[key_name] = 0
             self.special_keys.add(key_name)
             self.managed_keys.discard(key_name)
+            self.protected_keys.discard(key_name)
             LOG_INFO(f"[优先级按键] 添加特殊按键: {key_name}")
         elif self.mapping_radio.isChecked():
             # 映射按键：需要目标按键
             if not target_key:
                 QMessageBox.warning(self, "警告", "映射按键必须输入目标按键")
                 return
-            
+
             # 使用字典格式存储映射信息
             self.priority_keys_config[key_name] = {
                 "target": target_key,
@@ -603,12 +626,22 @@ class PriorityKeysWidget(QWidget):
             }
             self.managed_keys.add(key_name)
             self.special_keys.discard(key_name)
+            self.protected_keys.discard(key_name)
             LOG_INFO(f"[优先级按键] 添加映射按键: {key_name} → {target_key} (延迟: {delay}ms)")
+        elif self.protected_radio.isChecked():
+            # 保护按键：仅记录 release_delay,不设 target/delay
+            release_delay = delay if delay > 0 else 150
+            self.priority_keys_config[key_name] = {"release_delay": release_delay}
+            self.protected_keys.add(key_name)
+            self.special_keys.discard(key_name)
+            self.managed_keys.discard(key_name)
+            LOG_INFO(f"[优先级按键] 添加保护按键: {key_name} (释放延迟: {release_delay}ms)")
         else:
             # 管理按键：使用对象格式，默认自映射
             self.priority_keys_config[key_name] = {"target": key_name, "delay": delay}
             self.managed_keys.add(key_name)
             self.special_keys.discard(key_name)
+            self.protected_keys.discard(key_name)
             LOG_INFO(f"[优先级按键] 添加管理按键: {key_name} (延迟: {delay}ms)")
         
         self._update_keys_display()
@@ -631,6 +664,7 @@ class PriorityKeysWidget(QWidget):
             # 🎯 从分类中移除
             self.special_keys.discard(key_name)
             self.managed_keys.discard(key_name)
+            self.protected_keys.discard(key_name)
             self._update_keys_display()
             self._on_selection_changed()  # 更新UI状态
             LOG_INFO(f"[优先级按键] 删除按键: {key_name}")
@@ -643,10 +677,14 @@ class PriorityKeysWidget(QWidget):
         
         key_name = current_item.data(Qt.ItemDataRole.UserRole)
         new_target = self._normalize_key_name(self.edit_target_input.text().strip())
-        
+
         if key_name in self.priority_keys_config:
             config = self.priority_keys_config[key_name]
             if isinstance(config, dict):
+                # 🔧 防御:目标未变化时直接 return,避免无意义的 _update_keys_display 重建+
+                # 重选+textChanged 链(双层保险,即使信号阻塞失效也不会死循环)
+                if str(config.get('target', '')) == new_target:
+                    return
                 config['target'] = new_target
                 self._update_keys_display()
                 
@@ -664,13 +702,19 @@ class PriorityKeysWidget(QWidget):
         current_item = self.keys_list.currentItem()
         if not current_item:
             return
-        
+
         key_name = current_item.data(Qt.ItemDataRole.UserRole)
         new_delay = self.edit_delay_input.value()
-        
+
         if key_name in self.priority_keys_config:
             config = self.priority_keys_config[key_name]
-            if isinstance(config, dict):
+            # 🛡️ 保护按键:延迟字段映射到 release_delay
+            if key_name in self.protected_keys:
+                if isinstance(config, dict):
+                    config['release_delay'] = new_delay
+                else:
+                    self.priority_keys_config[key_name] = {"release_delay": new_delay}
+            elif isinstance(config, dict):
                 # 映射按键：更新字典中的delay
                 config['delay'] = new_delay
             else:
@@ -709,10 +753,11 @@ class PriorityKeysWidget(QWidget):
         """应用预设配置 - 更新为新格式"""
         # 清空当前配置
         self.priority_keys_config.clear()
-        
+
         # 重新分类按键
         self.special_keys = set()
         self.managed_keys = set()
+        self.protected_keys = set()
         
         for key, delay in preset_config.items():
             if key == "space":
@@ -744,24 +789,36 @@ class PriorityKeysWidget(QWidget):
             key_name = current_item.data(Qt.ItemDataRole.UserRole)
             if key_name in self.priority_keys_config:
                 config = self.priority_keys_config[key_name]
-            
-                # 解析延迟值
-                if isinstance(config, dict):
-                    delay = config.get('delay', 0)
-                    # 确保delay是整数
-                    if isinstance(delay, str):
-                        try:
-                            delay = int(delay)
-                        except ValueError:
-                            delay = 0
-                    # 对象格式时允许编辑目标
-                    self.edit_target_input.setEnabled(True)
-                    self.edit_target_input.setText(str(config.get('target', '')))
-                else:
-                    delay = int(config)
-                    # 特殊按键不允许编辑目标
-                    self.edit_target_input.setEnabled(False)
-                    self.edit_target_input.clear()
+
+                # 🔧 必须 blockSignals,否则 setText/clear 会触发 textChanged →
+                # _update_selected_key_target → _update_keys_display → setCurrentItem
+                # → 再次进入本函数 → 死循环到栈溢出 (RButton 这类会被 normalize 改名的 key 必触发)
+                self.edit_target_input.blockSignals(True)
+                try:
+                    # 🛡️ 保护按键:用 release_delay 填 delay 输入框,target 禁用
+                    if key_name in self.protected_keys:
+                        if isinstance(config, dict):
+                            delay = int(config.get('release_delay', 150))
+                        else:
+                            delay = int(config) if config else 150
+                        self.edit_target_input.setEnabled(False)
+                        self.edit_target_input.clear()
+                    elif isinstance(config, dict):
+                        # 映射/管理按键
+                        delay = config.get('delay', 0)
+                        if isinstance(delay, str):
+                            try:
+                                delay = int(delay)
+                            except ValueError:
+                                delay = 0
+                        self.edit_target_input.setEnabled(True)
+                        self.edit_target_input.setText(str(config.get('target', '')))
+                    else:
+                        delay = int(config)
+                        self.edit_target_input.setEnabled(False)
+                        self.edit_target_input.clear()
+                finally:
+                    self.edit_target_input.blockSignals(False)
             
             # 更新延迟输入框
             self.edit_delay_input.blockSignals(True)  # 防止循环信号
@@ -800,59 +857,91 @@ class PriorityKeysWidget(QWidget):
                 }
             """)
             self.edit_target_input.setEnabled(False)
-            self.edit_target_input.clear()
+            self.edit_target_input.blockSignals(True)
+            try:
+                self.edit_target_input.clear()
+            finally:
+                self.edit_target_input.blockSignals(False)
 
     def get_config(self) -> Dict[str, Any]:
-        """获取当前配置 - 始终输出对象格式的管理按键信息"""
+        """获取当前配置 - 输出 special/managed/protected 三类"""
         managed_keys_config = {}
-        
-        # 从 priority_keys_config 中提取管理按键配置
+        protected_keys_config = {}
+
+        # 从 priority_keys_config 中提取管理 / 保护按键配置
         for key, config in self.priority_keys_config.items():
-            if key in self.managed_keys:
+            if key in self.protected_keys:
+                # 🛡️ 保护按键:仅 release_delay
+                if isinstance(config, dict):
+                    rd = int(config.get('release_delay', 150))
+                else:
+                    rd = int(config) if config else 150
+                protected_keys_config[key] = {"release_delay": rd}
+            elif key in self.managed_keys:
                 if isinstance(config, dict):
                     # 映射/管理按键：保持/输出对象格式
                     target = str(config.get('target', key)).strip() or key
                     delay = int(config.get('delay', 0))
-                    managed_keys_config[key] = {"target": target, "delay": delay}
+                    key_config = {"target": target, "delay": delay}
+                    hold_ms = int(config.get('hold_ms', 0))
+                    if hold_ms > 0:
+                        key_config["hold_ms"] = hold_ms
+                    managed_keys_config[key] = key_config
                 else:
                     # 兼容：将简单延迟转换为对象格式（默认自映射）
                     managed_keys_config[key] = {"target": key, "delay": int(config)}
-        
+
         return {
             "enabled": self.widgets["enabled"].isChecked(),
             "special_keys": list(self.special_keys),
-            "managed_keys": managed_keys_config
+            "managed_keys": managed_keys_config,
+            "protected_keys": protected_keys_config,
         }
 
     def set_config(self, config: Dict[str, Any]):
-        """设置配置 - 规范化为对象格式（管理按键）"""
+        """设置配置 - 解析 special/managed/protected 三类"""
         if "enabled" in config:
             self.widgets["enabled"].setChecked(config["enabled"])
-        
+
         # 新格式：分层配置
         special_keys = config.get("special_keys", [])
         managed_keys_config = config.get("managed_keys", {})
-        
+        protected_keys_config = config.get("protected_keys", {})
+
         # 重建priority_keys_config
         self.priority_keys_config = {}
         self.special_keys = set()
         self.managed_keys = set()
-        
+        self.protected_keys = set()
+
         # 特殊按键：延迟设为0
         for key in special_keys:
             self.priority_keys_config[key] = 0
             self.special_keys.add(key)
-        
+
         # 管理按键：规范为对象格式
         for key, val in managed_keys_config.items():
             if isinstance(val, dict):
                 target = str(val.get('target', key)).strip() or key
                 delay = int(val.get('delay', 0))
-                self.priority_keys_config[key] = {"target": target, "delay": delay}
+                key_config = {"target": target, "delay": delay}
+                hold_ms = int(val.get('hold_ms', 0))
+                if hold_ms > 0:
+                    key_config["hold_ms"] = hold_ms
+                self.priority_keys_config[key] = key_config
             else:
                 self.priority_keys_config[key] = {"target": key, "delay": int(val)}
             self.managed_keys.add(key)
-        
+
+        # 🛡️ 保护按键:仅 release_delay
+        for key, val in protected_keys_config.items():
+            if isinstance(val, dict):
+                rd = int(val.get('release_delay', 150))
+            else:
+                rd = int(val) if val else 150
+            self.priority_keys_config[key] = {"release_delay": rd}
+            self.protected_keys.add(key)
+
         self._update_keys_display()
 
     def get_priority_keys(self) -> Set[str]:

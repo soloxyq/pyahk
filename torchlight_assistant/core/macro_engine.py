@@ -290,34 +290,80 @@ class MacroEngine:
             if priority_config.get("enabled", False):
                 LOG_INFO("[热键管理] 优先级配置已启用")
 
-                # 注册特殊按键（如space, RButton）- 使用AHK标准按键名
+                # 跟踪已注册的业务热键,防止 special/managed/protected 跨类冲突
+                # 同一个 key 注册到多类会导致后注册的 Hotkey 覆盖前者,行为难排查
+                registered_business_keys: set[str] = set()
+
+                # 注册特殊按键（如space）- 使用AHK标准按键名
                 special_keys = priority_config.get("special_keys", [])
                 LOG_INFO(f"[热键管理] 特殊按键列表: {special_keys}")
                 LOG_INFO(f"[热键管理] 特殊按键数量: {len(special_keys)}")
                 for key in special_keys:
+                    key_lower = (key or "").lower()
+                    if key_lower in registered_business_keys:
+                        LOG_ERROR(
+                            f"[特殊按键] 跳过 '{key}': 已被其他类别注册,"
+                            f"special/managed/protected 不应共用同一按键"
+                        )
+                        continue
                     LOG_INFO(f"[热键管理] 准备注册特殊按键: '{key}' (类型: {type(key).__name__})")
                     if self.input_handler.register_hook(key, "special"):
+                        registered_business_keys.add(key_lower)
                         LOG_INFO(f"[特殊按键] 注册成功: {key} (special)")
                     else:
                         LOG_ERROR(f"[特殊按键] 注册失败: {key}")
 
-                # 注册管理按键（如e键）
+                # 注册管理按键（如RButton/e键,程序代按）
                 managed_keys = priority_config.get("managed_keys", {})
                 LOG_INFO(f"[热键管理] 管理按键配置: {managed_keys}")
                 for key, config in managed_keys.items():
+                    key_lower = (key or "").lower()
+                    if key_lower in registered_business_keys:
+                        LOG_ERROR(
+                            f"[管理按键] 跳过 '{key}': 已被其他类别注册,"
+                            f"special/managed/protected 不应共用同一按键"
+                        )
+                        continue
                     LOG_INFO(f"[热键管理] 准备注册管理按键: {key}, 配置: {config}")
                     if self.input_handler.register_hook(key, "priority"):
+                        registered_business_keys.add(key_lower)
                         target = config.get("target", key)
                         delay = config.get("delay", 0)
+                        hold_ms = config.get("hold_ms", 0)
                         # 发送管理按键配置到AHK
                         self.input_handler.command_sender.set_managed_key_config(
-                            key, target, delay
+                            key, target, delay, hold_ms
                         )
                         LOG_INFO(
-                            f"[管理按键] 注册成功: {key} -> {target} (延迟: {delay}ms)"
+                            f"[管理按键] 注册成功: {key} -> {target} "
+                            f"(延迟: {delay}ms, 按住: {hold_ms}ms)"
                         )
                     else:
                         LOG_ERROR(f"[管理按键] 注册失败: {key}")
+
+                # 注册保护按键（如c大招,真实按键直达游戏+程序让路）
+                protected_keys = priority_config.get("protected_keys", {})
+                LOG_INFO(f"[热键管理] 保护按键配置: {protected_keys}")
+                for key, config in protected_keys.items():
+                    key_lower = (key or "").lower()
+                    if key_lower in registered_business_keys:
+                        LOG_ERROR(
+                            f"[保护按键] 跳过 '{key}': 已被其他类别注册,"
+                            f"special/managed/protected 不应共用同一按键"
+                        )
+                        continue
+                    LOG_INFO(f"[热键管理] 准备注册保护按键: {key}, 配置: {config}")
+                    if self.input_handler.register_hook(key, "protected"):
+                        registered_business_keys.add(key_lower)
+                        release_delay = int(config.get("release_delay", 150))
+                        self.input_handler.command_sender.set_protected_key_config(
+                            key, release_delay
+                        )
+                        LOG_INFO(
+                            f"[保护按键] 注册成功: {key} (释放延迟: {release_delay}ms)"
+                        )
+                    else:
+                        LOG_ERROR(f"[保护按键] 注册失败: {key}")
             else:
                 LOG_INFO("[热键管理] 优先级配置未启用")
 

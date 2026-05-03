@@ -19,7 +19,7 @@ GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
 │  C++ DXGI 捕获(零拷贝) ──► BorderFrameManager   │    │ hold_server_   │
 │         │                       │                │    │ extended.ahk   │
 │         ▼                       ▼                │    │                │
-│  HSV 模板匹配 ──► SkillManager / ResourceManager │    │ 5 种 Hook 模式 │
+│  HSV 模板匹配 ──► SkillManager / ResourceManager │    │ 6 种 Hook 模式 │
 │                              │                  │    │ 4 级优先队列   │
 │                              ▼                  │    │ 异步 DelayUntil│
 │                        MacroEngine (状态机)     │    │ SendInput      │
@@ -70,8 +70,10 @@ GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
 | 强制移动键(默认 A)按住时,所有队列按键被替换为 `f` | **特性**:边跑边互动(D4/PoE2 拾取/对话技巧) |
 | 管理键(如 E)按下时清空非紧急队列 | **特性**:保护按键独占执行(E 通常映射闪避/强力技) |
 | 特殊键(如 Space)激活时丢弃非紧急入队 | **特性**:闪避期间不发新技能 |
+| 保护键(如 C 大招)按下时游戏直接收到物理按键(不走 SendInput),程序只清队列+让路 | **特性**:`protected_keys` 模式,松开后 `release_delay` 期间继续禁止自动键抢输入 |
 | PAUSED 状态完全停 HP/MP 检测 + 清所有队列 | **特性**:用户主动 Z 暂停 = 完全停下 |
 | F8/F7/F9 不在 RegisteredHooks 记录中 | **特性**:三个永久根热键,清理动态 Hook 时不碰它们 |
+| 同一个 key 不能同时出现在 special_keys / managed_keys / protected_keys | **特性**:跨类冲突会让后注册的 Hotkey 覆盖前者,Python 注册时检测重复并 LOG_ERROR 跳过后者 |
 
 **反模式**:看到这些不要急着报 BUG,先读 `wiki/02-架构与通信.md` 的"设计意图"段。
 
