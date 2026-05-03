@@ -96,6 +96,20 @@ class AHKCommandSender:
         """设置强制移动替换键"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_REPLACEMENT_KEY
         return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_REPLACEMENT_KEY, key)
+
+    def set_force_move_passthrough_keys(self, keys) -> bool:
+        """设置强制移动期间不被替换的白名单键(位移技能,如 RButton 闪现)
+
+        Args:
+            keys: 键名列表(可迭代),AHK 端会小写化匹配,空列表/None 清空白名单
+        """
+        from torchlight_assistant.config.ahk_commands import (
+            CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS,
+        )
+        param = ",".join(str(k).strip() for k in (keys or []) if str(k).strip())
+        return send_ahk_cmd(
+            self.window_title, CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS, param
+        )
     
     def clear_all_configurable_hooks(self) -> bool:
         """清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）"""
@@ -150,17 +164,6 @@ class AHKCommandSender:
         from torchlight_assistant.config.ahk_commands import CMD_SET_MANAGED_KEY_CONFIG
         param = f"{key}:{target}:{delay}:{hold_ms}"
         return send_ahk_cmd(self.window_title, CMD_SET_MANAGED_KEY_CONFIG, param)
-
-    def set_protected_key_config(self, key: str, release_delay: int) -> bool:
-        """设置保护按键配置 (用户真实按键直达游戏,程序让路+延迟恢复)
-
-        Args:
-            key: 保护键名 (如 'c')
-            release_delay: 松开后保护期延长的毫秒数 (推荐 100~250)
-        """
-        from torchlight_assistant.config.ahk_commands import CMD_SET_PROTECTED_KEY
-        param = f"{key}:{release_delay}"
-        return send_ahk_cmd(self.window_title, CMD_SET_PROTECTED_KEY, param)
 
     # ========================================================================
     # 队列操作

@@ -146,7 +146,8 @@
             "hotkey": "",
             "mode_type": "shift_modifier",
             "force_move_hotkey": "",
-            "force_move_replacement_key": "f"
+            "force_move_replacement_key": "f",
+            "force_move_passthrough_keys": []
         },
         "affix_reroll": {
             "enabled": true,

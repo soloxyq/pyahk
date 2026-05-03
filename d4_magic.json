@@ -1,14 +1,14 @@
 {
     "skills": {
         "Skill1": {
-            "Enabled": false,
+            "Enabled": true,
             "Key": "c",
             "Priority": false,
             "Timer": 200,
             "TriggerMode": 1,
             "CooldownCoordX": 795,
             "CooldownCoordY": 995,
-            "CooldownSize": 12,
+            "CooldownSize": 20,
             "ExecuteCondition": 0,
             "ConditionCoordX": 900,
             "ConditionCoordY": 600,
@@ -24,7 +24,7 @@
             "CooldownCoordX": 857,
             "CooldownCoordY": 995,
             "CooldownSize": 12,
-            "ExecuteCondition": 2,
+            "ExecuteCondition": 0,
             "ConditionCoordX": 1310,
             "ConditionCoordY": 992,
             "ConditionColor": 0,
@@ -146,7 +146,8 @@
             "hotkey": "xbutton1",
             "mode_type": "shift_modifier",
             "force_move_hotkey": "a",
-            "force_move_replacement_key": "f"
+            "force_move_replacement_key": "f",
+            "force_move_passthrough_keys": ["RButton", "space"]
         },
         "affix_reroll": {
             "enabled": true,
@@ -237,11 +238,6 @@
                 "RButton": {
                     "target": "RButton",
                     "delay": 25
-                }
-            },
-            "protected_keys": {
-                "c": {
-                    "release_delay": 50
                 }
             }
         },

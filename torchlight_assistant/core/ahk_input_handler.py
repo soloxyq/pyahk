@@ -266,7 +266,11 @@ class AHKInputHandler:
     def set_force_move_replacement_key(self, key: str) -> bool:
         """设置强制移动替换键"""
         return self.command_sender.set_force_move_replacement_key(key)
-    
+
+    def set_force_move_passthrough_keys(self, keys) -> bool:
+        """设置强制移动白名单(位移技能,如 RButton 闪现)"""
+        return self.command_sender.set_force_move_passthrough_keys(keys)
+
     def clear_all_configurable_hooks(self) -> bool:
         """清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）"""
         return self.command_sender.clear_all_configurable_hooks()

@@ -169,18 +169,26 @@ class StationaryModeWidget(QWidget):
         self.force_move_replacement_key_entry.setPlaceholderText("默认: f")
         grid_layout.addWidget(self.force_move_replacement_key_entry, 3, 1)
 
+        # 强制移动白名单
+        grid_layout.addWidget(QLabel("强制移动白名单:"), 4, 0)
+        self.force_move_passthrough_keys_entry = ConfigLineEdit()
+        self.force_move_passthrough_keys_entry.setMaximumHeight(32)
+        self.force_move_passthrough_keys_entry.setPlaceholderText("如: RButton, space")
+        grid_layout.addWidget(self.force_move_passthrough_keys_entry, 4, 1)
+
         description_label = QLabel(
             "• 原地模式: 开启后，角色将原地释放技能而不移动。\n"
             "• 交互/强制移动键: 按住此键将临时屏蔽所有技能，只执行移动（鼠标左键）或交互。\n"
-            "• 交互替换键: 交互模式激活时，所有技能键将被替换为此键（通常设置为移动键，如f）。"
+            "• 交互替换键: 交互模式激活时，非白名单技能键将被替换为此键（通常设置为移动键，如f）。\n"
+            "• 强制移动白名单: 逗号分隔，白名单键和 HP/MP 紧急药剂不会被替换。"
         )
         description_label.setStyleSheet("color: #888888; font-size: 9pt;")
         description_label.setWordWrap(True)
-        grid_layout.addWidget(description_label, 4, 0, 1, 2)
+        grid_layout.addWidget(description_label, 5, 0, 1, 2)
 
         self.status_label = QLabel("当前未设置")
         self.status_label.setStyleSheet("color: #4a90e2; font-weight: bold;")
-        grid_layout.addWidget(self.status_label, 5, 0, 1, 2)
+        grid_layout.addWidget(self.status_label, 6, 0, 1, 2)
 
         layout.addWidget(group)
         layout.addStretch()
@@ -190,6 +198,7 @@ class StationaryModeWidget(QWidget):
         stationary_hotkey = self.hotkey_entry.text().strip().lower()
         force_move_hotkey = self.force_move_hotkey_entry.text().strip().lower()
         force_move_replacement_key = self.force_move_replacement_key_entry.text().strip().lower()
+        force_move_passthrough_keys = self._parse_force_move_passthrough_keys()
 
         return {
             "stationary_mode_config": {
@@ -201,6 +210,7 @@ class StationaryModeWidget(QWidget):
                 ),
                 "force_move_hotkey": force_move_hotkey if force_move_hotkey else "",
                 "force_move_replacement_key": force_move_replacement_key if force_move_replacement_key else "f",
+                "force_move_passthrough_keys": force_move_passthrough_keys,
             }
         }
 
@@ -208,7 +218,13 @@ class StationaryModeWidget(QWidget):
         """从配置更新UI"""
         stationary_config = config.get(
             "stationary_mode_config",
-            {"hotkey": "", "mode_type": "block_mouse", "force_move_hotkey": "", "force_move_replacement_key": "f"},
+            {
+                "hotkey": "",
+                "mode_type": "block_mouse",
+                "force_move_hotkey": "",
+                "force_move_replacement_key": "f",
+                "force_move_passthrough_keys": [],
+            },
         )
 
         self.hotkey_entry.setText(stationary_config.get("hotkey", ""))
@@ -217,6 +233,9 @@ class StationaryModeWidget(QWidget):
         )
         self.force_move_replacement_key_entry.setText(
             stationary_config.get("force_move_replacement_key", "f")
+        )
+        self.force_move_passthrough_keys_entry.setText(
+            ", ".join(stationary_config.get("force_move_passthrough_keys", []) or [])
         )
 
         mode_type = stationary_config.get("mode_type", "block_mouse")
@@ -237,6 +256,42 @@ class StationaryModeWidget(QWidget):
                 status_parts.append(f"交互键: {force_move_hotkey.upper()}")
             status_text = " | ".join(status_parts) + f" ({mode_desc})"
             self.status_label.setText(status_text)
+
+    def _parse_force_move_passthrough_keys(self) -> list[str]:
+        """解析强制移动白名单，逗号分隔，保持 AHK 标准名大小写。"""
+        raw = self.force_move_passthrough_keys_entry.text().strip()
+        if not raw:
+            return []
+        keys = []
+        for part in raw.split(","):
+            key = self._normalize_passthrough_key(part.strip())
+            if key:
+                keys.append(key)
+        return keys
+
+    def _normalize_passthrough_key(self, key: str) -> str:
+        """把常见鼠标别名归一为 AHK 标准名。"""
+        if not key:
+            return ""
+
+        normalized = key.lower().strip()
+        key_mapping = {
+            "left_mouse": "LButton",
+            "leftmouse": "LButton",
+            "mouse_left": "LButton",
+            "lbutton": "LButton",
+            "leftclick": "LButton",
+            "right_mouse": "RButton",
+            "rightmouse": "RButton",
+            "mouse_right": "RButton",
+            "rbutton": "RButton",
+            "rightclick": "RButton",
+            "middle_mouse": "MButton",
+            "middlemouse": "MButton",
+            "mouse_middle": "MButton",
+            "mbutton": "MButton",
+        }
+        return key_mapping.get(normalized, key.strip())
 
 
 class PathfindingWidget(QWidget):

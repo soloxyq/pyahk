@@ -45,13 +45,6 @@ global SpecialKeysPaused := false   ; 特殊按键是否导致系统暂停
 
 ; 🎯 新增：管理按键配置存储
 global ManagedKeysConfig := Map()   ; 存储管理按键的延迟和映射配置
-
-; 🛡️ 保护按键(protected_keys):用户真实按键直达游戏,程序让路并延迟恢复
-; 与 special_keys 的区别:protected 在按下瞬间会清非紧急队列(更强保护)
-; 与 managed_keys 的区别:protected 不重发按键(用户的物理输入直接到游戏)
-global ProtectedKeysConfig := Map()      ; key → {release_delay}
-global ProtectedReleaseTimers := Map()   ; key → 一次性 timer callback,用于显式重置
-
 global TargetWin := "" ; 目标窗口标识符
 
 ; 🎯 新增：紧急按键缓存（Master方案学习）
@@ -70,6 +63,7 @@ global StationaryModeType := ""  ; 由Python设置，默认为空（未启用）
 global ForceMoveKey := ""  ; 由Python设置，默认为空（未启用）
 global ForceMoveActive := false  ; 强制移动键是否处于按下状态
 global ForceMoveReplacementKey := ""  ; 强制移动时的替换键，由Python设置，默认为空
+global ForceMovePassthroughKeys := Map()  ; 强制移动期间不被替换的白名单(位移技能,如 RButton 闪现)
 
 ; 发送模式
 global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控件发送(ControlSend)
@@ -137,7 +131,7 @@ ProcessQueue() {
     ; 🎯 检查是否在异步延迟中
     if (DelayUntil > 0) {
         if (A_TickCount < DelayUntil) {
-            ; 🔧 BUG修复(#2): 只在管理按键引发的 delay 期间清空非紧急队列(保护按键独占)
+            ; 🔧 BUG修复(#2): 只在管理按键引发的 delay 期间清空非紧急队列(保证管理键独占)
             ; 普通 sequence 内的 delay 不应清掉自己后续的项,否则 "q,delay100,w" 中 w 会丢失
             if (DelayClearOthers && (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0)) {
                 ClearNonEmergencyQueues()
@@ -356,19 +350,6 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ClearAllConfigurableHooks()
             return 1
 
-        case CMD_SET_PROTECTED_KEY:
-            ; SET_PROTECTED_KEY - 设置保护按键配置
-            ; 参数格式: "key:release_delay" 例如: "c:150"
-            global ProtectedKeysConfig
-            parts := CachedStrSplit(param, ":")
-            if (parts.Length >= 2) {
-                key := parts[1]
-                release_delay := Integer(parts[2])
-                ProtectedKeysConfig[key] := { release_delay: release_delay }
-                return 1
-            }
-            return 0
-
         case CMD_SET_FORCE_MOVE_REPLACEMENT_KEY:
             ; SET_FORCE_MOVE_REPLACEMENT_KEY - 设置强制移动替换键
             ; 参数格式: "key" 例如: "f"，空字符串使用默认值"f"
@@ -377,6 +358,23 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 ForceMoveReplacementKey := param
             } else {
                 ForceMoveReplacementKey := "f"  ; 默认值
+            }
+            return 1
+
+        case CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS:
+            ; SET_FORCE_MOVE_PASSTHROUGH_KEYS - 设置强制移动白名单
+            ; 参数格式: 逗号分隔的键名小写,如 "rbutton,space"
+            ; 空字符串清空白名单(强制移动期间非紧急键都替换)
+            global ForceMovePassthroughKeys
+            ForceMovePassthroughKeys := Map()
+            if (param != "") {
+                keys := CachedStrSplit(param, ",")
+                for index, k in keys {
+                    k := Trim(k)
+                    if (k != "") {
+                        ForceMovePassthroughKeys[CachedStrLower(k)] := true
+                    }
+                }
             }
             return 1
 
@@ -695,7 +693,7 @@ ExecuteAction(action) {
     ; 🚀 解析动作类型（使用缓存分割）
     parts := CachedStrSplit(action, ":", , 2)
     if parts.Length < 2 {
-        SendPress(action) ; 兼容旧的直接发送key的模式
+        SendPress(action, IsEmergencyAction(action)) ; 兼容旧的直接发送key的模式
         return
     }
 
@@ -705,7 +703,7 @@ ExecuteAction(action) {
     ; 🚀 执行动作（直接常量比较，无函数调用开销）
     ; 注意: sequence 已在 EnqueueAction 入口展开为多个原子动作,此处不再处理
     if (actionType = ACTION_PRESS) {
-        SendPress(actionData)
+        SendPress(actionData, IsEmergencyAction(action))
     } else if (actionType = ACTION_HOLD) {
         SendDown(actionData)
     } else if (actionType = ACTION_RELEASE) {
@@ -718,7 +716,7 @@ ExecuteAction(action) {
         DelayUntil := A_TickCount + Integer(actionData)
         DelayClearOthers := false
     } else if (actionType = "delay_clear") {
-        ; 🔧 管理按键专用延迟:延迟期间清空非紧急队列,保护按键独占执行
+        ; 🔧 管理按键专用延迟:延迟期间清空非紧急队列,保证管理键独占执行
         DelayUntil := A_TickCount + Integer(actionData)
         DelayClearOthers := true
     } else if (actionType = ACTION_NOTIFY) {
@@ -727,14 +725,19 @@ ExecuteAction(action) {
     }
 }
 
-SendPress(key) {
+SendPress(key, forceMoveBypass := false) {
     ; 发送按键 (按下并释放，最小延时)
-    global ForceMoveActive, ForceMoveReplacementKey, SendKeyMode, TargetWin
+    global ForceMoveActive, ForceMoveReplacementKey, ForceMovePassthroughKeys, SendKeyMode, TargetWin
 
-    ; 如果强制移动键按下，所有队列中的按键都替换为配置的替换键
-    if (ForceMoveActive) {
-        SendKeyInternal(ForceMoveReplacementKey)
-        return
+    ; 强制移动期间,白名单内的按键(位移技能如 RButton 闪现)正常发送,
+    ; 其他按键全部替换为配置的替换键(通常是交互键 F,实现"边跑边捡装备/对话")
+    ; HP/MP 等紧急动作永远绕过替换,否则会出现边跑路边把药剂替换成 F 的致命问题
+    if (ForceMoveActive && !forceMoveBypass) {
+        if (!ForceMovePassthroughKeys.Has(CachedStrLower(key))) {
+            SendKeyInternal(ForceMoveReplacementKey)
+            return
+        }
+        ; 在白名单里 → 落到下面的正常发送路径
     }
 
     ; 正常按键处理
@@ -863,11 +866,6 @@ RegisterHook(key, mode) {
                 Hotkey("~" key, (*) => HandleSpecialKeyDown(key), "On")
                 Hotkey("~" key " up", (*) => HandleSpecialKeyUp(key), "On")
 
-            case "protected":
-                ; $~ 双前缀: ~ 放行真实按键给游戏, $ 防止脚本自己 Send 时反触发
-                Hotkey("$~" key, (*) => HandleProtectedKeyDown(key), "On")
-                Hotkey("$~" key " up", (*) => HandleProtectedKeyUp(key), "On")
-
             case "monitor":
                 Hotkey("~" key, (*) => HandleMonitorKey(key), "On")
                 Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key), "On")
@@ -900,17 +898,9 @@ UnregisterHook(key) {
             case "monitor", "special":
                 Hotkey("~" key, "Off")
                 Hotkey("~" key " up", "Off")
-
-            case "protected":
-                Hotkey("$~" key, "Off")
-                Hotkey("$~" key " up", "Off")
         }
     } catch {
         ; 取消失败，静默处理
-    }
-
-    if (mode = "protected") {
-        ClearProtectedKeyState(key)
     }
 
     ; 删除记录
@@ -964,92 +954,6 @@ HandleSpecialKeyUp(key) {
 
     ; 通知Python特殊按键状态
     SendEventToPython("special_key_up:" key)
-}
-
-; 🛡️ 保护按键处理(如c大招)
-; 用户真实按键直达游戏($~ 不拦截),程序立即清非紧急队列+暂停调度,松开后延迟恢复
-HandleProtectedKeyDown(key) {
-    global QueueCounts, SpecialKeysPressed, SpecialKeysPaused
-
-    ; 1. 取消可能挂着的释放 timer (重置语义:连按 c 时第一次的 release 不会污染第二次的保护期)
-    CancelProtectedReleaseTimer(key)
-
-    ; 2. 清非紧急队列(保留 emergency 救命药剂)
-    if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
-        ClearNonEmergencyQueues()
-    }
-
-    ; 3. 进入暂停态(复用 SpecialKeysPaused 路径,Python 侧的 drop_non_emergency 也会启用)
-    was_paused := SpecialKeysPaused
-    SpecialKeysPressed[key] := true
-    SpecialKeysPaused := true
-
-    ; 只在从"未暂停"进入"暂停中"时通知 Python(避免连按重复 start)
-    if (!was_paused) {
-        SendEventToPython("special_key_pause:start")
-    }
-}
-
-HandleProtectedKeyUp(key) {
-    global ProtectedKeysConfig, ProtectedReleaseTimers
-
-    ; 防御:配置缺失也用 150ms 默认值,不能 return 让暂停态永远卡住
-    delay := ProtectedKeysConfig.Has(key) ? ProtectedKeysConfig[key].release_delay : 150
-
-    ; delay <= 0:立即释放,不走 timer (避免 SetTimer cb, 0 的歧义)
-    if (delay <= 0) {
-        DoProtectedRelease(key)
-        return
-    }
-
-    ; 显式 timer reset:取消旧 timer,设新 timer
-    ; (新 callback 是新对象,必须显式 cancel 旧的,不能依赖"同一函数自动重置")
-    CancelProtectedReleaseTimer(key)
-    cb := (*) => DoProtectedRelease(key)
-    ProtectedReleaseTimers[key] := cb
-    SetTimer(cb, -delay)   ; 负数 = 一次性
-}
-
-DoProtectedRelease(key) {
-    global ProtectedReleaseTimers, SpecialKeysPressed, SpecialKeysPaused
-
-    if (ProtectedReleaseTimers.Has(key)) {
-        ProtectedReleaseTimers.Delete(key)
-    }
-
-    if (SpecialKeysPressed.Has(key)) {
-        SpecialKeysPressed.Delete(key)
-    }
-
-    ; 全部松开 → 解除暂停 (兼容 protected 与 space 共存场景)
-    if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
-        SpecialKeysPaused := false
-        SendEventToPython("special_key_pause:end")
-    }
-}
-
-CancelProtectedReleaseTimer(key) {
-    global ProtectedReleaseTimers
-    if (ProtectedReleaseTimers.Has(key)) {
-        SetTimer(ProtectedReleaseTimers[key], 0)
-        ProtectedReleaseTimers.Delete(key)
-    }
-}
-
-; 切配置 / unregister 时统一清理保护态,防止旧 timer 触发污染新配置
-ClearProtectedKeyState(key) {
-    global ProtectedKeysConfig, SpecialKeysPressed, SpecialKeysPaused
-    CancelProtectedReleaseTimer(key)
-    if (ProtectedKeysConfig.Has(key)) {
-        ProtectedKeysConfig.Delete(key)
-    }
-    if (SpecialKeysPressed.Has(key)) {
-        SpecialKeysPressed.Delete(key)
-    }
-    if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
-        SpecialKeysPaused := false
-        SendEventToPython("special_key_pause:end")
-    }
 }
 
 ; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射 + 去重

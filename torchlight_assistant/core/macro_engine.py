@@ -290,7 +290,7 @@ class MacroEngine:
             if priority_config.get("enabled", False):
                 LOG_INFO("[热键管理] 优先级配置已启用")
 
-                # 跟踪已注册的业务热键,防止 special/managed/protected 跨类冲突
+                # 跟踪已注册的业务热键,防止 special/managed 跨类冲突
                 # 同一个 key 注册到多类会导致后注册的 Hotkey 覆盖前者,行为难排查
                 registered_business_keys: set[str] = set()
 
@@ -303,7 +303,7 @@ class MacroEngine:
                     if key_lower in registered_business_keys:
                         LOG_ERROR(
                             f"[特殊按键] 跳过 '{key}': 已被其他类别注册,"
-                            f"special/managed/protected 不应共用同一按键"
+                            f"special/managed 不应共用同一按键"
                         )
                         continue
                     LOG_INFO(f"[热键管理] 准备注册特殊按键: '{key}' (类型: {type(key).__name__})")
@@ -321,7 +321,7 @@ class MacroEngine:
                     if key_lower in registered_business_keys:
                         LOG_ERROR(
                             f"[管理按键] 跳过 '{key}': 已被其他类别注册,"
-                            f"special/managed/protected 不应共用同一按键"
+                            f"special/managed 不应共用同一按键"
                         )
                         continue
                     LOG_INFO(f"[热键管理] 准备注册管理按键: {key}, 配置: {config}")
@@ -340,30 +340,6 @@ class MacroEngine:
                         )
                     else:
                         LOG_ERROR(f"[管理按键] 注册失败: {key}")
-
-                # 注册保护按键（如c大招,真实按键直达游戏+程序让路）
-                protected_keys = priority_config.get("protected_keys", {})
-                LOG_INFO(f"[热键管理] 保护按键配置: {protected_keys}")
-                for key, config in protected_keys.items():
-                    key_lower = (key or "").lower()
-                    if key_lower in registered_business_keys:
-                        LOG_ERROR(
-                            f"[保护按键] 跳过 '{key}': 已被其他类别注册,"
-                            f"special/managed/protected 不应共用同一按键"
-                        )
-                        continue
-                    LOG_INFO(f"[热键管理] 准备注册保护按键: {key}, 配置: {config}")
-                    if self.input_handler.register_hook(key, "protected"):
-                        registered_business_keys.add(key_lower)
-                        release_delay = int(config.get("release_delay", 150))
-                        self.input_handler.command_sender.set_protected_key_config(
-                            key, release_delay
-                        )
-                        LOG_INFO(
-                            f"[保护按键] 注册成功: {key} (释放延迟: {release_delay}ms)"
-                        )
-                    else:
-                        LOG_ERROR(f"[保护按键] 注册失败: {key}")
             else:
                 LOG_INFO("[热键管理] 优先级配置未启用")
 
@@ -845,6 +821,20 @@ class MacroEngine:
                 self.input_handler.set_force_move_replacement_key("")
                 LOG_INFO("[强制移动替换键] 用户未配置，已清空AHK配置")
 
+            # 强制移动期间不被替换的白名单(位移技能等,如 RButton 闪现)
+            # 总是下发,即使空列表也要清空 AHK 端旧值
+            passthrough_keys = stationary_config.get(
+                "force_move_passthrough_keys", []
+            ) or []
+            self.input_handler.set_force_move_passthrough_keys(passthrough_keys)
+            if passthrough_keys:
+                LOG_INFO(
+                    f"[强制移动白名单] 已设置到AHK: {passthrough_keys} "
+                    f"(强制移动期间这些键正常发送,不替换为 {stationary_config.get('force_move_replacement_key', '')})"
+                )
+            else:
+                LOG_INFO("[强制移动白名单] 已清空AHK配置(强制移动期间非紧急键都替换)")
+
             # 🎯 新增：批量更新AHK紧急按键缓存（修复BUG）
             self._update_ahk_emergency_keys_cache(global_config)
             
@@ -1096,6 +1086,8 @@ class MacroEngine:
                 "mode_type": "block_mouse",
                 "hotkey": "",
                 "force_move_hotkey": "",
+                "force_move_replacement_key": "f",
+                "force_move_passthrough_keys": [],
             },
             "affix_reroll": {
                 "enabled": False,
