@@ -1,6 +1,8 @@
 """重构后的MacroEngine - 专注于状态管理和事件协调"""
 
+import json
 import threading
+from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
 from .config_manager import ConfigManager
@@ -17,6 +19,9 @@ from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 class MacroEngine:
     """重构后的宏引擎 - 专注于状态管理和事件协调"""
 
+    DEFAULT_CONFIG_FILE = "default.json"
+    APP_STATE_FILE = Path(__file__).resolve().parents[2] / ".pyahk_state.json"
+
     VALID_TRANSITIONS = {
         MacroState.STOPPED: [MacroState.READY],
         MacroState.READY: [MacroState.RUNNING, MacroState.STOPPED],
@@ -24,7 +29,7 @@ class MacroEngine:
         MacroState.PAUSED: [MacroState.RUNNING, MacroState.STOPPED],
     }
 
-    def __init__(self, sound_manager=None, config_file: str = "default.json"):
+    def __init__(self, sound_manager=None, config_file: str = DEFAULT_CONFIG_FILE):
         self._state = MacroState.STOPPED
         self._prepared_mode = "none"  # 'none', 'combat', 'pathfinding'
         self._state_lock = threading.RLock()
@@ -33,7 +38,7 @@ class MacroEngine:
         self._cleanup_done = False
         self._skills_config: Dict[str, Any] = {}
         self._global_config: Dict[str, Any] = {}
-        self.current_config_file = config_file
+        self.current_config_file = self._resolve_initial_config_file(config_file)
         self._is_debug_mode_active = (
             False  # 跟踪当前是否处于调试模式（由配置和状态决定）
         )
@@ -98,6 +103,59 @@ class MacroEngine:
 
         # 注册 F8/F7/F9 永久根热键
         self._setup_primary_hotkey()
+
+    def _resolve_initial_config_file(self, fallback_config_file: str) -> str:
+        """启动时优先加载上次成功使用的配置文件。"""
+        if fallback_config_file != self.DEFAULT_CONFIG_FILE:
+            return fallback_config_file
+
+        last_config_file = self._load_last_config_file()
+        if not last_config_file:
+            return fallback_config_file
+
+        last_path = Path(last_config_file)
+        try:
+            if last_path.exists() and last_path.stat().st_size > 0:
+                LOG_INFO(f"[配置加载] 使用上次配置文件: {last_config_file}")
+                return last_config_file
+        except OSError as e:
+            LOG_ERROR(f"[配置加载] 检查上次配置文件失败: {last_config_file}, {e}")
+
+        LOG_INFO(
+            f"[配置加载] 上次配置文件不可用: {last_config_file}, 回退到 {fallback_config_file}"
+        )
+        return fallback_config_file
+
+    def _load_last_config_file(self) -> str:
+        """读取本机应用状态中的最后配置文件路径。"""
+        if not self.APP_STATE_FILE.exists():
+            return ""
+
+        try:
+            with open(self.APP_STATE_FILE, "r", encoding="utf-8") as f:
+                state = json.load(f)
+            return str(state.get("last_config_file", "")).strip()
+        except (OSError, json.JSONDecodeError) as e:
+            LOG_ERROR(f"[配置加载] 读取应用状态失败: {e}")
+            return ""
+
+    def _remember_config_file(self, config_file: str):
+        """记录最后成功加载/保存的配置文件,供下次启动恢复。"""
+        if not config_file:
+            return
+
+        self.current_config_file = config_file
+        try:
+            with open(self.APP_STATE_FILE, "w", encoding="utf-8", newline="\n") as f:
+                json.dump(
+                    {"last_config_file": config_file},
+                    f,
+                    ensure_ascii=False,
+                    indent=2,
+                )
+                f.write("\n")
+        except OSError as e:
+            LOG_ERROR(f"[配置加载] 保存应用状态失败: {e}")
 
     def _setup_event_subscriptions(self):
         event_bus.subscribe("ui:load_config_requested", self.load_config)
@@ -934,6 +992,7 @@ class MacroEngine:
             event_bus.publish(
                 "engine:config_updated", self._skills_config, self._global_config
             )
+            self._remember_config_file(config_file)
         except Exception as e:
             LOG_ERROR(f"加载配置文件 '{config_file}' 失败: {e}")
 
@@ -946,6 +1005,7 @@ class MacroEngine:
                 "engine:config_updated", self._skills_config, self._global_config
             )
             self.config_manager.save_config(full_config, file_path)
+            self._remember_config_file(file_path)
         except Exception as e:
             LOG_ERROR(f"保存配置文件 '{file_path}' 失败: {e}")
 

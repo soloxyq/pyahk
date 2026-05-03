@@ -5,6 +5,7 @@ __pycache__/
 .bmad-core/
 .claude/
 .env
+.pyahk_state.json
 # C extensions
 *.so
 *.exe

@@ -171,7 +171,9 @@ class GameSkillConfigUI(QMainWindow):
 
     def _load_initial_config_to_ui(self):
         if self.top_controls:
-            self.top_controls.set_current_config("default.json")
+            self.top_controls.set_current_config(
+                os.path.basename(self.macro_engine.current_config_file)
+            )
         event_bus.publish("ui:request_current_config")
 
     def _perform_macro_state_changed_ui(self, new_state: MacroState):

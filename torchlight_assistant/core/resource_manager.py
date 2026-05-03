@@ -537,13 +537,18 @@ class ResourceManager:
 
     def auto_detect_orbs(self, orb_type: str) -> Dict[str, Dict[str, Any]]:
         """
-        根据指定的球体类型（'hp'或'mp'），在屏幕的特定角落区域内自动检测球体。
+        在屏幕底部 HUD 区域自动检测 HP/MP 圆球。
+
+        ROI 覆盖底部 30% 高度的整个左/右半屏,适配多种 ARPG 布局:
+        - 中央偏侧(D4): HP ~x=600, MP ~x=1300
+        - 角落布局(PoE2): HP ~x=120, MP ~x=1790
+        - Torchlight 等其他: 落在底部左/右半区均可
 
         Args:
-            orb_type (str): 要检测的球体类型，'hp' 或 'mp'。
+            orb_type (str): 'hp' 或 'mp'
 
         Returns:
-            Dict[str, Dict[str, Any]]: 检测结果，只包含指定类型的球体信息。
+            Dict[str, Dict[str, Any]]: 检测结果,只包含指定类型的球体信息。
         """
         try:
             import cv2
@@ -555,16 +560,17 @@ class ResourceManager:
                 return {}
 
             h, w = frame.shape[:2]
-            roi_size = 400  # 定义我们关心的角落区域大小
+            # 底部 30% 高度作为 HUD 候选区(从 y=0.7h 到 y=h)
+            # 左/右半屏分别给 HP/MP — 兼容中央和角落两种布局
+            bottom_y = int(h * 0.7)
+            mid_x = int(w * 0.5)
 
             if orb_type == 'hp':
-                # 左下角区域
-                roi = frame[h - roi_size:h, 0:roi_size]
-                offset_x, offset_y = 0, h - roi_size
+                roi = frame[bottom_y:h, 0:mid_x]
+                offset_x, offset_y = 0, bottom_y
             elif orb_type == 'mp':
-                # 右下角区域
-                roi = frame[h - roi_size:h, w - roi_size:w]
-                offset_x, offset_y = w - roi_size, h - roi_size
+                roi = frame[bottom_y:h, mid_x:w]
+                offset_x, offset_y = mid_x, bottom_y
             else:
                 LOG_ERROR(f"[ResourceManager] 无效的球体类型: {orb_type}")
                 return {}
@@ -572,6 +578,7 @@ class ResourceManager:
             gray = cv2.cvtColor(roi, cv2.COLOR_BGR2GRAY)
             gray_blurred = cv2.GaussianBlur(gray, (9, 9), 2)
 
+            # 半径范围放宽以兼容多游戏:D4 实测 ~68, PoE2 ~78, 留余地至 45-115
             circles = cv2.HoughCircles(
                 gray_blurred,
                 cv2.HOUGH_GRADIENT,
@@ -579,8 +586,8 @@ class ResourceManager:
                 minDist=500,
                 param1=50,
                 param2=40,
-                minRadius=75,
-                maxRadius=95
+                minRadius=45,
+                maxRadius=115
             )
 
             if circles is None:
@@ -590,9 +597,8 @@ class ResourceManager:
             detected_circles = circles[0]
             LOG_INFO(f"[ResourceManager] 在 {orb_type} 区域检测到 {len(detected_circles)} 个圆形")
 
-            # 在小区域内，我们通常只需要找到最清晰的那个圆即可
-            # 这里我们假设第一个被找到的圆就是目标
-            target_circle = detected_circles[0]
+            # 选半径最大的圆 — HP/MP 球通常是 HUD 里最大的圆形,优于 Hough 投票顺序
+            target_circle = max(detected_circles, key=lambda c: c[2])
             
             # 将ROI内的相对坐标转换回全屏绝对坐标
             roi_cx, roi_cy, roi_r = target_circle
