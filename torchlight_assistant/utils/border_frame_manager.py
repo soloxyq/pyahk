@@ -354,8 +354,17 @@ class BorderFrameManager:
             LOG_ERROR(f"从帧中获取像素颜色时异常: {e}")
             return None
 
-    def _create_enhanced_color_mask(self, hsv_region: np.ndarray, template_hsv: np.ndarray, resource_type: str, h_tolerance: int, s_tolerance: int, v_tolerance: int) -> np.ndarray:
-        """创建增强的颜色掩码，支持红色双区间处理"""
+    def _create_enhanced_color_mask(
+        self,
+        hsv_region: np.ndarray,
+        template_hsv: np.ndarray,
+        resource_type: str,
+        h_tolerance: int,
+        s_tolerance: int,
+        v_tolerance: int,
+        color_config: Optional[dict] = None,
+    ) -> np.ndarray:
+        """创建增强的颜色掩码，支持红色双区间和 D4 屏障色处理。"""
         # 对于HP资源，使用红色双区间处理
         if resource_type == 'hp':
             # 红色的H值分布在0-10和170-179两个区间
@@ -384,7 +393,27 @@ class BorderFrameManager:
         s_match = s_diff <= s_tolerance
         v_match = v_diff <= v_tolerance
         
-        return h_match & s_match & v_match
+        resource_match = h_match & s_match & v_match
+
+        if resource_type == 'hp' and self._should_detect_hp_barrier(color_config):
+            resource_match = resource_match | self._create_hp_barrier_mask(hsv_region)
+
+        return resource_match
+
+    def _should_detect_hp_barrier(self, color_config: Optional[dict]) -> bool:
+        """HP 屏障/护盾会把 D4 血球染成蓝紫色,默认将其视为安全填充。"""
+        if color_config is None:
+            return True
+        return bool(color_config.get("detect_barrier", True))
+
+    def _create_hp_barrier_mask(self, hsv_region: np.ndarray) -> np.ndarray:
+        """识别 D4 血球上的蓝紫色屏障覆盖层。"""
+        h = hsv_region[:, :, 0]
+        s = hsv_region[:, :, 1]
+        v = hsv_region[:, :, 2]
+
+        # OpenCV H: 85..155 ~= 170..310 degrees,覆盖青蓝/蓝紫屏障色。
+        return (h >= 85) & (h <= 155) & (s >= 35) & (v >= 35)
 
     def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0, color_config: Optional[dict] = None) -> float:
         """使用半圆形蒙版和连续段检测算法，返回匹配百分比（0.0-100.0）"""
@@ -459,7 +488,13 @@ class BorderFrameManager:
 
             # 使用增强的颜色匹配（支持红色双区间）
             pixel_match = self._create_enhanced_color_mask(
-                hsv_region, template_hsv, resource_type, h_tolerance, s_tolerance, v_tolerance
+                hsv_region,
+                template_hsv,
+                resource_type,
+                h_tolerance,
+                s_tolerance,
+                v_tolerance,
+                color_config,
             )
 
             # --- 优化的连续段检测算法 ---
