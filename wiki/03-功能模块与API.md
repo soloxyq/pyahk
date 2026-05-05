@@ -152,8 +152,8 @@ class AHKInputHandler:
     def send_key(self, key_str: str) -> bool:
         """支持单键 'q' 或序列 'delay50,q,delay100,w'"""
     def click_mouse(self, button="left", hold_time=None) -> bool: ...
-    def hold_key(self, key: str): ...
-    def release_key(self, key: str): ...
+    def hold_key(self, key: str) -> bool: ...                # priority=2 (normal),用于 TriggerMode=2 启动按住
+    def release_key(self, key: str) -> bool: ...             # priority=0 (emergency),防 stuck key
 
     # 队列管理
     def clear_queue(self): ...                           # 清全部(包括 emergency)
@@ -180,6 +180,15 @@ class AHKInputHandler:
 ```
 
 `dry_run_mode=True` 时不真发按键,只记录到 `debug_display_manager`(用于调参)。
+
+**TriggerMode=2 按住模式的 hold/release 语义**:
+- `hold_key()` 走 normal 队列(priority=2)。失败的代价小(键没按住而已,下次循环/resume 还能再 hold)
+- `release_key()` 走 **emergency 队列**(priority=0)。失败的代价是**键卡住** —— 必须确保穿透
+  - normal 队列里的 `release:*` 会被 managed key 的 `delay_clear` 期间的 `ClearNonEmergencyQueues()` 清掉
+  - `SpecialKeysPaused` 期间 `ProcessQueue` 只扫每个队列队首,普通 `press:*` 在前会埋住后面的 `release:*`
+  - emergency 直接绕过两类过滤
+- 二者**都不查 `_drop_non_emergency`**,因为 hold/release 是 START/STOP/PAUSE/RESUME 时的一次性状态切换,不能被 Space 闪避动态阻断
+- `release` 是 AHK 端 `IsAllowedDuringPause(action)` 识别的"安全动作",即使有人忘了发 emergency,也能透过 SpecialKeysPaused 过滤(双保险)
 
 ---
 

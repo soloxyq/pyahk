@@ -69,7 +69,7 @@ GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
 |------|------|
 | 强制移动键(默认 A)按住时,队列按键默认替换为 `f`,但 `force_move_passthrough_keys` 白名单键与 HP/MP 紧急药剂正常发送 | **特性**:边跑边互动(D4/PoE2 拾取/对话技巧),同时不阻止位移和救命药剂 |
 | 管理键(如 E)按下时清空非紧急队列 | **特性**:保证管理键独占执行(E 通常映射闪避/强力技) |
-| 特殊键(如 Space)激活时丢弃非紧急入队 | **特性**:闪避期间不发新技能 |
+| 特殊键(如 Space)激活时丢弃非紧急入队,但 HP/MP 紧急药剂与 `release:*` 释放动作仍然放行 | **特性**:闪避期间不发新技能,但救命药剂照常,且 TriggerMode=2 按住模式的 release 不会被 Space/managed delay 卡死 |
 | PAUSED 状态完全停 HP/MP 检测 + 清所有队列 | **特性**:用户主动 Z 暂停 = 完全停下 |
 | F8/F7/F9 不在 RegisteredHooks 记录中 | **特性**:三个永久根热键,清理动态 Hook 时不碰它们 |
 | 同一个 key 不能同时出现在 special_keys / managed_keys | **特性**:跨类冲突会让后注册的 Hotkey 覆盖前者,Python 注册时检测重复并 LOG_ERROR 跳过后者 |
