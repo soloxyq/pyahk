@@ -205,7 +205,49 @@ class AHKInputHandler:
     def execute_mp_potion(self, key: str):
         if key:
             self.command_sender.send_emergency(key)
-    
+
+    def hold_key(self, key: str) -> bool:
+        """按住键(不释放)。用于 TriggerMode=2 持久化按住模式 (start/resume 时调用)。
+
+        不检查 _drop_non_emergency:hold 是 START/RESUME 时的一次性状态切换,
+        不能被 Space 闪避动态阻断,否则会出现"持续技能在闪避后没自动恢复"。
+        """
+        if not key:
+            return False
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                try:
+                    self.debug_display_manager.add_action(f"Hold:{key}")
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
+            return True
+        return self.command_sender.hold_key(key)
+
+    def release_key(self, key: str) -> bool:
+        """释放被 hold_key 按住的键。用于 TriggerMode=2 (stop/pause 时调用)。
+
+        故意不检查 _drop_non_emergency:release 必须能无条件执行,
+        否则按住模式在闪避期间被卡住,留下"键持续按住"的灾难性 stuck state。
+
+        🔧 必须用 emergency priority(0):
+        - normal 队列里的 release:* 会被 managed_key 的 delay_clear 期间的
+          ClearNonEmergencyQueues() 清掉 → 键卡死
+        - SpecialKeysPaused 期间 ProcessQueue 只扫每个队列队首,如果队首是
+          普通 press:* (不安全),后面的 release:* 会被埋住,延迟释放
+        - emergency 队列从不被 ClearNonEmergencyQueues 清,且按队首 FIFO
+          独立执行,是 release 唯一安全归宿
+        """
+        if not key:
+            return False
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                try:
+                    self.debug_display_manager.add_action(f"Release:{key}")
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
+            return True
+        return self.command_sender.release_key(key, priority=0)
+
     def clear_queue(self):
         """清空所有队列(含 emergency)。用于 PAUSED 状态完全停下。"""
         self.command_sender.clear_queue(-1)

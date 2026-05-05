@@ -4,11 +4,11 @@
             "Enabled": true,
             "Key": "c",
             "Priority": false,
-            "Timer": 200,
+            "Timer": 400,
             "TriggerMode": 0,
             "CooldownCoordX": 795,
             "CooldownCoordY": 995,
-            "CooldownSize": 12,
+            "CooldownSize": 24,
             "ExecuteCondition": 0,
             "ConditionCoordX": 900,
             "ConditionCoordY": 600,
@@ -19,12 +19,12 @@
             "Enabled": true,
             "Key": "Lbutton",
             "Priority": false,
-            "Timer": 75,
+            "Timer": 95,
             "TriggerMode": 0,
             "CooldownCoordX": 857,
             "CooldownCoordY": 995,
             "CooldownSize": 12,
-            "ExecuteCondition": 2,
+            "ExecuteCondition": 0,
             "ConditionCoordX": 1310,
             "ConditionCoordY": 992,
             "ConditionColor": 0,
@@ -46,7 +46,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": false,
+            "Enabled": true,
             "Key": "4",
             "Priority": false,
             "Timer": 1000,
@@ -65,7 +65,7 @@
             "Key": "x",
             "Priority": false,
             "Timer": 200,
-            "TriggerMode": 0,
+            "TriggerMode": 1,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
@@ -80,7 +80,7 @@
             "Key": "6",
             "Priority": false,
             "Timer": 1000,
-            "TriggerMode": 0,
+            "TriggerMode": 1,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
@@ -126,6 +126,7 @@
         "debug_mode": {
             "enabled": false
         },
+        "input_mode": "direct",
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
@@ -144,7 +145,12 @@
         "stationary_mode_config": {
             "hotkey": "xbutton1",
             "mode_type": "shift_modifier",
-            "force_move_hotkey": "x"
+            "force_move_hotkey": "a",
+            "force_move_replacement_key": "f",
+            "force_move_passthrough_keys": [
+                "RButton",
+                "space"
+            ]
         },
         "affix_reroll": {
             "enabled": true,
@@ -169,16 +175,15 @@
             "hp_config": {
                 "enabled": true,
                 "key": "1",
-                "threshold": 50,
+                "threshold": 30,
                 "cooldown": 1000,
-                "tolerance_h": 10,
-                "tolerance_s": 30,
-                "tolerance_v": 50,
-                "detection_mode": "rectangle",
-                "region_x1": 602,
-                "region_y1": 934,
-                "region_x2": 608,
-                "region_y2": 1053,
+                "tolerance_h": 25,
+                "tolerance_s": 33,
+                "tolerance_v": 67,
+                "detection_mode": "circle",
+                "center_x": 608,
+                "center_y": 989,
+                "radius": 70,
                 "colors": [
                     {
                         "name": "Color1",
@@ -235,7 +240,7 @@
             "managed_keys": {
                 "RButton": {
                     "target": "RButton",
-                    "delay": 50
+                    "delay": 25
                 }
             }
         },
@@ -245,6 +250,12 @@
                 "NutstoreClient.exe",
                 "notepad++.exe"
             ]
+        },
+        "tesseract_ocr": {
+            "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            "lang": "eng",
+            "psm_mode": 7,
+            "char_whitelist": "0123456789/"
         }
     }
 }

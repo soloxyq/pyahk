@@ -50,7 +50,8 @@ global TargetWin := "" ; 目标窗口标识符
 ; 🎯 新增：紧急按键缓存（Master方案学习）
 global CachedHpKey := ""     ; 缓存的HP按键
 global CachedMpKey := ""     ; 缓存的MP按键
-global ActiveSequences := Map() ; 去重机制：正在处理的按键序列
+global ActiveManagedKeys := Map() ; 去重机制：正在处理的管理按键
+global MANAGED_KEY_TIMEOUT_MS := 2000  ; ActiveManagedKeys 标记自动过期时长 (single-flight 安全网)
 
 ; 🎯 监控按键状态跟踪（避免重复发送事件）
 global MonitorKeysState := Map()   ; 跟踪monitor按键的按下状态
@@ -159,10 +160,12 @@ ProcessQueue() {
     }
 
     if (SpecialKeysPaused) {
-        ; 特殊按键激活时：只允许絒急按键通过
+        ; 特殊按键激活时：只允许"安全动作"通过
+        ; - HP/MP 紧急药剂(用户保命)
+        ; - release:* 释放动作(防止 TriggerMode=2 按住模式 stuck key)
         if (QueueCounts["high"] > 0) {
             action := HighQueue[1]
-            if (IsEmergencyAction(action)) {
+            if (IsAllowedDuringPause(action)) {
                 action := HighQueue.RemoveAt(1)
                 DecrementQueueCount("high")
                 ExecuteAction(action)
@@ -172,7 +175,7 @@ ProcessQueue() {
         }
         if (QueueCounts["normal"] > 0) {
             action := NormalQueue[1]
-            if (IsEmergencyAction(action)) {
+            if (IsAllowedDuringPause(action)) {
                 action := NormalQueue.RemoveAt(1)
                 DecrementQueueCount("normal")
                 ExecuteAction(action)
@@ -182,7 +185,7 @@ ProcessQueue() {
         }
         if (QueueCounts["low"] > 0) {
             action := LowQueue[1]
-            if (IsEmergencyAction(action)) {
+            if (IsAllowedDuringPause(action)) {
                 action := LowQueue.RemoveAt(1)
                 DecrementQueueCount("low")
                 ExecuteAction(action)
@@ -190,7 +193,7 @@ ProcessQueue() {
                 return
             }
         }
-        return  ; 非索急按键在优先级模式下被过滤
+        return  ; 非安全动作在 SpecialKeysPaused 期间被过滤
     }
 
     ; 🚀 正常模式：按优先级处理（使用计数器）
@@ -415,6 +418,19 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 ; ===============================================================================
 ; 紧急按键和去重机制（Master方案学习）
 ; ===============================================================================
+; SpecialKeysPaused 期间应当放行的"安全动作":
+; - 紧急动作 (HP/MP 药剂):用户保命,必须执行
+; - release:* 动作:防止 TriggerMode=2 按住模式在 Space 闪避期间被卡键
+;   尤其 STOPPED 路径里 ~space hook 被注销后再也收不到 up 事件,
+;   release:2 会永远卡在 normal 队列 → 游戏里 2 一直被按住 stuck
+IsAllowedDuringPause(action) {
+    if (IsEmergencyAction(action))
+        return true
+    if (InStr(action, "release:") = 1)
+        return true
+    return false
+}
+
 ; 判断是否为紧急动作（HP/MP等生存技能）
 IsEmergencyAction(action) {
     global CachedHpKey, CachedMpKey, ACTION_PRESS
@@ -436,22 +452,30 @@ IsEmergencyAction(action) {
 }
 
 ; 检查按键序列是否正在处理中（去重机制）
-IsSequenceActive(key) {
-    global ActiveSequences
-    return ActiveSequences.Has(key)
+; 安全网:标记超过 MANAGED_KEY_TIMEOUT_MS 自动过期,防止 ClearQueue/PAUSED 等场景
+; 把 cleanup 动作清掉后 ActiveManagedKeys 永远卡死,导致该 managed_key 永远点不出来
+IsManagedKeyActive(key) {
+    global ActiveManagedKeys, MANAGED_KEY_TIMEOUT_MS
+    if (!ActiveManagedKeys.Has(key))
+        return false
+    if (A_TickCount - ActiveManagedKeys[key] > MANAGED_KEY_TIMEOUT_MS) {
+        ActiveManagedKeys.Delete(key)
+        return false
+    }
+    return true
 }
 
-; 标记按键序列为活跃状态
-MarkSequenceActive(key) {
-    global ActiveSequences
-    ActiveSequences[key] := A_TickCount
+; 标记管理按键为活跃状态
+MarkManagedKeyActive(key) {
+    global ActiveManagedKeys
+    ActiveManagedKeys[key] := A_TickCount
 }
 
-; 清理按键序列标记
-ClearSequenceMark(key) {
-    global ActiveSequences
-    if (ActiveSequences.Has(key)) {
-        ActiveSequences.Delete(key)
+; 清理管理按键活跃标记
+ClearManagedKeyMark(key) {
+    global ActiveManagedKeys
+    if (ActiveManagedKeys.Has(key)) {
+        ActiveManagedKeys.Delete(key)
     }
 }
 
@@ -571,12 +595,16 @@ ClearQueue(priority) {
     ; 期间残留旧动作下次入队时被混合执行。
     global QueueCounts, TotalQueueCount
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
+    global ActiveManagedKeys
+    global DelayUntil, DelayClearOthers
 
     switch priority {
         case 0:
             TotalQueueCount := TotalQueueCount - QueueCounts["emergency"]
             QueueCounts["emergency"] := 0
             EmergencyQueue := []
+            ; emergency 里 cleanup:key 动作丢失,同步清 single-flight 锁
+            ActiveManagedKeys := Map()
         case 1:
             TotalQueueCount := TotalQueueCount - QueueCounts["high"]
             QueueCounts["high"] := 0
@@ -600,8 +628,16 @@ ClearQueue(priority) {
             HighQueue := []
             NormalQueue := []
             LowQueue := []
+            ; cleanup:key 动作随 emergency 一起被清,managed_key 锁需同步重置,
+            ; 否则 PAUSED → RESUME 后该 key 会因为锁残留而永远点不出来
+            ActiveManagedKeys := Map()
+            ; 队列已全空,继续保留 delay 状态语义不干净,且 DelayClearOthers
+            ; 在下次入队前还会清掉非紧急(包括 hold 模式 resume 时的 hold:N)
+            DelayUntil := 0
+            DelayClearOthers := false
         case -2:
             ; 🔧 清空所有非紧急队列(保留 emergency,用于管理按键期间保护 HP/MP 救命动作)
+            ; emergency 不动 → cleanup:key 仍会执行 → ActiveManagedKeys 不需手动清
             ClearNonEmergencyQueues()
     }
 }
@@ -686,7 +722,7 @@ ExecuteAction(action) {
     ; 🚀 处理清理标记（使用常量比较）
     if (InStr(action, ACTION_CLEANUP . ":")) {
         key := StrReplace(action, ACTION_CLEANUP . ":", "")
-        ClearSequenceMark(key)
+        ClearManagedKeyMark(key)
         return
     }
 
@@ -879,6 +915,9 @@ RegisterHook(key, mode) {
 }
 
 UnregisterHook(key) {
+    ; 🔧 AHK v2 作用域:函数内对全局变量赋值会自动 local 化,顶部统一 global 声明
+    global RegisteredHooks, SpecialKeysPressed, SpecialKeysPaused
+
     ; 简化版本：直接取消，不需要重复注销
 
     ; 检查是否在记录中
@@ -901,6 +940,20 @@ UnregisterHook(key) {
         }
     } catch {
         ; 取消失败，静默处理
+    }
+
+    ; 🔧 special 模式注销时清理 Pause 状态:
+    ; 防止 Space 等键在按住期间被注销 → up 事件永远收不到 → SpecialKeysPaused 卡 true
+    ; → 下次入队的 release:* 被卡住 → 按住模式 stuck key 灾难
+    ; (SpecialKeysPressed/SpecialKeysPaused 已在函数顶部 global 声明)
+    if (mode = "special") {
+        if (SpecialKeysPressed.Has(key)) {
+            SpecialKeysPressed.Delete(key)
+        }
+        if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
+            SpecialKeysPaused := false
+            SendEventToPython("special_key_pause:end")
+        }
     }
 
     ; 删除记录
@@ -961,12 +1014,12 @@ HandleManagedKey(key) {
     global ManagedKeysConfig, EmergencyQueue, HighQueue, NormalQueue, LowQueue, IsPaused
 
     ; 🎯 去重机制：防止快速重复按键（Master方案学习）
-    if (IsSequenceActive(key)) {
+    if (IsManagedKeyActive(key)) {
         return  ; 该按键序列正在处理中，忽略
     }
 
     ; 标记为处理中
-    MarkSequenceActive(key)
+    MarkManagedKeyActive(key)
 
     ; 🚀 关键修复：清空所有非紂急队列，同时同步计数器！
     if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
@@ -1135,6 +1188,7 @@ SendStatsToPython() {
 ClearAllConfigurableHooks() {
     ; 简化版本：清空所有记录的 Hook
     ; F8/F7/F9 永久根热键不在 RegisteredHooks 中,自动被保留(见 RegisterHook 的 key_upper 检查)
+    global ActiveManagedKeys, SpecialKeysPressed, SpecialKeysPaused
 
     ; 收集所有要删除的键
     keysToRemove := []
@@ -1142,9 +1196,19 @@ ClearAllConfigurableHooks() {
         keysToRemove.Push(key)
     }
 
-    ; 删除所有键
+    ; 删除所有键(UnregisterHook 已经为每个 special 键单独清理了 SpecialKeysPressed/Paused)
     for index, key in keysToRemove {
         UnregisterHook(key)
+    }
+
+    ; 配置切换:所有 managed_keys 即将注销,残留 single-flight 锁无意义
+    ActiveManagedKeys := Map()
+
+    ; 兜底:即使 per-key 注销有遗漏,也确保 special 状态彻底归零
+    SpecialKeysPressed := Map()
+    if (SpecialKeysPaused) {
+        SpecialKeysPaused := false
+        SendEventToPython("special_key_pause:end")
     }
 }
 
