@@ -137,7 +137,25 @@ ProcessQueue() {
             if (DelayClearOthers && (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0)) {
                 ClearNonEmergencyQueues()
             }
-            return  ; 还在延迟中，不处理任何队列
+            ; 🔧 BUG修复: 延迟期间放行 HP/MP 救命药剂。本延迟检查在 emergency 取队之前 return,
+            ; 用户技能序列里的大 delay(如 delay500)会把救命药剂整段压住 → 血量危急时漏吃药。
+            ; 按索引扫描出第一个 IsEmergencyAction(press:hp/mp 键)执行,保持其余项顺序不变。
+            ; ⚠️ 故意【不】放行 release:* —— 管理键 hold 模式自己的 release:target 也排在 emergency
+            ; 队列里(见 HandleManagedKey),按字符串无法与 TriggerMode=2 的保命 release 区分,若提前
+            ; 放行会在管理键 hold 延迟期内错误释放目标键、打乱时序。这是相比原始 bug 报告收窄的安全修复:
+            ; 只解决"救命药剂被延迟压住",release 的延迟窗口极短(≤delay)且不触碰管理键状态机。
+            if (QueueCounts["emergency"] > 0) {
+                loop EmergencyQueue.Length {
+                    if (IsEmergencyAction(EmergencyQueue[A_Index])) {
+                        action := EmergencyQueue.RemoveAt(A_Index)
+                        DecrementQueueCount("emergency")
+                        ExecuteAction(action)
+                        QueueStats["processed"] := QueueStats["processed"] + 1
+                        break
+                    }
+                }
+            }
+            return  ; 还在延迟中,非紧急队列不处理
         } else {
             ; 延迟结束，重置
             DelayUntil := 0
@@ -559,7 +577,12 @@ EnqueueAction(priority, action) {
             if (part = "")
                 continue
             if (InStr(part, "delay") = 1) {
-                ms := Integer(SubStr(part, 6))
+                ; 🔧 BUG修复: 畸形 delay token(如 "delay" 无数字 / "delayx")会让 Integer()
+                ; 抛未捕获异常,中断整条命令处理并丢弃该技能。校验后非法则跳过该项。
+                numStr := SubStr(part, 6)
+                if (numStr = "" || !IsInteger(numStr))
+                    continue
+                ms := Integer(numStr)
                 EnqueueAction(priority, "delay:" ms)
             } else {
                 EnqueueAction(priority, "press:" part)

@@ -270,7 +270,8 @@ class NativeGraphicsCaptureManager:
         """获取最新帧（直接从C++库获取，帧缓存在C++层面实现）
 
         Returns:
-            Optional[np.ndarray]: 最新帧数据，格式为(H, W, 3) RGB
+            Optional[np.ndarray]: 最新帧数据，格式为(H, W, 4) BGRA(直接透传 C++ get_frame，
+            不做任何通道转换;下游消费者按 BGRA 处理,见 border_frame_manager)
         """
         if not self.is_running:
             return None

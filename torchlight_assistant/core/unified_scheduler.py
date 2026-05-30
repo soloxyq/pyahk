@@ -233,12 +233,16 @@ class UnifiedScheduler:
             }
 
     def _rebuild_heap(self):
-        """重建任务堆 - 优化版本，只重建启用的任务"""
-        # 只重建启用的任务，减少内存分配
-        enabled_tasks = [task for task in self._tasks.values() if task.enabled]
-        if len(enabled_tasks) != len(self._task_heap):
-            self._task_heap = enabled_tasks
-            heapq.heapify(self._task_heap)
+        """重建任务堆。
+
+        🔧 BUG修复: 调用方(update_task_interval / resume)会原地修改堆内 ScheduledTask
+        的 next_run_time(比较键),必须无条件重新 heapify 才能恢复堆序不变量。原实现用
+        len(enabled)==len(heap) 做提前返回,在稳态(无 disabled 残留)下恰好跳过 heapify,
+        导致堆顶不再是最早任务 → 任务时序错乱(被延迟或相对兄弟过早执行)。任务数很少,
+        无条件重建的 O(n) 开销可忽略。
+        """
+        self._task_heap = [task for task in self._tasks.values() if task.enabled]
+        heapq.heapify(self._task_heap)
 
     def _scheduler_loop(self):
         """调度器主循环 - 优化版本"""

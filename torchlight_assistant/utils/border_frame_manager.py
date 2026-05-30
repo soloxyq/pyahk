@@ -347,7 +347,11 @@ class BorderFrameManager:
         try:
             pixel_region = self.get_region_from_frame(frame, x, y, 1, 1)
             if pixel_region is not None and pixel_region.size > 0:
-                r, g, b = pixel_region[0, 0, 0], pixel_region[0, 0, 1], pixel_region[0, 0, 2]
+                # 🔧 BUG修复: 帧是 BGRA(见 native_capture get_frame),index0=B、index2=R。
+                # 原代码按 r,g,b=index0,1,2 取值,把 B 当 R、R 当 B,打包出的 0xRRGGBB 实为
+                # 0xBBGGRR。下游 is_hp_sufficient(硬编码 r>100 检红血)与 rgb_similarity(与
+                # 取色器存的真 RGB 比较)因此误判,导致 ExecuteCondition 1/2 错选 Key/AltKey。
+                b, g, r = pixel_region[0, 0, 0], pixel_region[0, 0, 1], pixel_region[0, 0, 2]
                 return (int(r) << 16) | (int(g) << 8) | int(b)
             return None
         except Exception as e:
