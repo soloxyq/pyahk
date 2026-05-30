@@ -140,7 +140,7 @@
         "window_activation": {
             "enabled": true,
             "ahk_class": "Diablo IV Main Window Class",
-            "ahk_exe": ""
+            "ahk_exe": "Diablo IV.exe"
         },
         "stationary_mode_config": {
             "hotkey": "xbutton1",
