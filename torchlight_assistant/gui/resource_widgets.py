@@ -81,7 +81,7 @@ class ResourceManagementWidget(QWidget):
         # 移除标题和说明文本，保持界面简洁
 
         # 药剂配置区域
-        flask_group = QGroupBox("药剂技能配置 (Flask Skills)")
+        flask_group = QGroupBox("「通用」药剂技能配置 (Flask Skills,两种模式都生效)")
         flask_layout = QHBoxLayout(flask_group)
         flask_layout.setContentsMargins(10, 15, 10, 10)
         flask_layout.setSpacing(15)

@@ -17,7 +17,7 @@
         },
         "Skill2": {
             "Enabled": true,
-            "Key": "Lbutton",
+            "Key": "LButton",
             "Priority": false,
             "Timer": 96,
             "TriggerMode": 0,
@@ -106,7 +106,7 @@
             "AltKey": ""
         },
         "Skill8": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "6",
             "Priority": false,
             "Timer": 1000,
@@ -131,7 +131,7 @@
         "key_press_duration": 10,
         "mouse_click_duration": 5,
         "cooldown_checker_interval": 110,
-        "sequence_timer_interval": 1000,
+        "sequence_timer_interval": 25,
         "capture_interval": 60,
         "hp_cooldown": 1000,
         "mp_cooldown": 2000,
@@ -140,7 +140,7 @@
         "window_activation": {
             "enabled": true,
             "ahk_class": "Diablo IV Main Window Class",
-            "ahk_exe": "Diablo IV.exe"
+            "ahk_exe": ""
         },
         "stationary_mode_config": {
             "hotkey": "xbutton1",

@@ -222,6 +222,13 @@ class SkillManager:
                 for name, config in self._skills_config.items()
                 if config.get("Enabled") and config.get("TriggerMode") == 0
             }
+            # 🔧 BUG修复: 覆盖前记录旧间隔,用于只在间隔真正变化时才重建任务,
+            # 避免每次配置热更新(如运行中切换 DEBUG)都重置全部定时技能的执行相位。
+            old_intervals = {
+                name: config.get("Timer", 1000) / 1000.0
+                for name, config in self._skills_config.items()
+                if config.get("Enabled") and config.get("TriggerMode") == 0
+            }
 
             # 在覆盖前提取旧的“按住”集合
             old_hold_keys = self._get_configured_hold_keys()
@@ -265,14 +272,18 @@ class SkillManager:
                             f"[统一调度器] 添加定时技能任务: {skill_name}, 间隔: {interval:.3f}s"
                         )
 
-                # 更新现有技能的间隔（这里需要保存旧配置才能对比，暂时跳过）
-                # 可以通过重新设置所有任务来简化
+                # 更新现有技能的间隔:仅在间隔实际变化时才重建任务
                 for skill_name in old_timed_skills & new_timed_skills:
                     config = self._skills_config[skill_name]
                     interval = config.get("Timer", 1000) / 1000.0
                     task_id = f"timed_skill_{skill_name}"
 
-                    # 简单方式：移除后重新添加
+                    # 🔧 BUG修复: 间隔未变则保持原相位不动(不 remove+add)。否则 add_task 会把
+                    # next_run 重置为 now+interval,每次无关的配置热更新都会推迟技能、造成漂移/漏放。
+                    if abs(interval - old_intervals.get(skill_name, -1.0)) < 1e-9:
+                        continue
+
+                    # 间隔确实变了:移除后重新添加
                     self.unified_scheduler.remove_task(task_id)
                     if self.unified_scheduler.add_task(
                         task_id, interval, self.execute_timed_skill, args=(skill_name,)
@@ -362,12 +373,43 @@ class SkillManager:
         if not sequence_keys:
             return
 
-        # 获取当前要执行的按键
-        current_key = sequence_keys[self._sequence_index]
-        self._sequence_index = (self._sequence_index + 1) % len(sequence_keys)
+        # 取当前项并推进索引
+        # 🔧 BUG修复: 先把索引钳制到当前长度再取值,否则运行时缩短 skill_sequence
+        # (热更新/保存配置触发 update_global_config 但不重置 _sequence_index)会让
+        # 残留的越界索引在取值行抛 IndexError,且因取模在其后永远执行不到,序列永久卡死。
+        idx = self._sequence_index % len(sequence_keys)
+        current_item = sequence_keys[idx]
+        self._sequence_index = (idx + 1) % len(sequence_keys)
 
-        # 直接执行按键，序列技能使用普通优先级
-        self.input_handler.execute_skill_normal(current_key)
+        # 🎯 delay 虚拟按键支持(方案A,向后兼容):
+        #   - 普通键: 发键(普通优先级),下一步按"按键间隔"(sequence_timer_interval)推进
+        #   - delayN 项: 不发键,只把"下一步"推迟 N ms
+        # 通过 update_task_interval 让序列任务自调度,实现逐项可变步长;无 delay 的序列行为不变。
+        delay_ms = self._parse_sequence_delay(current_item)
+        if delay_ms is not None:
+            next_gap = max(delay_ms, 1) / 1000.0
+        else:
+            self.input_handler.execute_skill_normal(current_item)
+            next_gap = self._global_config.get("sequence_timer_interval", 1000) / 1000.0
+
+        # 自调度下一步触发时刻(序列任务存在时才生效;不存在则安全 no-op)
+        self.unified_scheduler.update_task_interval("sequence_scheduler", next_gap)
+
+    @staticmethod
+    def _parse_sequence_delay(item: str) -> Optional[int]:
+        """序列项若为 delay 虚拟按键(如 'delay500'/'Delay500'),返回毫秒数;否则返回 None。
+
+        与 AHK 序列展开(EnqueueAction 的 delayN→delay:N)及技能 Key 字段的延迟约定一致,
+        统一用 `delay<毫秒>` 形式,避免被当成普通按键发到 AHK(那样会 Send 一个不存在的键)。
+        """
+        if not item:
+            return None
+        low = item.lower()
+        if low.startswith("delay"):
+            num = low[5:].strip()
+            if num.isdigit():
+                return int(num)
+        return None
 
     def check_cooldowns(self):
         """统一技能冷却检查 - 使用单帧数据确保一致性"""

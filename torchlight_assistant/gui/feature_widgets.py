@@ -203,19 +203,27 @@ class SkillConfigWidget(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # 序列配置
-        self.sequence_frame = QGroupBox("按键序列配置")
+        # 序列配置(仅「序列模式」生效)
+        self.sequence_frame = QGroupBox("「序列模式」按键序列配置")
         seq_layout = QVBoxLayout(self.sequence_frame)
         seq_layout.setContentsMargins(6, 8, 6, 6)
         seq_layout.setSpacing(4)
 
-        seq_layout.addWidget(QLabel("序列 (逗号分隔):"))
+        seq_layout.addWidget(QLabel("「序列」按键序列 (逗号分隔,支持 delayN 虚拟键):"))
         self.sequence_entry = ConfigLineEdit()
         self.sequence_entry.setMaximumHeight(24)
+        self.sequence_entry.setPlaceholderText(
+            "例如: 1,2,delay500,3   (delayN = 暂停 N 毫秒, 不发键)"
+        )
+        self.sequence_entry.setToolTip(
+            "序列模式按列表循环发键。\n"
+            "delayN 是虚拟按键: 走到该项时不发键, 改为暂停 N 毫秒(如 delay500 = 停 0.5 秒)。\n"
+            "普通键之间的间隔由「序列」按键间隔(时间间隔设置标签页)控制。"
+        )
         seq_layout.addWidget(self.sequence_entry)
 
-        # 技能配置
-        self.skill_frame = QGroupBox("技能配置")
+        # 技能配置(仅「技能模式」生效)
+        self.skill_frame = QGroupBox("「技能模式」技能配置")
         self.skill_layout = QVBoxLayout(self.skill_frame)
         self.skill_layout.setContentsMargins(6, 8, 6, 4)
         self.skill_layout.setSpacing(1)

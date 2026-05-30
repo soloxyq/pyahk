@@ -33,7 +33,7 @@ class WindowActivationWidget(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        group = QGroupBox("窗口激活配置")
+        group = QGroupBox("「通用」窗口激活配置")
         grid_layout = QGridLayout(group)
         grid_layout.setContentsMargins(6, 8, 6, 6)
         grid_layout.setSpacing(4)
@@ -136,7 +136,7 @@ class StationaryModeWidget(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        group = QGroupBox("原地与交互模式配置")
+        group = QGroupBox("「通用」原地与交互模式配置")
         grid_layout = QGridLayout(group)
         grid_layout.setContentsMargins(15, 20, 15, 15)
         grid_layout.setSpacing(12)

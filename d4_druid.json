@@ -17,7 +17,7 @@
         },
         "Skill2": {
             "Enabled": true,
-            "Key": "Lbutton",
+            "Key": "LButton",
             "Priority": false,
             "Timer": 95,
             "TriggerMode": 0,

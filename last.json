@@ -62,7 +62,7 @@
         },
         "Skill5": {
             "Enabled": true,
-            "Key": "lbutton",
+            "Key": "LButton",
             "Priority": false,
             "Timer": 75,
             "TriggerMode": 0,

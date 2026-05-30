@@ -28,7 +28,7 @@
             "ConditionCoordX": 1310,
             "ConditionCoordY": 992,
             "ConditionColor": 0,
-            "AltKey": "Lbutton"
+            "AltKey": "LButton"
         },
         "Skill3": {
             "Enabled": false,

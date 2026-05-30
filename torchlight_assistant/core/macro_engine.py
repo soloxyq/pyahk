@@ -14,6 +14,7 @@ from ..utils.border_frame_manager import BorderFrameManager
 from ..utils.sound_manager import SoundManager
 from .pathfinding_manager import PathfindingManager
 from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
+from ..utils.key_names import normalize_config_keys
 
 
 class MacroEngine:
@@ -1022,6 +1023,9 @@ class MacroEngine:
                 LOG_INFO(f"[MacroEngine] 从文件 '{config_file}' 加载配置。")
                 config_data = self.config_manager.load_config(config_file)
 
+            # 🔧 统一归一化所有按键字段为 AHK 标准名(单一可信源,见 utils/key_names.py)
+            normalize_config_keys(config_data)
+
             self._skills_config = config_data.get("skills", {})
             self._global_config = config_data.get("global", {})
             self.sound_manager.update_config(self._global_config)
@@ -1034,6 +1038,9 @@ class MacroEngine:
 
     def save_full_config(self, file_path: str, full_config: Dict[str, Any]):
         try:
+            # 🔧 保存前归一化按键字段,保证写回磁盘的也是 AHK 标准名
+            normalize_config_keys(full_config)
+
             self._skills_config = full_config.get("skills", {})
             self._global_config = full_config.get("global", {})
             self.sound_manager.update_config(self._global_config)

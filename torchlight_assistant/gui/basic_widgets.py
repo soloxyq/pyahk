@@ -72,11 +72,16 @@ class TopControlsWidget(QWidget):
         separator.setStyleSheet("color: #666666;")
         layout.addWidget(separator)
 
-        # 游戏模式选择
-        layout.addWidget(QLabel("游戏技能模式:"))
+        # 战斗模式选择(技能 / 序列 —— 输入系统的两大模块)
+        layout.addWidget(QLabel("战斗模式:"))
         self.mode_combo = ConfigComboBox()
         self.mode_combo.setMaximumHeight(28)
         self.mode_combo.addItems(["技能", "序列"])
+        self.mode_combo.setToolTip(
+            "技能模式: 每个技能独立配置(定时/冷却检测/条件),按各自规则触发\n"
+            "序列模式: 按「序列」列表循环发键,支持 delayN 虚拟键插入暂停\n"
+            "(HP/MP 智能药剂、优先级按键、强制移动等「通用」设置两种模式都生效)"
+        )
         layout.addWidget(self.mode_combo)
 
         # DEBUG MODE选择
@@ -141,21 +146,22 @@ class TimingSettingsWidget(QWidget):
         layout = QVBoxLayout(self)
 
         # 时间间隔设置
-        time_group = QGroupBox("时间间隔设置 (毫秒)")
+        # 标签前缀标注生效模式:「序列」/「技能」=仅该模式生效, 「通用」=两种模式都生效
+        time_group = QGroupBox("时间间隔设置 (毫秒)  —  「序列」/「技能」=仅该模式, 「通用」=两种模式")
         grid_layout = QGridLayout(time_group)
         grid_layout.setContentsMargins(15, 20, 15, 15)
         grid_layout.setSpacing(12)
 
         settings = [
-            ("队列处理:", "queue_processor"),
-            ("按键时长:", "key_press"),
-            ("鼠标时长:", "mouse_click"),
-            ("冷却检查:", "cooldown_checker"),
-            ("按键间隔:", "sequence_timer"),
-            ("图像捕获间隔:", "capture_interval"),
-            ("HP药剂冷却:", "hp_cooldown"),
-            ("MP药剂冷却:", "mp_cooldown"),
-            ("MP/HP检测间隔:", "resource_check_interval"),
+            ("「通用」队列处理:", "queue_processor"),
+            ("「通用」按键时长:", "key_press"),
+            ("「通用」鼠标时长:", "mouse_click"),
+            ("「技能」冷却检查:", "cooldown_checker"),
+            ("「序列」按键间隔:", "sequence_timer"),
+            ("「通用」图像捕获间隔:", "capture_interval"),
+            ("「通用」HP药剂冷却:", "hp_cooldown"),
+            ("「通用」MP药剂冷却:", "mp_cooldown"),
+            ("「通用」MP/HP检测间隔:", "resource_check_interval"),
         ]
 
         row, col = 0, 0

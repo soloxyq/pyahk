@@ -24,6 +24,7 @@ import json
 
 from .custom_widgets import ConfigCheckBox
 from ..utils.debug_log import LOG_INFO, LOG_ERROR
+from ..utils.key_names import normalize_key_name as _normalize_key_name_shared
 
 # 导入按键监听相关
 try:
@@ -64,7 +65,7 @@ class PriorityKeysWidget(QWidget):
         layout = QVBoxLayout(self)
 
         # 主配置组
-        group = QGroupBox("优先级按键配置")
+        group = QGroupBox("「通用」优先级按键配置")
         group_layout = QVBoxLayout(group)
         group_layout.setContentsMargins(10, 15, 10, 10)
         group_layout.setSpacing(8)
@@ -519,47 +520,12 @@ class PriorityKeysWidget(QWidget):
             self.target_input.clear()
 
     def _normalize_key_name(self, key: str) -> str:
-        """标准化按键名称。
+        """标准化按键名称(委托给全项目单一可信源 utils/key_names.py)。
 
         内部存储、JSON 和 AHK 协议统一使用 AHK 标准名。
         right_mouse/left_mouse/middle_mouse 等只作为输入兼容别名。
         """
-        if not key:
-            return ""
-        
-        # 基本标准化：小写并去除空格
-        normalized = key.lower().strip()
-        
-        # 统一按键名称映射
-        key_mapping = {
-            # 鼠标按键标准化
-            'left_mouse': 'LButton',
-            'leftmouse': 'LButton',
-            'mouse_left': 'LButton',
-            'lbutton': 'LButton',
-            'leftclick': 'LButton',
-            
-            'right_mouse': 'RButton',
-            'rightmouse': 'RButton',
-            'mouse_right': 'RButton',
-            'rbutton': 'RButton',
-            'rightclick': 'RButton',
-            
-            'middle_mouse': 'MButton',
-            'middlemouse': 'MButton',
-            'mouse_middle': 'MButton',
-            'mbutton': 'MButton',
-            
-            # 特殊键标准化
-            'spacebar': 'space',
-            'space_bar': 'space',
-            'control': 'ctrl',
-            'return': 'enter',
-            'escape': 'esc',
-        }
-        
-        # 应用映射
-        return key_mapping.get(normalized, normalized)
+        return _normalize_key_name_shared(key)
 
     def _add_key(self):
         """添加新的优先级按键"""
