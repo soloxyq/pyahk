@@ -200,12 +200,15 @@ class ResourceManagementWidget(QWidget):
         ocr_engine_layout.addWidget(QLabel("OCR引擎:"))
 
         ocr_engine_combo = ConfigComboBox()
-        ocr_engine_combo.addItem("模板匹配 (推荐)", "template")
+        ocr_engine_combo.addItem("PaddleOCR (推荐/最快)", "paddle")
+        ocr_engine_combo.addItem("模板匹配", "template")
         ocr_engine_combo.addItem("Keras模型 (高准确率)", "keras")
         ocr_engine_combo.addItem("Tesseract", "tesseract")
-        ocr_engine_combo.setCurrentIndex(0)  # 默认模板匹配
+        ocr_engine_combo.setCurrentIndex(0)  # 默认 PaddleOCR
         ocr_engine_combo.setToolTip(
-            "模板匹配: 最快速度(~7ms), 无额外依赖, 推荐\nKeras: 最高准确率(99%), 需要TensorFlow\nTesseract: 通用性强, 需要Tesseract"
+            "PaddleOCR: 直接读'当前/最大'数字(PP-OCRv6 rec-only), 免疫中毒变色; 按F8锁定数字框位置。\n"
+            "默认 CPU(~21ms, 不抢游戏显卡); 配置里设 ocr_device=gpu 可~6ms。模型可配 ocr_model(small/medium)。\n"
+            "模板匹配: 最快(~7ms), 无额外依赖\nKeras: 最高准确率(99%), 需要TensorFlow\nTesseract: 通用性强, 需要Tesseract"
         )
         ocr_engine_layout.addWidget(ocr_engine_combo)
         ocr_engine_layout.addStretch()
@@ -587,9 +590,13 @@ class ResourceManagementWidget(QWidget):
         self.color_analysis_tools.start_region_color_analysis(on_region_analyzed)
 
     def _start_region_selection_for_coords(self, prefix: str):
-        """开始区域选择，更新坐标、HSV容差和颜色列表"""
+        """开始区域选择，按当前检测模式更新坐标。"""
         if not self.main_window:
             return
+
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+        mode_combo = widgets.get("mode_combo")
+        selected_mode = mode_combo.currentData() if mode_combo else "rectangle"
 
         # 隐藏主窗口
         self.main_window.hide()
@@ -597,17 +604,29 @@ class ResourceManagementWidget(QWidget):
         def show_dialog():
             from .region_selection_dialog import RegionSelectionDialog
             
-            # 创建区域选择对话框（默认启用颜色分析）
-            dialog = RegionSelectionDialog()
+            # Text OCR 不需要 HSV 分析；框选后会用 PaddleOCR 自动收紧文本框。
+            dialog = RegionSelectionDialog(analyze_colors=(selected_mode != "text_ocr"))
             
             def on_region_selected(x1, y1, x2, y2):
                 self._on_region_selected(prefix, x1, y1, x2, y2)
+                if selected_mode == "text_ocr":
+                    screenshot_array = dialog.get_screenshot_array()
+                    from PySide6.QtCore import QTimer
+
+                    QTimer.singleShot(
+                        0,
+                        lambda: self._calibrate_ocr_region_from_selection(
+                            prefix, screenshot_array, (x1, y1, x2, y2)
+                        ),
+                    )
             
             def on_region_analyzed(x1, y1, x2, y2, analysis):
                 self._on_region_analyzed(prefix, x1, y1, x2, y2, analysis)
                 
             dialog.region_selected.connect(on_region_selected)
-            dialog.region_analyzed.connect(on_region_analyzed)
+            # Text OCR 只需要精确文本框坐标；不要把数字区域当 HSV 颜色样本写入资源颜色配置。
+            if selected_mode != "text_ocr":
+                dialog.region_analyzed.connect(on_region_analyzed)
             
             # 执行对话框
             dialog.exec()
@@ -621,6 +640,89 @@ class ResourceManagementWidget(QWidget):
         # 延迟100ms执行，确保窗口完全隐藏
         from PySide6.QtCore import QTimer
         QTimer.singleShot(100, show_dialog)
+
+    def _get_ocr_runtime_options(self, prefix: str) -> tuple:
+        """从当前配置读取 OCR 模型、设备和置信度阈值；未保存的新配置使用默认值。"""
+        model_name = "PP-OCRv6_small_rec"
+        device = "cpu"
+        min_score = 0.70
+        try:
+            if self.main_window and hasattr(self.main_window, "_global_config"):
+                resource_config = (
+                    self.main_window._global_config
+                    .get("resource_management", {})
+                    .get(f"{prefix}_config", {})
+                )
+                model_name = resource_config.get("ocr_model", model_name)
+                device = resource_config.get("ocr_device", device)
+                min_score = float(resource_config.get("match_threshold", min_score))
+        except Exception as e:
+            LOG_INFO(f"[OCR框选] 读取OCR配置失败，使用默认值: {e}")
+        return model_name, device, min_score
+
+    def _calibrate_ocr_region_from_selection(self, prefix: str, screenshot_array, rough_box):
+        """用 full OCR 将用户粗框自动收紧到合法的 当前/最大 文本行。"""
+        widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
+        coord_input = widgets.get("coord_input")
+        status_label = widgets.get("status_label")
+        ocr_combo = widgets.get("ocr_engine_combo")
+
+        if ocr_combo and ocr_combo.currentData() != "paddle":
+            if status_label:
+                status_label.setText("OCR区域已更新；自动收紧仅支持 PaddleOCR")
+                status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #666;")
+            return
+
+        if status_label:
+            status_label.setText("PaddleOCR 正在定位数字行...")
+            status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #856404;")
+            QApplication.processEvents()
+
+        if screenshot_array is None:
+            if status_label:
+                status_label.setText("OCR定位失败：无法读取框选截图，已保留粗框")
+                status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #dc3545;")
+            return
+
+        _model_name, device, min_score = self._get_ocr_runtime_options(prefix)
+        try:
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+            from ..utils.paddle_ocr_manager import get_paddle_ocr_manager
+
+            mgr = get_paddle_ocr_manager()
+            result = mgr.locate_number_box(
+                screenshot_array,
+                rough_box,
+                device=device,
+                min_score=min_score,
+                padding=3,
+            )
+        except Exception as e:
+            LOG_INFO(f"[OCR框选] PaddleOCR定位异常: {e}")
+            result = None
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        if result:
+            x1, y1, x2, y2 = result["box"]
+            if coord_input:
+                coord_input.setText(f"{x1},{y1},{x2},{y2}")
+            if status_label:
+                status_label.setText(
+                    f"OCR识别: {result['current']}/{result['maximum']} = "
+                    f"{result['percentage']:.1f}%  score={result['score']:.2f}"
+                )
+                status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #28a745;")
+            LOG_INFO(
+                f"[OCR框选] {prefix.upper()} 已自动收紧到 ({x1},{y1},{x2},{y2}) "
+                f"识别={result['text']} pct={result['percentage']:.1f}%"
+            )
+        else:
+            if status_label:
+                status_label.setText("OCR未定位到有效 当前/最大，已保留粗框")
+                status_label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #dc3545;")
+            LOG_INFO(f"[OCR框选] {prefix.upper()} 未找到合法 当前/最大，保留粗框 {rough_box}")
+
     def _parse_colors_input(self, prefix: str, colors_text: str):
         """解析颜色配置输入并显示带实际颜色的结果"""
         # 获取对应的结果显示控件
@@ -944,6 +1046,8 @@ class ResourceManagementWidget(QWidget):
             # 矩形对比：显示 选择区域
             if select_btn:
                 select_btn.setVisible(True)
+                select_btn.setText("📦 选择区域")
+                select_btn.setToolTip("框选资源颜色检测区域")
             if detect_btn:
                 detect_btn.setVisible(False)
             if test_ocr_btn:
@@ -962,6 +1066,8 @@ class ResourceManagementWidget(QWidget):
             # 数字对比：显示 选择区域 和 测试识别
             if select_btn:
                 select_btn.setVisible(True)
+                select_btn.setText("📦 选择OCR区域")
+                select_btn.setToolTip("粗框 HP/MP 数字文本区域即可；PaddleOCR 会自动收紧到 当前/最大 那一行")
             if detect_btn:
                 detect_btn.setVisible(False)
             if test_ocr_btn:
@@ -1083,10 +1189,17 @@ class ResourceManagementWidget(QWidget):
         LOG_INFO(f"[球体检测] 检测完成，共找到 {orb_count} 个球体")
 
         # 保存检测结果供后续使用
+        # 🔧 自动检测只更新圆心/半径,要保留已设的 half(半圆方向),否则保存时丢失
         if prefix == "hp":
+            old_half = (self.hp_circle_config or {}).get("hp", {}).get("half")
             self.hp_circle_config = detection_result.copy()
+            if old_half and "hp" in self.hp_circle_config:
+                self.hp_circle_config["hp"] = {**self.hp_circle_config["hp"], "half": old_half}
         else:
+            old_half = (self.mp_circle_config or {}).get("mp", {}).get("half")
             self.mp_circle_config = detection_result.copy()
+            if old_half and "mp" in self.mp_circle_config:
+                self.mp_circle_config["mp"] = {**self.mp_circle_config["mp"], "half": old_half}
 
         # 获取widget并更新坐标
         widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
@@ -1280,6 +1393,7 @@ class ResourceManagementWidget(QWidget):
 
         # 引擎名称映射
         engine_names = {
+            "paddle": "PaddleOCR",
             "template": "模板匹配",
             "keras": "Keras模型",
             "tesseract": "Tesseract",
@@ -1369,6 +1483,23 @@ class ResourceManagementWidget(QWidget):
                 except Exception as e:
                     QMessageBox.warning(
                         self, "识别失败", f"{engine_name}引擎识别失败\n错误: {str(e)}"
+                    )
+                    return
+            elif ocr_engine == "paddle":
+                # 使用 PaddleOCR rec-only (PP-OCRv6)，与运行时同一条路径
+                try:
+                    from ..utils.paddle_ocr_manager import get_paddle_ocr_manager
+
+                    mgr = get_paddle_ocr_manager()
+                    start_time = time.time()
+                    cur, mx, pct = mgr.recognize_and_parse(roi, "PP-OCRv6_small_rec", "cpu")
+                    recognition_time = (time.time() - start_time) * 1000
+                    if pct is not None:
+                        text = f"{cur}/{mx}"
+                        percentage = pct
+                except Exception as e:
+                    QMessageBox.warning(
+                        self, "识别失败", f"PaddleOCR引擎识别失败\n错误: {str(e)}"
                     )
                     return
             else:

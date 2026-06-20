@@ -185,22 +185,51 @@ class BorderFrameManager:
     def prepare_border(self, skills_config: Dict[str, Any], resource_config: Optional[Dict[str, Any]] = None):
         self.set_skill_coordinates(skills_config, resource_config)
 
-    def _get_resource_region_from_config(self, config: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
-        """从资源配置中获取区域坐标"""
+    def get_resource_region_from_config(self, config: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
+        """按资源检测模式获取实际检测区域坐标。"""
         try:
-            x1 = config.get("region_x1", 0)
-            y1 = config.get("region_y1", 0)
-            x2 = config.get("region_x2", 0)
-            y2 = config.get("region_y2", 0)
+            detection_mode = str(config.get("detection_mode", "rectangle")).lower()
+
+            if detection_mode == "text_ocr":
+                x1 = int(config.get("text_x1", 0))
+                y1 = int(config.get("text_y1", 0))
+                x2 = int(config.get("text_x2", 0))
+                y2 = int(config.get("text_y2", 0))
+                if x1 < x2 and y1 < y2 and x1 >= 0 and y1 >= 0:
+                    return (x1, y1, x2, y2)
+                LOG(f"[资源区域] 无效的文本OCR区域: ({x1},{y1}) -> ({x2},{y2})")
+                return None
+
+            if detection_mode == "circle":
+                center_x = int(config.get("center_x", 0))
+                center_y = int(config.get("center_y", 0))
+                radius = int(config.get("radius", 0))
+                if radius > 0 and center_x > 0 and center_y > 0:
+                    return (
+                        max(0, center_x - radius),
+                        max(0, center_y - radius),
+                        center_x + radius,
+                        center_y + radius,
+                    )
+                LOG(f"[资源区域] 无效的圆形区域: center=({center_x},{center_y}), radius={radius}")
+                return None
+
+            x1 = int(config.get("region_x1", 0))
+            y1 = int(config.get("region_y1", 0))
+            x2 = int(config.get("region_x2", 0))
+            y2 = int(config.get("region_y2", 0))
 
             if x1 < x2 and y1 < y2 and x1 > 0 and y1 > 0:
                 return (x1, y1, x2, y2)
-            else:
-                LOG(f"[资源区域] 无效的区域坐标: ({x1},{y1}) -> ({x2},{y2})")
-                return None
         except Exception as e:
             LOG_ERROR(f"[资源区域] 获取区域坐标失败: {e}")
             return None
+        LOG(f"[资源区域] 无效的矩形区域: ({x1},{y1}) -> ({x2},{y2})")
+        return None
+
+    def _get_resource_region_from_config(self, config: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
+        """兼容旧调用名。"""
+        return self.get_resource_region_from_config(config)
 
     def start_capture_loop(self, interval_ms: int = 40, capture_region: Optional[Tuple[int, int, int, int]] = None):
         """启动Native Graphics Capture捕获，支持全屏或指定区域"""
@@ -268,28 +297,37 @@ class BorderFrameManager:
                 LOG_ERROR(f"[调试捕获] 异常: {e}")
 
     def capture_once_for_debug_and_cache(self, interval_ms: int = 40, resource_regions: Optional[Dict[str, Tuple[int, int, int, int]]] = None):
-        """进行一次全屏捕获，用于调试和缓存。"""
+        """进行一次全屏捕获，用于调试和缓存，并返回该帧。"""
         with self._capture_lock:
             LOG(f"[调试捕获] 开始进行一次全屏捕获用于缓存")
             target_hwnd = self._get_target_window_handle()
             if not target_hwnd:
                 LOG_ERROR(f"[调试捕获] 未找到目标窗口")
-                return
+                return None
 
             # 强制进行全屏捕获
             temp_config = CaptureConfig(target_window_handle=target_hwnd, capture_interval_ms=interval_ms, enable_region=False)
+            temp_capture = None
             try:
                 from .native_graphics_capture_manager import NativeGraphicsCaptureManager
                 temp_capture = NativeGraphicsCaptureManager(temp_config)
+                frame = None
+                frame_copy = None
                 if temp_capture and temp_capture.start_capture():
                     time.sleep(0.1)  # 等待一帧
                     frame = temp_capture.get_latest_frame()
                     if frame is not None:
                         self._save_debug_frame(frame)  # 保存调试帧
                         self._update_template_cache_from_frame(frame, resource_regions)
+                        frame_copy = frame.copy()
+                if temp_capture:
                     temp_capture.cleanup()
+                return frame_copy
             except Exception as e:
                 LOG_ERROR(f"[调试捕获和缓存] 异常: {e}")
+                if temp_capture:
+                    temp_capture.cleanup()
+            return None
 
     def stop(self):
         """停止边框图捕获"""
@@ -443,9 +481,9 @@ class BorderFrameManager:
                         "image": hsv_region.copy(),
                         "timestamp": time.time(),
                         "type": "resource_region",
-                        "h_tolerance": 10,
-                        "s_tolerance": 20, 
-                        "v_tolerance": 20
+                        "h_tolerance": color_config.get("tolerance_h", 10) if color_config else 10,
+                        "s_tolerance": color_config.get("tolerance_s", 20) if color_config else 20,
+                        "v_tolerance": color_config.get("tolerance_v", 20) if color_config else 20,
                     }
                     # 保存到缓存
                     with self._cache_lock:
@@ -476,30 +514,61 @@ class BorderFrameManager:
             circular_mask = (dist_from_center <= radius).astype(np.uint8) * 255
 
             # 创建半圆掩码
-            half_mask = np.zeros_like(circular_mask)
+            # half 字段(在 hp_config/mp_config 里)显式指定分析哪半边,避开被遮挡的一侧:
+            #   "left"  → 只取左半 (x < 中线)
+            #   "right" → 只取右半 (x >= 中线)
+            #   "full"  → 整圆不裁剪
+            #   未指定  → 向后兼容: HP 默认左半, MP 默认右半 (D4 中央球布局)
+            # 用例: PoE2 角落球需 HP="right" / MP="left"(与 D4 默认相反)。
             width, height = radius * 2, radius * 2
-            if resource_type == 'hp':  # HP的右半边被干扰，只分析左半边
-                half_mask[:, :width // 2] = 255
-            elif resource_type == 'mp':  # MP的左半边被干扰，只分析右半边
-                half_mask[:, width // 2:] = 255
+            half = ""
+            if color_config:
+                half = str(color_config.get("half", "")).strip().lower()
+            if not half:
+                half = "left" if resource_type == "hp" else ("right" if resource_type == "mp" else "full")
 
-            final_mask = cv2.bitwise_and(circular_mask, half_mask)
+            if half == "full":
+                final_mask = circular_mask.copy()
+            else:
+                half_mask = np.zeros_like(circular_mask)
+                if half == "right":
+                    half_mask[:, width // 2:] = 255
+                elif half == "left":
+                    half_mask[:, :width // 2] = 255
+                else:
+                    # 未知值回退整圆,避免空 mask 直接读 0%
+                    LOG_ERROR(f"[圆形检测] 未知 half='{half}', 回退整圆")
+                    half_mask[:, :] = 255
+                final_mask = cv2.bitwise_and(circular_mask, half_mask)
             # --- 结束 ---
 
-            h_tolerance = cached_template.get("h_tolerance", 10)
-            s_tolerance = cached_template.get("s_tolerance", 20)
-            v_tolerance = cached_template.get("v_tolerance", 20)
+            if color_config:
+                h_tolerance = color_config.get("tolerance_h", cached_template.get("h_tolerance", 10))
+                s_tolerance = color_config.get("tolerance_s", cached_template.get("s_tolerance", 20))
+                v_tolerance = color_config.get("tolerance_v", cached_template.get("v_tolerance", 20))
+            else:
+                h_tolerance = cached_template.get("h_tolerance", 10)
+                s_tolerance = cached_template.get("s_tolerance", 20)
+                v_tolerance = cached_template.get("v_tolerance", 20)
 
-            # 使用增强的颜色匹配（支持红色双区间）
-            pixel_match = self._create_enhanced_color_mask(
-                hsv_region,
-                template_hsv,
-                resource_type,
-                h_tolerance,
-                s_tolerance,
-                v_tolerance,
-                color_config,
-            )
+            # 色相无关检测(liquid_by_brightness):中毒等状态会改变液体色相(如 HP 中毒变绿),
+            # 但液体始终"高饱和 + 高亮度",空玻璃则是暗灰。开启后只按 S/V 阈值判定"有液体",
+            # 完全忽略色相。仅当 hp_config/mp_config 显式开启时生效,不影响冷却/取点色/其他配置。
+            if color_config and color_config.get("liquid_by_brightness"):
+                s_min = float(color_config.get("s_min", 30)) * 2.55  # 0-100 -> OpenCV 0-255
+                v_min = float(color_config.get("v_min", 25)) * 2.55
+                pixel_match = (hsv_region[:, :, 1] > s_min) & (hsv_region[:, :, 2] > v_min)
+            else:
+                # 使用增强的颜色匹配（支持红色双区间）
+                pixel_match = self._create_enhanced_color_mask(
+                    hsv_region,
+                    template_hsv,
+                    resource_type,
+                    h_tolerance,
+                    s_tolerance,
+                    v_tolerance,
+                    color_config,
+                )
 
             # --- 优化的连续段检测算法 ---
             # 计算每行在蒙版内的匹配像素数

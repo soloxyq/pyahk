@@ -534,15 +534,24 @@ class MacroEngine:
 
             # 收集资源区域配置，用于模板截取
             resource_regions = self._collect_resource_regions()
-            self.border_manager.capture_once_for_debug_and_cache(
+            ready_frame = self.border_manager.capture_once_for_debug_and_cache(
                 self._global_config.get("capture_interval", 40), resource_regions
             )
 
             # 通知ResourceManager截取HSV模板
             if self.resource_manager and resource_regions:
-                current_frame = self.border_manager.get_current_frame()
-                if current_frame is not None:
-                    self.resource_manager.capture_template_hsv(current_frame)
+                if ready_frame is not None:
+                    self.resource_manager.capture_template_hsv(ready_frame)
+                else:
+                    LOG_ERROR("[ResourceManager] READY阶段未获取到帧，跳过HSV模板截取")
+
+            # 锁定 PaddleOCR 数字框位置（仅 text_ocr + ocr_engine==paddle 的资源生效）
+            # 放在 resource_regions 守卫之外：paddle 配置可能不贡献 HSV 矩形区域
+            if self.resource_manager:
+                if ready_frame is not None:
+                    self.resource_manager.lock_ocr_number_position(ready_frame)
+                else:
+                    LOG_ERROR("[OCR锁定] READY阶段未获取到帧，跳过PaddleOCR数字框锁定")
 
         elif state == MacroState.RUNNING:
             # 如果是从暂停状态恢复，调用resume；否则启动子系统
@@ -743,22 +752,16 @@ class MacroEngine:
         # HP区域
         hp_config = resource_config.get("hp_config", {})
         if hp_config.get("enabled", False):
-            x1 = hp_config.get("region_x1", 0)
-            y1 = hp_config.get("region_y1", 0)
-            x2 = hp_config.get("region_x2", 0)
-            y2 = hp_config.get("region_y2", 0)
-            if x1 < x2 and y1 < y2:
-                resource_regions["hp_region"] = (x1, y1, x2, y2)
+            hp_region = self.border_manager.get_resource_region_from_config(hp_config)
+            if hp_region:
+                resource_regions["hp_region"] = hp_region
 
         # MP区域
         mp_config = resource_config.get("mp_config", {})
         if mp_config.get("enabled", False):
-            x1 = mp_config.get("region_x1", 0)
-            y1 = mp_config.get("region_y1", 0)
-            x2 = mp_config.get("region_x2", 0)
-            y2 = mp_config.get("region_y2", 0)
-            if x1 < x2 and y1 < y2:
-                resource_regions["mp_region"] = (x1, y1, x2, y2)
+            mp_region = self.border_manager.get_resource_region_from_config(mp_config)
+            if mp_region:
+                resource_regions["mp_region"] = mp_region
 
         return resource_regions
 

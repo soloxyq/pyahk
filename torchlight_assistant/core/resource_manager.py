@@ -48,6 +48,11 @@ class ResourceManager:
         self.deepai_available = False
         self._deepai_get_recognizer = None
         self._check_deepai_availability()
+
+        # PaddleOCR rec-only（资源数字识别）：F8 锁定的检测框 + 惰性管理器引用
+        # 仅 detection_mode=="text_ocr" 且 ocr_engine=="paddle" 时使用；未在 F8 锁定则不触发
+        self._ocr_number_box: Dict[str, Tuple[int, int, int, int]] = {}
+        self.paddle_ocr_manager = None
     
     def _initialize_tesseract_ocr(self):
         """初始化Tesseract OCR管理器（程序启动时加载一次）"""
@@ -168,7 +173,29 @@ class ResourceManager:
 
                 roi = frame[y1:y2, x1:x2]
                 engine = config.get("ocr_engine", "template")
-                if engine in ("keras", "template"):
+                if engine == "paddle":
+                    # PaddleOCR rec-only：使用 F8 锁定的数字框；未锁定则不触发（兜底100%）
+                    box = self._ocr_number_box.get(resource_type)
+                    if box is None:
+                        LOG_ERROR(f"[ResourceManager] {resource_type.upper()} PaddleOCR 数字框未在F8锁定，跳过(不触发)")
+                        match_percentage = 100.0
+                    else:
+                        bx1, by1, bx2, by2 = box
+                        locked_roi = frame[by1:by2, bx1:bx2]
+                        if self.paddle_ocr_manager is None:
+                            from ..utils.paddle_ocr_manager import get_paddle_ocr_manager
+                            self.paddle_ocr_manager = get_paddle_ocr_manager()
+                        model_name = config.get("ocr_model", "PP-OCRv6_small_rec")
+                        device = config.get("ocr_device", "cpu")
+                        min_score = float(config.get("match_threshold", 0.5))
+                        cur, mx, pct = self.paddle_ocr_manager.recognize_and_parse(locked_roi, model_name, device, min_score)
+                        if pct is not None:
+                            match_percentage = pct
+                            LOG_INFO(f"[ResourceManager] {resource_type.upper()} OCR识别: {cur}/{mx} = {pct:.1f}%")
+                        else:
+                            # 解析失败/当前>最大 等无效情况 → 不触发
+                            match_percentage = 100.0
+                elif engine in ("keras", "template"):
                     # 使用启动时检查的标志位，避免重复导入
                     if not self.deepai_available:
                         LOG_ERROR(f"[ResourceManager] DeepAI模块不可用，无法使用{engine}引擎")
@@ -279,7 +306,7 @@ class ResourceManager:
             import time
 
             # 截取HP区域模板
-            if self.hp_config.get("enabled", False):
+            if self.hp_config.get("enabled", False) and self.hp_config.get("detection_mode", "rectangle") == "rectangle":
                 hp_region = self._get_region_from_config(self.hp_config)
                 if hp_region:
                     x1, y1, x2, y2 = hp_region
@@ -310,7 +337,7 @@ class ResourceManager:
                         LOG_INFO(f"[ResourceManager] 已保存HP模板HSV数据到缓存，尺寸: {hp_hsv.shape}, 容差: H±{h_tolerance}, S±{s_tolerance}, V±{v_tolerance}")
 
             # 截取MP区域模板
-            if self.mp_config.get("enabled", False):
+            if self.mp_config.get("enabled", False) and self.mp_config.get("detection_mode", "rectangle") == "rectangle":
                 mp_region = self._get_region_from_config(self.mp_config)
                 if mp_region:
                     x1, y1, x2, y2 = mp_region
@@ -342,6 +369,48 @@ class ResourceManager:
 
         except Exception as e:
             LOG_ERROR(f"[ResourceManager] 模板HSV数据截取失败: {e}")
+
+    def lock_ocr_number_position(self, frame: np.ndarray):
+        """F8 准备阶段：锁定 PaddleOCR 数字检测框并预热 rec 模型。
+
+        仅对 detection_mode=='text_ocr' 且 ocr_engine=='paddle' 且 enabled 的资源生效；
+        其它检测模式/OCR 引擎完全不受影响。锁定后 RUNNING 才会用 OCR 检测（未锁定=不触发）。
+        框 = 用户框选的 text_x1/y1/x2/y2；此处顺带预读一次做校验 + 预热(避免战斗中首帧卡顿)。"""
+        # 清除上一次 F8 的旧框，避免残留
+        self._ocr_number_box = {}
+        if frame is None:
+            return
+        for resource_type in ("hp", "mp"):
+            config = self.hp_config if resource_type == "hp" else self.mp_config
+            if not config.get("enabled", False):
+                continue
+            if config.get("detection_mode") != "text_ocr" or config.get("ocr_engine") != "paddle":
+                continue
+            try:
+                x1 = int(config.get("text_x1", 0))
+                y1 = int(config.get("text_y1", 0))
+                x2 = int(config.get("text_x2", 0))
+                y2 = int(config.get("text_y2", 0))
+                if not (0 <= x1 < x2 <= frame.shape[1] and 0 <= y1 < y2 <= frame.shape[0]):
+                    LOG_ERROR(f"[OCR锁定] {resource_type.upper()} 文本ROI无效: ({x1},{y1},{x2},{y2})")
+                    continue
+                if self.paddle_ocr_manager is None:
+                    from ..utils.paddle_ocr_manager import get_paddle_ocr_manager
+                    self.paddle_ocr_manager = get_paddle_ocr_manager()
+                model_name = config.get("ocr_model", "PP-OCRv6_small_rec")
+                device = config.get("ocr_device", "cpu")
+                min_score = float(config.get("match_threshold", 0.5))
+                roi = frame[y1:y2, x1:x2]
+                LOG_INFO(f"[OCR锁定] {resource_type.upper()} 预热/锁定 PaddleOCR({model_name}@{device})…首次可能加载模型")
+                cur, mx, pct = self.paddle_ocr_manager.recognize_and_parse(roi, model_name, device, min_score)
+                # 始终锁定用户框选位置；预读失败仅告警(战斗中实际帧再读)
+                self._ocr_number_box[resource_type] = (x1, y1, x2, y2)
+                if pct is not None:
+                    LOG_INFO(f"[OCR锁定] {resource_type.upper()} 已锁定({x1},{y1},{x2},{y2}) 预读={cur}/{mx}={pct:.1f}%")
+                else:
+                    LOG_INFO(f"[OCR锁定] {resource_type.upper()} 已锁定({x1},{y1},{x2},{y2})，但预读未解析出有效数字，请确认框选位置/模型")
+            except Exception as e:
+                LOG_ERROR(f"[OCR锁定] {resource_type.upper()} 锁定失败: {e}")
 
     def _get_region_from_config(self, config: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
         """从配置中获取区域坐标"""

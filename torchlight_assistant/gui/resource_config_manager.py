@@ -196,6 +196,13 @@ class ResourceConfigManager:
                 }
             )
 
+        # 🔧 保留 half(半圆方向)字段:GUI 无对应控件,从圆形缓存带出,避免保存时丢失
+        # (PoE2 角落球需要 HP="right"/MP="left",与 D4 默认相反;在 JSON 里设置)
+        if circle_config and resource_type in circle_config:
+            half = circle_config[resource_type].get("half")
+            if half:
+                config["half"] = half
+
     @staticmethod
     def _add_rectangle_config(
         config: Dict[str, Any], resource_type: str, widgets: Dict[str, Any]
@@ -391,6 +398,10 @@ class ResourceConfigManager:
                         "center_y": circle_coords[1],
                         "radius": circle_coords[2],
                     }
+                    # 🔧 把 half(半圆方向)一并存入缓存,GUI 保存时再带回配置,避免丢失
+                    half_val = resource_config.get("half")
+                    if half_val:
+                        circle_data["half"] = half_val
                     setattr(
                         widget_owner,
                         circle_config_attr_name,

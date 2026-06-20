@@ -17,8 +17,9 @@ class RegionSelectionDialog(QDialog):
         int, int, int, int, dict
     )  # x1, y1, x2, y2, color_analysis
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, analyze_colors: bool = True):
         super().__init__(parent)
+        self._analyze_colors_enabled = analyze_colors
         self.setWindowTitle("选择检测区域")
         self.setWindowFlags(
             Qt.WindowStaysOnTopHint
@@ -103,12 +104,19 @@ class RegionSelectionDialog(QDialog):
                 # 存储区域信息，准备异步分析
                 self._selected_region = (x1, y1, x2, y2)
 
-                # 延迟执行分析，避免阻塞UI
-                from PySide6.QtCore import QTimer
+                if self._analyze_colors_enabled:
+                    # 延迟执行分析，避免阻塞UI
+                    from PySide6.QtCore import QTimer
 
-                QTimer.singleShot(100, self._perform_color_analysis_and_close)
+                    QTimer.singleShot(100, self._perform_color_analysis_and_close)
+                else:
+                    self.accept()
             else:
                 self.accept()
+
+    def get_screenshot_array(self):
+        """返回当前全屏截图的 BGR numpy 数组。"""
+        return self._pixmap_to_array(self.screenshot)
 
     def _perform_color_analysis_and_close(self):
         """执行颜色分析然后关闭对话框"""

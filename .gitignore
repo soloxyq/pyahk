@@ -9,6 +9,7 @@ __pycache__/
 # C extensions
 *.so
 *.exe
+*.mp4
 .qoder
 .vscode
 # Distribution / packaging

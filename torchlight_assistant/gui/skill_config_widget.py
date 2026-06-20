@@ -5,8 +5,9 @@ from PySide6.QtWidgets import (
     QLabel,
     QGroupBox,
     QFrame,
+    QPushButton,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from typing import Dict, Any
 
 
@@ -17,7 +18,7 @@ from .custom_widgets import (
     ConfigComboBox,
 )
 from ..core.event_bus import event_bus
-from ..utils.debug_log import LOG_ERROR  # Import LOG_ERROR
+from ..utils.debug_log import LOG_ERROR, LOG_INFO  # Import LOG_ERROR / LOG_INFO
 
 
 class SimplifiedSkillWidget(QWidget):
@@ -119,7 +120,58 @@ class SimplifiedSkillWidget(QWidget):
             self._ui_widgets[prop].setMaximumWidth(width)
             frame_layout.addWidget(self._ui_widgets[prop])
 
+        # 📦 框选按钮:拖拽框选该技能的冷却图标,直接填框左上角 X/Y 与方形边长(取框宽)
+        select_btn = QPushButton("📦框选")
+        select_btn.setMaximumWidth(60)
+        select_btn.setToolTip(
+            "拖拽框选该技能的冷却图标。\n"
+            "直接填入框左上角 X/Y 和方形边长(冷却检测是方形,边长取框宽)。\n"
+            "框成大致正方形即可。"
+        )
+        select_btn.clicked.connect(self._start_cooldown_region_selection)
+        frame_layout.addWidget(select_btn)
+
         return frame
+
+    def _start_cooldown_region_selection(self):
+        """框选技能冷却图标,把框的左上角坐标与框宽直接填入 CooldownCoordX/Y/Size。
+
+        冷却检测是方形区域(size×size, 左上角对齐),故只取框宽作为边长,不计算中心。
+        """
+        top_window = self.window()
+
+        def show_dialog():
+            try:
+                from .region_selection_dialog import RegionSelectionDialog
+
+                dialog = RegionSelectionDialog()
+
+                def on_region_selected(x1, y1, x2, y2):
+                    left, top = min(x1, x2), min(y1, y2)
+                    w = abs(x2 - x1)
+                    self._ui_widgets["CooldownCoordX"].setText(str(left))
+                    self._ui_widgets["CooldownCoordY"].setText(str(top))
+                    self._ui_widgets["CooldownSize"].setText(str(w))
+                    LOG_INFO(
+                        f"[框选] {self.skill_name} 冷却坐标已更新: "
+                        f"X={left}, Y={top}, 宽高={w}"
+                    )
+
+                dialog.region_selected.connect(on_region_selected)
+                dialog.exec()
+            except Exception as e:
+                LOG_ERROR(f"[框选] {self.skill_name} 区域选择失败: {e}")
+            finally:
+                # 无论确认/取消/异常,都恢复主窗口
+                if top_window is not None:
+                    top_window.show()
+                    top_window.raise_()
+                    top_window.activateWindow()
+
+        # 先隐藏主窗口,再延迟截屏框选,避免把主界面框进截图
+        if top_window is not None:
+            top_window.hide()
+        QTimer.singleShot(150, show_dialog)
 
     # _create_internal_cooldown_frame 方法已移除 - 该功能未实现
 

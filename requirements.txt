@@ -6,5 +6,7 @@ mss>=9.0.1           # 高性能截图
 numpy>=1.20.0         # 数值计算
 opencv-python>=4.5.0
 pywin32>=306
-# For stability, paddleocr version is locked.
-paddleocr==2.7.3
+# OCR: PaddleOCR 3.x — PP-OCRv6 + TextRecognition(rec-only) 用于 HP/MP 数字识别。
+# 需另行安装 paddlepaddle / paddlepaddle-gpu(走官方索引,见 https://www.paddlepaddle.org.cn/),
+# 例: pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+paddleocr>=3.7.0
