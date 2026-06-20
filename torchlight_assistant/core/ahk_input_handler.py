@@ -248,6 +248,39 @@ class AHKInputHandler:
             return True
         return self.command_sender.release_key(key, priority=0)
 
+    def set_macro_steps(self, steps) -> bool:
+        """把通用宏步骤下发给 AHK 端解释器。"""
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                try:
+                    self.debug_display_manager.add_action(f"MacroSteps:{len(steps or [])}")
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
+            return True
+        return self.command_sender.set_macro_steps(steps)
+
+    def start_macro(self) -> bool:
+        """启动 AHK 端通用宏循环。"""
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                try:
+                    self.debug_display_manager.add_action("MacroStart")
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
+            return True
+        return self.command_sender.start_macro()
+
+    def stop_macro(self) -> bool:
+        """停止 AHK 端通用宏循环并释放宏持键。"""
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                try:
+                    self.debug_display_manager.add_action("MacroStop")
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
+            return True
+        return self.command_sender.stop_macro()
+
     def clear_queue(self):
         """清空所有队列(含 emergency)。用于 PAUSED 状态完全停下。"""
         self.command_sender.clear_queue(-1)

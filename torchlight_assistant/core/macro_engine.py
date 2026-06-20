@@ -1086,7 +1086,6 @@ class MacroEngine:
         default_global = {
             "sequence_enabled": False,
             "skill_sequence": "1,2,3,4,5,6,7,8",
-            "sequence_timer_interval": 1000,
             "queue_processor_interval": 50,
             "cooldown_checker_interval": 100,
             "capture_interval": 40,

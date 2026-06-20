@@ -17,7 +17,7 @@
         },
         "Skill2": {
             "Enabled": true,
-            "Key": "w",
+            "Key": "e",
             "Priority": false,
             "Timer": 175,
             "TriggerMode": 1,
@@ -31,7 +31,7 @@
             "AltKey": "2"
         },
         "Skill3": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "r",
             "Priority": false,
             "Timer": 650,
@@ -46,7 +46,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "q",
             "Priority": false,
             "Timer": 150,

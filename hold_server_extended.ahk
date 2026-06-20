@@ -73,6 +73,17 @@ global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控
 global DelayUntil := 0  ; 延迟到什么时间（毫秒），0表示没有延迟
 global DelayClearOthers := false  ; 当前 delay 期间是否需要清空非紧急队列(管理按键专用)
 
+; 🎯 AHK 端通用宏解释器:Python 只下发步骤,AHK 保证顺序、循环和中止释放
+global MacroSteps := []
+global MacroActive := false
+global MacroIndex := 1
+global MacroDueTime := 0
+global MacroHeldKeys := Map()
+global MacroHeldOrder := []
+global MacroSpecialSuppressed := false
+global MacroManagedSuppressed := false
+global MACRO_TICK_MS := 5
+
 ; 🎯 基于F8状态的智能窗口句柄缓存
 global CurrentPythonWindow := "TorchLightAssistant_MainWindow_12345"  ; 启动时默认主窗口
 global CachedPythonHwnd := 0  ; 缓存的Python窗口句柄
@@ -235,6 +246,194 @@ ProcessQueue() {
 
 ; 启动定时器（固定20ms，简单高效）
 SetTimer(ProcessQueue, 20)
+
+; 宏解释器独立 tick:只推进 AHK 端宏状态机,不占用全局 DelayUntil/队列
+SetTimer(MacroTick, MACRO_TICK_MS)
+
+; ===============================================================================
+; AHK 端通用宏解释器
+; ===============================================================================
+SetMacroSteps(param) {
+    global MacroSteps
+
+    MacroSteps := []
+    if (param = "") {
+        return
+    }
+
+    lines := StrSplit(param, "`n", "`r")
+    for index, line in lines {
+        line := Trim(line, "`r`n `t ")
+        if (line = "") {
+            continue
+        }
+
+        parts := CachedStrSplit(line, ":", , 2)
+        if (parts.Length < 2) {
+            continue
+        }
+
+        stype := parts[1]
+        data := parts[2]
+        if (stype = "delay") {
+            if (!IsInteger(data)) {
+                continue
+            }
+            MacroSteps.Push({ type: stype, data: String(Max(Integer(data), 0)) })
+        } else if (stype = "down" || stype = "up" || stype = "press") {
+            if (data != "") {
+                MacroSteps.Push({ type: stype, data: data })
+            }
+        }
+    }
+}
+
+StartMacro() {
+    global MacroSteps, MacroActive, MacroIndex, MacroDueTime
+    global MacroSpecialSuppressed, MacroManagedSuppressed, SpecialKeysPaused, ActiveManagedKeys
+
+    ReleaseMacroHeldKeys()
+    MacroIndex := 1
+    MacroDueTime := 0
+    MacroManagedSuppressed := (ActiveManagedKeys.Count > 0)
+    MacroSpecialSuppressed := SpecialKeysPaused
+    MacroActive := (MacroSteps.Length > 0)
+}
+
+StopMacro() {
+    global MacroActive, MacroIndex, MacroDueTime
+    global MacroSpecialSuppressed, MacroManagedSuppressed
+
+    MacroActive := false
+    MacroIndex := 1
+    MacroDueTime := 0
+    MacroSpecialSuppressed := false
+    MacroManagedSuppressed := false
+    ReleaseMacroHeldKeys()
+}
+
+MacroTick() {
+    global MacroSteps, MacroActive, MacroIndex, MacroDueTime
+    global MacroSpecialSuppressed, MacroManagedSuppressed
+
+    if (!MacroActive || MacroSpecialSuppressed || MacroManagedSuppressed) {
+        return
+    }
+    if (MacroSteps.Length = 0) {
+        return
+    }
+    if (MacroDueTime > 0 && A_TickCount < MacroDueTime) {
+        return
+    }
+
+    MacroDueTime := 0
+    if (MacroIndex < 1 || MacroIndex > MacroSteps.Length) {
+        MacroIndex := 1
+    }
+
+    step := MacroSteps[MacroIndex]
+    MacroIndex += 1
+    if (MacroIndex > MacroSteps.Length) {
+        MacroIndex := 1
+    }
+
+    stype := step.type
+    data := step.data
+
+    if (stype = "delay") {
+        MacroDueTime := A_TickCount + Max(Integer(data), 1)
+    } else if (stype = "down") {
+        SendDown(data)
+        TrackMacroDown(data)
+    } else if (stype = "up") {
+        SendUp(data)
+        TrackMacroUp(data)
+    } else if (stype = "press") {
+        SendPress(data, false)
+    }
+}
+
+TrackMacroDown(key) {
+    global MacroHeldKeys, MacroHeldOrder
+    if (key = "") {
+        return
+    }
+    MacroHeldKeys[key] := true
+    for index, existing in MacroHeldOrder {
+        if (existing = key) {
+            return
+        }
+    }
+    MacroHeldOrder.Push(key)
+}
+
+TrackMacroUp(key) {
+    global MacroHeldKeys, MacroHeldOrder
+    if (key = "") {
+        return
+    }
+    if (MacroHeldKeys.Has(key)) {
+        MacroHeldKeys.Delete(key)
+    }
+    idx := MacroHeldOrder.Length
+    while (idx > 0) {
+        if (MacroHeldOrder[idx] = key) {
+            MacroHeldOrder.RemoveAt(idx)
+        }
+        idx -= 1
+    }
+}
+
+ReleaseMacroHeldKeys() {
+    global MacroHeldKeys, MacroHeldOrder
+
+    released := Map()
+    idx := MacroHeldOrder.Length
+    while (idx > 0) {
+        key := MacroHeldOrder[idx]
+        if (MacroHeldKeys.Has(key)) {
+            SendUp(key)
+            released[key] := true
+        }
+        idx -= 1
+    }
+
+    for key, _ in MacroHeldKeys {
+        if (!released.Has(key)) {
+            SendUp(key)
+        }
+    }
+
+    MacroHeldKeys := Map()
+    MacroHeldOrder := []
+}
+
+AbortMacroRuntime() {
+    global MacroIndex, MacroDueTime
+    ReleaseMacroHeldKeys()
+    MacroIndex := 1
+    MacroDueTime := 0
+}
+
+SetMacroSpecialSuppressed(enabled) {
+    global MacroSpecialSuppressed, MacroDueTime
+    MacroSpecialSuppressed := enabled
+    if (enabled) {
+        AbortMacroRuntime()
+    } else {
+        MacroDueTime := 0
+    }
+}
+
+SetMacroManagedSuppressed(enabled) {
+    global MacroManagedSuppressed, MacroDueTime
+    MacroManagedSuppressed := enabled
+    if (enabled) {
+        AbortMacroRuntime()
+    } else {
+        MacroDueTime := 0
+    }
+}
 
 ; ===============================================================================
 ; 命令接收 (WM_COPYDATA)
@@ -399,6 +598,22 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             }
             return 1
 
+        case CMD_SET_MACRO_STEPS:
+            ; SET_MACRO_STEPS - 设置 AHK 端通用宏步骤
+            ; 参数格式: 每行一个 type:data,如 "down:RButton`ndelay:50`nup:RButton"
+            SetMacroSteps(param)
+            return 1
+
+        case CMD_START_MACRO:
+            ; START_MACRO - 从第 1 步启动/重启通用宏循环
+            StartMacro()
+            return 1
+
+        case CMD_STOP_MACRO:
+            ; STOP_MACRO - 停止通用宏并按 LIFO 释放宏持键
+            StopMacro()
+            return 1
+
         case CMD_SET_PYTHON_WINDOW_STATE:
             ; SET_PYTHON_WINDOW_STATE - 设置Python窗口状态
             ; 参数格式: "main" 或 "osd"
@@ -494,6 +709,9 @@ ClearManagedKeyMark(key) {
     global ActiveManagedKeys
     if (ActiveManagedKeys.Has(key)) {
         ActiveManagedKeys.Delete(key)
+    }
+    if (ActiveManagedKeys.Count = 0) {
+        SetMacroManagedSuppressed(false)
     }
 }
 
@@ -658,6 +876,7 @@ ClearQueue(priority) {
             ; 在下次入队前还会清掉非紧急(包括 hold 模式 resume 时的 hold:N)
             DelayUntil := 0
             DelayClearOthers := false
+            StopMacro()
         case -2:
             ; 🔧 清空所有非紧急队列(保留 emergency,用于管理按键期间保护 HP/MP 救命动作)
             ; emergency 不动 → cleanup:key 仍会执行 → ActiveManagedKeys 不需手动清
@@ -975,6 +1194,7 @@ UnregisterHook(key) {
         }
         if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
             SpecialKeysPaused := false
+            SetMacroSpecialSuppressed(false)
             SendEventToPython("special_key_pause:end")
         }
     }
@@ -1007,6 +1227,7 @@ HandleSpecialKeyDown(key) {
     ; 如果这是第一个特殊按键，暂停系统
     if (SpecialKeysPressed.Count = 1 && !SpecialKeysPaused) {
         SpecialKeysPaused := true
+        SetMacroSpecialSuppressed(true)
         SendEventToPython("special_key_pause:start")
     }
 
@@ -1025,6 +1246,7 @@ HandleSpecialKeyUp(key) {
     ; 如果所有特殊按键都释放了，恢复系统
     if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
         SpecialKeysPaused := false
+        SetMacroSpecialSuppressed(false)
         SendEventToPython("special_key_pause:end")
     }
 
@@ -1043,6 +1265,9 @@ HandleManagedKey(key) {
 
     ; 标记为处理中
     MarkManagedKeyActive(key)
+
+    ; 管理按键要独占输入:中止当前宏持键,暂停宏解释器,待 emergency 序列末尾恢复
+    SetMacroManagedSuppressed(true)
 
     ; 🚀 关键修复：清空所有非紂急队列，同时同步计数器！
     if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
@@ -1226,11 +1451,13 @@ ClearAllConfigurableHooks() {
 
     ; 配置切换:所有 managed_keys 即将注销,残留 single-flight 锁无意义
     ActiveManagedKeys := Map()
+    SetMacroManagedSuppressed(false)
 
     ; 兜底:即使 per-key 注销有遗漏,也确保 special 状态彻底归零
     SpecialKeysPressed := Map()
     if (SpecialKeysPaused) {
         SpecialKeysPaused := false
+        SetMacroSpecialSuppressed(false)
         SendEventToPython("special_key_pause:end")
     }
 }

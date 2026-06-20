@@ -79,7 +79,7 @@ class TopControlsWidget(QWidget):
         self.mode_combo.addItems(["技能", "序列"])
         self.mode_combo.setToolTip(
             "技能模式: 每个技能独立配置(定时/冷却检测/条件),按各自规则触发\n"
-            "序列模式: 按「序列」列表循环发键,支持 delayN 虚拟键插入暂停\n"
+            "序列/宏模式: 按宏步骤列表循环执行,等待时间由「延时」步骤显式配置\n"
             "(HP/MP 智能药剂、优先级按键、强制移动等「通用」设置两种模式都生效)"
         )
         layout.addWidget(self.mode_combo)
@@ -146,8 +146,8 @@ class TimingSettingsWidget(QWidget):
         layout = QVBoxLayout(self)
 
         # 时间间隔设置
-        # 标签前缀标注生效模式:「序列」/「技能」=仅该模式生效, 「通用」=两种模式都生效
-        time_group = QGroupBox("时间间隔设置 (毫秒)  —  「序列」/「技能」=仅该模式, 「通用」=两种模式")
+        # 标签前缀标注生效模式:「技能」=仅技能模式生效,「通用」=两种模式都生效
+        time_group = QGroupBox("时间间隔设置 (毫秒)  —  「技能」=仅技能模式, 「通用」=两种模式")
         grid_layout = QGridLayout(time_group)
         grid_layout.setContentsMargins(15, 20, 15, 15)
         grid_layout.setSpacing(12)
@@ -157,7 +157,6 @@ class TimingSettingsWidget(QWidget):
             ("「通用」按键时长:", "key_press"),
             ("「通用」鼠标时长:", "mouse_click"),
             ("「技能」冷却检查:", "cooldown_checker"),
-            ("「序列」按键间隔:", "sequence_timer"),
             ("「通用」图像捕获间隔:", "capture_interval"),
             ("「通用」HP药剂冷却:", "hp_cooldown"),
             ("「通用」MP药剂冷却:", "mp_cooldown"),
@@ -202,7 +201,6 @@ class TimingSettingsWidget(QWidget):
             "cooldown_checker_interval": self.timing_spinboxes[
                 "cooldown_checker"
             ].value(),
-            "sequence_timer_interval": self.timing_spinboxes["sequence_timer"].value(),
             "capture_interval": self.timing_spinboxes["capture_interval"].value(),
             "hp_cooldown": self.timing_spinboxes["hp_cooldown"].value(),
             "mp_cooldown": self.timing_spinboxes["mp_cooldown"].value(),
@@ -219,7 +217,6 @@ class TimingSettingsWidget(QWidget):
             "key_press": config.get("key_press_duration", 10),
             "mouse_click": config.get("mouse_click_duration", 5),
             "cooldown_checker": config.get("cooldown_checker_interval", 100),
-            "sequence_timer": config.get("sequence_timer_interval", 250),
             "capture_interval": config.get("capture_interval", 40),
             "hp_cooldown": config.get("hp_cooldown", 5000),
             "mp_cooldown": config.get("mp_cooldown", 8000),

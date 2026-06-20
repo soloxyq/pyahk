@@ -12,6 +12,7 @@ from .states import MacroState
 from .unified_scheduler import UnifiedScheduler
 from ..utils.border_frame_manager import BorderFrameManager
 from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
+from ..utils.key_names import migrate_skill_sequence_to_steps
 
 
 class SkillManager:
@@ -46,9 +47,8 @@ class SkillManager:
         # 线程安全配置
         self._config_lock = threading.Lock()
         self._resource_condition_history = {}
-        self._sequence_index = 0
         self._required_consecutive_checks = 2
-        
+
         # 按住键状态跟踪（一次性按下/释放，不在循环中）
         self._held_hold_keys = set()
         self._held_hold_order: List[str] = []
@@ -88,7 +88,7 @@ class SkillManager:
             if self.unified_scheduler.get_status()["running"]:
                 self.unified_scheduler.pause()
                 LOG(f"[性能优化] 调度器已暂停 - {reason}, 激活按键: {active_keys}")
-            
+
         except Exception as e:
             LOG_ERROR(f"[性能优化] 暂停调度器异常: {e}")
     
@@ -126,16 +126,8 @@ class SkillManager:
         is_sequence_mode = self._global_config.get("sequence_enabled", False)
 
         if is_sequence_mode:
-            # 序列模式：只添加序列任务（不需要冷却检查）
-            seq_interval = (
-                self._global_config.get("sequence_timer_interval", 1000) / 1000.0
-            )
-            self.unified_scheduler.add_task(
-                "sequence_scheduler", seq_interval, self.execute_sequence_step
-            )
-            LOG_INFO(
-                f"[统一调度器] 进入序列模式，添加序列任务，间隔: {seq_interval:.3f}s"
-            )
+            # 宏模式由 AHK 端解释器执行,Python 调度器只保留资源检测任务。
+            LOG_INFO("[统一调度器] 进入宏模式，宏步骤由 AHK 端循环执行")
         else:
             # 技能模式：添加定时和冷却任务
             # 1. 添加定时技能任务
@@ -193,9 +185,10 @@ class SkillManager:
 
     def pause(self):
         """暂停所有技能活动"""
-        # 一次性释放所有按住键
-        self._release_hold_keys()
         self._is_paused = True
+        # 一次性释放所有按住键 + 停止 AHK 端宏(释放宏持键)
+        self._release_hold_keys()
+        self._stop_ahk_macro()
 
         # 暂停统一调度器
         if self.unified_scheduler.get_status()["running"]:
@@ -211,8 +204,11 @@ class SkillManager:
             self.unified_scheduler.resume()
             LOG_INFO("[统一调度器] 已恢复")
 
-            # 一次性重新按住
-            self._apply_hold_keys()
+            if self._is_macro_mode():
+                self._start_ahk_macro()
+            else:
+                # 一次性重新按住
+                self._apply_hold_keys()
 
     def update_all_configs(self, skills_config: Dict[str, Any]):
         """更新所有技能配置并同步调度器"""
@@ -249,6 +245,8 @@ class SkillManager:
 
             # 如果调度器正在运行，需要更新任务
             if self._is_running and self.unified_scheduler.get_status()["running"]:
+                if self._is_macro_mode():
+                    return
                 # 非暂停状态下，同步按住集合的增量（一次性按/放）
                 if not self._is_paused:
                     self._apply_delta_hold_keys(old_hold_keys, new_hold_keys)
@@ -297,8 +295,19 @@ class SkillManager:
         """更新全局配置并同步调度器"""
         old_sequence_enabled = self._global_config.get("sequence_enabled", False)
         new_sequence_enabled = global_config.get("sequence_enabled", False)
+        old_macro_steps = self._global_config.get("macro_steps")
+        new_macro_steps = global_config.get("macro_steps")
+        macro_changed = old_sequence_enabled != new_sequence_enabled or old_macro_steps != new_macro_steps
 
         self._global_config = global_config
+
+        if self._is_running and macro_changed:
+            if old_sequence_enabled:
+                self._stop_ahk_macro()
+            if new_sequence_enabled:
+                self._set_ahk_macro_steps()
+                if not self._is_paused:
+                    self._start_ahk_macro(sync_steps=False)
 
         # 如果调度器正在运行，需要更新任务
         if self._is_running and self.unified_scheduler.get_status()["running"]:
@@ -309,17 +318,7 @@ class SkillManager:
                 )
                 self._setup_all_scheduled_tasks()
             else:
-                # 序列模式状态没变，只更新间隔
-                if new_sequence_enabled:
-                    # 序列模式：更新序列任务间隔
-                    seq_interval = (
-                        global_config.get("sequence_timer_interval", 1000) / 1000.0
-                    )
-                    if self.unified_scheduler.update_task_interval(
-                        "sequence_scheduler", seq_interval
-                    ):
-                        LOG_INFO(f"[统一调度器] 更新序列任务间隔: {seq_interval:.3f}s")
-                else:
+                if not new_sequence_enabled:
                     # 技能模式：更新冷却检查间隔
                     cooldown_interval = (
                         global_config.get("cooldown_checker_interval", 100) / 1000.0
@@ -362,55 +361,42 @@ class SkillManager:
             # ✅ 使用获取到的帧数据执行技能，确保条件检测准确性
             self._try_execute_skill(skill_name, skill_config, cached_frame)
 
-    def execute_sequence_step(self):
-        if not self._is_running or self._is_paused:
-            return
+    def _get_macro_steps(self):
+        """返回当前宏的原子步骤列表(down/up/press/delay)。
 
-        # 获取序列配置 - 直接从全局配置中读取
-        sequence_keys_str = self._global_config.get("skill_sequence", "")
-        sequence_keys = [
-            key.strip() for key in sequence_keys_str.split(",") if key.strip()
-        ]
-        if not sequence_keys:
-            return
-
-        # 取当前项并推进索引
-        # 🔧 BUG修复: 先把索引钳制到当前长度再取值,否则运行时缩短 skill_sequence
-        # (热更新/保存配置触发 update_global_config 但不重置 _sequence_index)会让
-        # 残留的越界索引在取值行抛 IndexError,且因取模在其后永远执行不到,序列永久卡死。
-        idx = self._sequence_index % len(sequence_keys)
-        current_item = sequence_keys[idx]
-        self._sequence_index = (idx + 1) % len(sequence_keys)
-
-        # 🎯 delay 虚拟按键支持(方案A,向后兼容):
-        #   - 普通键: 发键(普通优先级),下一步按"按键间隔"(sequence_timer_interval)推进
-        #   - delayN 项: 不发键,只把"下一步"推迟 N ms
-        # 通过 update_task_interval 让序列任务自调度,实现逐项可变步长;无 delay 的序列行为不变。
-        delay_ms = self._parse_sequence_delay(current_item)
-        if delay_ms is not None:
-            next_gap = max(delay_ms, 1) / 1000.0
-        else:
-            self.input_handler.execute_skill_normal(current_item)
-            next_gap = self._global_config.get("sequence_timer_interval", 1000) / 1000.0
-
-        # 自调度下一步触发时刻(序列任务存在时才生效;不存在则安全 no-op)
-        self.unified_scheduler.update_task_interval("sequence_scheduler", next_gap)
-
-    @staticmethod
-    def _parse_sequence_delay(item: str) -> Optional[int]:
-        """序列项若为 delay 虚拟按键(如 'delay500'/'Delay500'),返回毫秒数;否则返回 None。
-
-        与 AHK 序列展开(EnqueueAction 的 delayN→delay:N)及技能 Key 字段的延迟约定一致,
-        统一用 `delay<毫秒>` 形式,避免被当成普通按键发到 AHK(那样会 Send 一个不存在的键)。
+        macro_steps 为权威来源;键存在(哪怕是空列表)即尊重用户配置。仅当配置里完全
+        没有 macro_steps 键时,才从旧 skill_sequence 现场迁移(兜底未归一化的配置;
+        正常路径已在 normalize_config_keys 迁移过)。
         """
-        if not item:
-            return None
-        low = item.lower()
-        if low.startswith("delay"):
-            num = low[5:].strip()
-            if num.isdigit():
-                return int(num)
-        return None
+        g = self._global_config
+        if "macro_steps" in g:
+            steps = g.get("macro_steps")
+            return steps if isinstance(steps, list) else []
+        seq = g.get("skill_sequence")
+        return migrate_skill_sequence_to_steps(seq) if seq else []
+
+    def _is_macro_mode(self) -> bool:
+        return bool(self._global_config.get("sequence_enabled", False))
+
+    def _set_ahk_macro_steps(self):
+        steps = self._get_macro_steps()
+        if hasattr(self.input_handler, "set_macro_steps"):
+            self.input_handler.set_macro_steps(steps)
+        LOG_INFO(f"[宏] 已下发 AHK 宏步骤: {len(steps)}")
+
+    def _start_ahk_macro(self, sync_steps: bool = True):
+        if not self._is_macro_mode():
+            return
+        if sync_steps:
+            self._set_ahk_macro_steps()
+        if hasattr(self.input_handler, "start_macro"):
+            self.input_handler.start_macro()
+        LOG_INFO("[宏] AHK 宏循环已启动")
+
+    def _stop_ahk_macro(self):
+        if hasattr(self.input_handler, "stop_macro"):
+            self.input_handler.stop_macro()
+        LOG_INFO("[宏] AHK 宏循环已停止")
 
     def check_cooldowns(self):
         """统一技能冷却检查 - 使用单帧数据确保一致性"""
@@ -836,7 +822,6 @@ class SkillManager:
             return
         self._is_running = True
         self._is_paused = False
-        self._sequence_index = 0
 
         # 设置技能坐标并计算边框
         with self._config_lock:
@@ -846,16 +831,20 @@ class SkillManager:
         # 直接启动自主调度
         self._start_autonomous_scheduling()
 
-        # 一次性按住配置中的按住键
-        self._apply_hold_keys()
+        if self._is_macro_mode():
+            self._start_ahk_macro()
+        else:
+            # 一次性按住配置中的按住键
+            self._apply_hold_keys()
 
     def stop(self):
         if not self._is_running:
             return
-        # 一次性释放所有按住键
-        self._release_hold_keys()
+        # 先停推进,再释放(含宏持键),避免调度线程竞态
         self._is_running = False
         self._is_paused = False
+        self._release_hold_keys()
+        self._stop_ahk_macro()
 
         # 停止自主调度
         self._stop_autonomous_scheduling()
@@ -874,6 +863,12 @@ class SkillManager:
         # 强制设置停止标志
         self._is_running = False
         self._is_paused = True
+
+        # 释放宏持键,防止紧急停止时键悬空
+        try:
+            self._stop_ahk_macro()
+        except Exception as e:
+            LOG_ERROR(f"[紧急停止] 中止宏失败: {e}")
 
         # 强制停止统一调度器
         try:

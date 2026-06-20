@@ -9,6 +9,7 @@ from torchlight_assistant.config.ahk_commands import (
     CMD_CLEAR_QUEUE, CMD_PAUSE, CMD_RESUME,
     CMD_HOOK_REGISTER, CMD_HOOK_UNREGISTER,
     CMD_SET_SEND_MODE,
+    CMD_SET_MACRO_STEPS, CMD_START_MACRO, CMD_STOP_MACRO,
     get_command_name
 )
 from torchlight_assistant.utils.debug_log import LOG_INFO, LOG_ERROR
@@ -164,6 +165,49 @@ class AHKCommandSender:
         from torchlight_assistant.config.ahk_commands import CMD_SET_MANAGED_KEY_CONFIG
         param = f"{key}:{target}:{delay}:{hold_ms}"
         return send_ahk_cmd(self.window_title, CMD_SET_MANAGED_KEY_CONFIG, param)
+
+    # ========================================================================
+    # AHK 端通用宏
+    # ========================================================================
+
+    @staticmethod
+    def serialize_macro_steps(steps) -> str:
+        """将 macro_steps 编码成 AHK 端 line protocol: ``type:data`` per line。"""
+        lines = []
+        if not isinstance(steps, list):
+            return ""
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            stype = step.get("type")
+            if stype == "delay":
+                try:
+                    data = str(max(int(step.get("ms", 0)), 0))
+                except (TypeError, ValueError):
+                    continue
+            elif stype in ("down", "up", "press"):
+                data = str(step.get("key", "")).strip()
+                if not data:
+                    continue
+            else:
+                continue
+            data = data.replace("\r", "").replace("\n", "")
+            lines.append(f"{stype}:{data}")
+        return "\n".join(lines)
+
+    def set_macro_steps(self, steps) -> bool:
+        """设置 AHK 端宏步骤列表。"""
+        return send_ahk_cmd(
+            self.window_title, CMD_SET_MACRO_STEPS, self.serialize_macro_steps(steps)
+        )
+
+    def start_macro(self) -> bool:
+        """启动 AHK 端宏循环。"""
+        return send_ahk_cmd(self.window_title, CMD_START_MACRO, "")
+
+    def stop_macro(self) -> bool:
+        """停止 AHK 端宏循环并释放宏持键。"""
+        return send_ahk_cmd(self.window_title, CMD_STOP_MACRO, "")
 
     # ========================================================================
     # 队列操作

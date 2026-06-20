@@ -25,6 +25,9 @@ CMD_SET_PYTHON_WINDOW_STATE = 18 # 设置Python窗口状态
 CMD_BATCH_UPDATE_CONFIG = 19 # 批量配置更新（Master方案学习）
 CMD_SET_SEND_MODE = 20 # 设置发送模式 (direct/control)
 CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS = 21 # 强制移动期间不被替换的白名单键(位移技能)
+CMD_SET_MACRO_STEPS = 22  # 设置 AHK 端宏步骤
+CMD_START_MACRO = 23      # 启动 AHK 端宏循环
+CMD_STOP_MACRO = 24       # 停止 AHK 端宏循环并释放宏持键
 
 # 命令名称映射（用于调试）
 CMD_NAMES = {
@@ -49,6 +52,9 @@ CMD_NAMES = {
     CMD_BATCH_UPDATE_CONFIG: "BATCH_UPDATE_CONFIG",
     CMD_SET_SEND_MODE: "SET_SEND_MODE",
     CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS: "SET_FORCE_MOVE_PASSTHROUGH_KEYS",
+    CMD_SET_MACRO_STEPS: "SET_MACRO_STEPS",
+    CMD_START_MACRO: "START_MACRO",
+    CMD_STOP_MACRO: "STOP_MACRO",
 }
 
 def get_command_name(cmd_id: int) -> str:

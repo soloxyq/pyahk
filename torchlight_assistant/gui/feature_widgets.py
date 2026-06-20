@@ -22,6 +22,8 @@ from .custom_widgets import (
     ConfigCheckBox,
 )
 from ..utils.debug_log import LOG_INFO
+from ..utils.key_names import migrate_skill_sequence_to_steps
+from .macro_steps_widget import MacroStepsEditor
 
 
 class AffixRerollWidget(QWidget):
@@ -203,24 +205,14 @@ class SkillConfigWidget(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        # 序列配置(仅「序列模式」生效)
-        self.sequence_frame = QGroupBox("「序列模式」按键序列配置")
+        # 宏配置(仅「序列/宏模式」生效)—— 通用雷蛇式步骤编辑器(按下/弹起/单击/延时)
+        self.sequence_frame = QGroupBox("「序列/宏模式」步骤配置")
         seq_layout = QVBoxLayout(self.sequence_frame)
         seq_layout.setContentsMargins(6, 8, 6, 6)
         seq_layout.setSpacing(4)
 
-        seq_layout.addWidget(QLabel("「序列」按键序列 (逗号分隔,支持 delayN 虚拟键):"))
-        self.sequence_entry = ConfigLineEdit()
-        self.sequence_entry.setMaximumHeight(24)
-        self.sequence_entry.setPlaceholderText(
-            "例如: 1,2,delay500,3   (delayN = 暂停 N 毫秒, 不发键)"
-        )
-        self.sequence_entry.setToolTip(
-            "序列模式按列表循环发键。\n"
-            "delayN 是虚拟按键: 走到该项时不发键, 改为暂停 N 毫秒(如 delay500 = 停 0.5 秒)。\n"
-            "普通键之间的间隔由「序列」按键间隔(时间间隔设置标签页)控制。"
-        )
-        seq_layout.addWidget(self.sequence_entry)
+        self.macro_editor = MacroStepsEditor()
+        seq_layout.addWidget(self.macro_editor)
 
         # 技能配置(仅「技能模式」生效)
         self.skill_frame = QGroupBox("「技能模式」技能配置")
@@ -240,6 +232,12 @@ class SkillConfigWidget(QWidget):
                 skills_config[skill_name] = widget.get_current_config()
         return skills_config
 
+    def get_macro_steps(self) -> List[Dict[str, Any]]:
+        """返回宏步骤编辑器当前的步骤列表(已归一化)。"""
+        if hasattr(self, "macro_editor"):
+            return self.macro_editor.get_steps()
+        return []
+
     def update_from_config(
         self, skills_config: Dict[str, Any], global_config: Optional[Dict[str, Any]] = None
     ):
@@ -254,12 +252,13 @@ class SkillConfigWidget(QWidget):
             import traceback
             traceback.print_exc()
 
-        # 更新序列配置
-        if global_config and hasattr(self, "sequence_entry"):
-            self.sequence_entry.setText(global_config.get("skill_sequence", ""))
-            LOG_INFO(
-                f"[SkillConfigWidget] 序列配置已更新: {self.sequence_entry.text()}"
-            )
+        # 更新宏步骤配置(macro_steps 优先;键缺失则由旧 skill_sequence 迁移)
+        if global_config and hasattr(self, "macro_editor"):
+            steps = global_config.get("macro_steps")
+            if steps is None:
+                steps = migrate_skill_sequence_to_steps(global_config.get("skill_sequence", ""))
+            self.macro_editor.set_steps(steps)
+            LOG_INFO(f"[SkillConfigWidget] 宏步骤已更新: {len(steps)} 步")
 
     def _create_skill_widgets(self):
         LOG_INFO("[SkillConfigWidget] 开始创建技能UI控件...")

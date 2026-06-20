@@ -37,6 +37,7 @@ from .ui_components import (
 )
 from ..utils.sound_manager import SoundManager
 from ..utils.debug_log import LOG, LOG_INFO, LOG_ERROR
+from ..utils.key_names import steps_to_legacy_sequence
 
 
 class GameSkillConfigUI(QMainWindow):
@@ -468,7 +469,11 @@ class GameSkillConfigUI(QMainWindow):
         if self.resource_management: global_config.update(self.resource_management.get_config())
         if self.priority_keys_widget: global_config["priority_keys"] = self.priority_keys_widget.get_config()
         skills_config = self.skill_config.get_config() if self.skill_config else {}
-        if hasattr(self.skill_config, "sequence_entry"): global_config["skill_sequence"] = self.skill_config.sequence_entry.text()
+        if hasattr(self.skill_config, "get_macro_steps"):
+            steps = self.skill_config.get_macro_steps()
+            global_config["macro_steps"] = steps
+            # 仅全 press/delay 时回写旧 CSV(降级/可读),含 down/up 则为空,macro_steps 为权威
+            global_config["skill_sequence"] = steps_to_legacy_sequence(steps)
         # 保留不在UI中编辑的配置段
         global_config["process_history"] = self._global_config.get("process_history", {})
         

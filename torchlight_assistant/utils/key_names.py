@@ -13,7 +13,7 @@ mouse_right 这类别名作为输入,但归一化后统一为标准名。详见 
   所有配置来源(预设 JSON、手填、旧配置迁移)。
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 # 别名(统一小写) → AHK 标准名。与历史 GUI 实现保持一致。
 _KEY_ALIAS_MAP = {
@@ -72,10 +72,93 @@ def normalize_key_field(value: Any) -> Any:
     return normalize_key_name(value)
 
 
+# 通用宏(雷蛇式)步骤类型。down/up/press 需要 key;delay 需要 ms。
+_MACRO_STEP_TYPES = ("down", "up", "press", "delay")
+
+
+def normalize_macro_steps(steps: Any) -> List[Dict[str, Any]]:
+    """归一化一份宏步骤列表:键名标准化、ms 转非负 int、丢弃非法步骤。
+
+    任何非 dict / 未知 type / 缺 key 的 down/up/press / ms 不可解析的 delay 都被跳过,
+    保证返回的列表里每一项都是干净可执行的步骤。非列表输入返回空列表。
+    """
+    result: List[Dict[str, Any]] = []
+    if not isinstance(steps, list):
+        return result
+    for s in steps:
+        if not isinstance(s, dict):
+            continue
+        stype = s.get("type")
+        if stype not in _MACRO_STEP_TYPES:
+            continue
+        if stype == "delay":
+            try:
+                ms = int(s.get("ms", 0))
+            except (TypeError, ValueError):
+                continue
+            result.append({"type": "delay", "ms": max(ms, 0)})
+        else:  # down / up / press
+            k = normalize_key_name(s.get("key"))
+            if not k:
+                continue
+            result.append({"type": stype, "key": k})
+    return result
+
+
+def migrate_skill_sequence_to_steps(seq: Any) -> List[Dict[str, Any]]:
+    """旧 CSV 序列 → 通用宏步骤列表(向后兼容)。
+
+    与 AHK 序列展开 / 旧 delayN 约定保持一致:仅 ``delay<数字>`` 识别为延时步骤,
+    其余(含畸形 delay token)按普通键转成 press 步骤。
+    """
+    steps: List[Dict[str, Any]] = []
+    if not isinstance(seq, str):
+        return steps
+    for token in seq.split(","):
+        t = token.strip()
+        if not t:
+            continue
+        low = t.lower()
+        if low.startswith("delay") and low[5:].strip().isdigit():
+            steps.append({"type": "delay", "ms": int(low[5:].strip())})
+        else:
+            steps.append({"type": "press", "key": normalize_key_name(t)})
+    return steps
+
+
+def steps_to_legacy_sequence(steps: Any) -> str:
+    """宏步骤列表 → 旧 CSV(降级/可读性)。
+
+    仅当所有步骤都是 press/delay(旧 CSV 能无损表达)时才生成字符串;一旦含 down/up
+    这类旧格式无法表达的步骤,返回 "" —— 避免写出语义错误的旧序列(macro_steps 才是权威)。
+    """
+    if not isinstance(steps, list):
+        return ""
+    tokens: List[str] = []
+    for s in steps:
+        if not isinstance(s, dict):
+            return ""
+        stype = s.get("type")
+        if stype == "press":
+            k = s.get("key")
+            if not k:
+                return ""
+            tokens.append(str(k))
+        elif stype == "delay":
+            try:
+                tokens.append("delay" + str(int(s.get("ms", 0))))
+            except (TypeError, ValueError):
+                return ""
+        else:
+            return ""  # down/up 无法用旧 CSV 表达
+    return ",".join(tokens)
+
+
 def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
     """就地归一化一份完整配置 dict 内所有按键字段,返回同一对象。
 
-    覆盖字段:skills.*.Key/AltKey、global.skill_sequence、
+    覆盖字段:skills.*.Key/AltKey、global.skill_sequence、global.macro_steps
+    (含旧 skill_sequence → macro_steps 的一次性迁移)、
     global.priority_keys.special_keys / managed_keys(键名 + target)、
     global.stationary_mode_config 的强制移动相关键、
     global.resource_management 的 hp/mp 按键。
@@ -104,6 +187,17 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         # --- global.skill_sequence ---
         if isinstance(glob.get("skill_sequence"), str):
             glob["skill_sequence"] = normalize_key_field(glob["skill_sequence"])
+
+        # --- global.macro_steps (通用宏步骤) ---
+        # 迁移:仅当 macro_steps 键缺失 且 skill_sequence 非空时,从旧 CSV 合成。
+        # 注意只看"键是否存在",尊重用户显式清空成 [](不再从旧序列回填)。
+        if "macro_steps" not in glob:
+            seq = glob.get("skill_sequence")
+            if isinstance(seq, str) and seq.strip():
+                glob["macro_steps"] = migrate_skill_sequence_to_steps(seq)
+        # 归一化已有/刚迁移的步骤(键名标准化、ms 转 int、过滤非法项)
+        if isinstance(glob.get("macro_steps"), list):
+            glob["macro_steps"] = normalize_macro_steps(glob["macro_steps"])
 
         # --- global.priority_keys ---
         pk = glob.get("priority_keys")
