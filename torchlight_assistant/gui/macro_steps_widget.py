@@ -3,7 +3,7 @@
 """通用宏(雷蛇式)步骤编辑器 —— 列表 + 增删 + 上下移 + 类型联动。
 
 步骤模型:{"type": "down"|"up"|"press"|"delay", "key"?: str, "ms"?: int}
-- 按下(down)/弹起(up)/单击(press): 需要按键(键盘键或鼠标键 LButton/RButton/MButton)
+- 按下(down)/弹起(up)/单击(press): 需要按键(键盘键或鼠标键 LButton/RButton/MButton/XButton1/XButton2)
 - 延时(delay): 需要毫秒,不发键
 「按住一段时间」用 按下 → 延时 → 弹起 组合表达;按下/弹起可跨步骤保持按住。
 """
@@ -80,7 +80,7 @@ class MacroStepsEditor(KeyCaptureMixin, QWidget):
         row_key = QHBoxLayout()
         row_key.addWidget(QLabel("按键:"))
         self.key_input = QLineEdit()
-        self.key_input.setPlaceholderText("如 1 / RButton / space")
+        self.key_input.setPlaceholderText("如 1 / RButton / XButton1 / space")
         row_key.addWidget(self.key_input, 1)
         self.listen_btn = QPushButton("🎧")
         self.listen_btn.setMaximumWidth(36)

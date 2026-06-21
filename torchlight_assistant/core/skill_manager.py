@@ -48,6 +48,7 @@ class SkillManager:
         self._config_lock = threading.Lock()
         self._resource_condition_history = {}
         self._required_consecutive_checks = 2
+        self._boss_mode_active = False
 
         # 按住键状态跟踪（一次性按下/释放，不在循环中）
         self._held_hold_keys = set()
@@ -362,6 +363,8 @@ class SkillManager:
             skill_config = self._skills_config.get(skill_name)
 
         if skill_config and skill_config.get("Enabled"):
+            if self._is_skill_suppressed_by_boss_mode(skill_name, skill_config):
+                return
             # 🎯 方案2核心：为每个定时技能也获取帧数据，支持条件检测
             cached_frame = self._prepare_frame_detection_cache()
             if cached_frame is None:
@@ -430,6 +433,8 @@ class SkillManager:
         priority_skills_executed = 0
         for skill_name, skill_config in skills_to_check:
             if skill_config.get("Enabled") and skill_config.get("TriggerMode") == 1:
+                if self._is_skill_suppressed_by_boss_mode(skill_name, skill_config):
+                    continue
                 is_priority = skill_config.get("Priority", False)
                 if is_priority:
                     priority_skills_executed += 1
@@ -514,6 +519,8 @@ class SkillManager:
             LOG_ERROR(f"[帧管理-统计] 技能 {skill_name} 未使用缓存帧，性能未优化")
         
         trigger_mode = skill_config.get("TriggerMode")
+        if self._is_skill_suppressed_by_boss_mode(skill_name, skill_config):
+            return
         alt_key = skill_config.get("AltKey", "")
         execute_condition = skill_config.get("ExecuteCondition", 0)
 
@@ -555,6 +562,27 @@ class SkillManager:
                 self.input_handler.execute_skill_high(key_to_use)
             else:
                 self.input_handler.execute_skill_normal(key_to_use)
+
+    def set_boss_mode_active(self, active: bool):
+        """设置运行时 BOSS 模式状态。只影响 BossOnly 的定时/冷却技能。"""
+        self._boss_mode_active = bool(active)
+        LOG_INFO(f"[BOSS模式] 技能管理器状态: {'开' if active else '关'}")
+
+    def _is_skill_suppressed_by_boss_mode(
+        self, skill_name: str, skill_config: Dict[str, Any]
+    ) -> bool:
+        """BOSS 模式关闭时跳过 BossOnly 的自动技能。
+
+        TriggerMode=2(按住)不参与 BOSS 模式,避免引入额外 hold/release 状态变化。
+        """
+        if not skill_config.get("BossOnly", False):
+            return False
+        if skill_config.get("TriggerMode") == 2:
+            return False
+        if self._boss_mode_active:
+            return False
+        LOG(f"[BOSS模式] 跳过 {skill_name}: BossOnly 且当前为跑图态")
+        return True
 
     def _check_cooldown_ready(
         self,
@@ -832,6 +860,7 @@ class SkillManager:
             return
         self._is_running = True
         self._is_paused = False
+        self._boss_mode_active = False
 
         # 设置技能坐标并计算边框
         with self._config_lock:

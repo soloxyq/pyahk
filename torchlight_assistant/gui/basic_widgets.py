@@ -26,6 +26,7 @@ from .custom_widgets import (
     ConfigCheckBox,
     ConfigComboBox,
 )
+from ..utils.key_names import normalize_key_name
 
 
 # 状态字符串常量
@@ -101,6 +102,18 @@ class TopControlsWidget(QWidget):
         )
         layout.addWidget(self.input_mode_combo)
 
+        # BOSS 模式切换键：只切换自动规则分组，不直接发送技能键
+        layout.addWidget(QLabel("BOSS键:"))
+        self.boss_mode_hotkey_entry = ConfigLineEdit()
+        self.boss_mode_hotkey_entry.setMaximumWidth(80)
+        self.boss_mode_hotkey_entry.setPlaceholderText("如 XButton1")
+        self.boss_mode_hotkey_entry.setToolTip(
+            "技能模式下切换 BOSS 模式。\n"
+            "BOSS 模式关闭时，勾选 BOSS 的技能不会自动触发；开启后按原规则触发。\n"
+            "建议使用闲置鼠标侧键，如 XButton1/XButton2。"
+        )
+        layout.addWidget(self.boss_mode_hotkey_entry)
+
         layout.addStretch()
 
     def set_current_config(self, filename: str):
@@ -112,7 +125,10 @@ class TopControlsWidget(QWidget):
         return {
             "sequence_enabled": self.mode_combo.currentText() == "序列",
             "debug_mode": {"enabled": self.debug_mode_checkbox.isChecked()},
-            "input_mode": self.input_mode_combo.currentText().lower()  # "direct" or "control"
+            "input_mode": self.input_mode_combo.currentText().lower(),  # "direct" or "control"
+            "boss_mode_hotkey": normalize_key_name(
+                self.boss_mode_hotkey_entry.text().strip()
+            ) if self.boss_mode_hotkey_entry.text().strip() else "",
         }
 
     def update_from_config(self, config: Dict[str, Any]):
@@ -131,6 +147,8 @@ class TopControlsWidget(QWidget):
         self.input_mode_combo.blockSignals(True)
         self.input_mode_combo.setCurrentText(input_mode.capitalize())
         self.input_mode_combo.blockSignals(False)
+
+        self.boss_mode_hotkey_entry.setText(config.get("boss_mode_hotkey", ""))
 
 
 class TimingSettingsWidget(QWidget):

@@ -21,6 +21,10 @@ from ..core.event_bus import event_bus
 from ..utils.debug_log import LOG_ERROR, LOG_INFO  # Import LOG_ERROR / LOG_INFO
 
 
+_BOSS_ONLY_TOOLTIP = "仅 BOSS 模式开启时自动触发。普通技能不受影响。"
+_BOSS_ONLY_HOLD_TOOLTIP = "按住型技能暂不支持 BOSS 分组；请改用定时/冷却触发。"
+
+
 class SimplifiedSkillWidget(QWidget):
     """UI组件, 使用自定义控件实现即时更新, 无需手动保存."""
 
@@ -74,6 +78,10 @@ class SimplifiedSkillWidget(QWidget):
 
         self._ui_widgets["Priority"] = ConfigCheckBox("优先级")
         layout.addWidget(self._ui_widgets["Priority"])
+
+        self._ui_widgets["BossOnly"] = ConfigCheckBox("BOSS")
+        self._ui_widgets["BossOnly"].setToolTip(_BOSS_ONLY_TOOLTIP)
+        layout.addWidget(self._ui_widgets["BossOnly"])
 
     def _create_trigger_settings(self, layout):
         layout.addWidget(QLabel("触发方式:"))
@@ -280,6 +288,10 @@ class SimplifiedSkillWidget(QWidget):
             # 触发方式：0=定时, 1=冷却, 2=按住
             trigger_text = self._ui_widgets["TriggerModeCombo"].currentText()
             changes["TriggerMode"] = {"定时": 0, "冷却": 1, "按住": 2}.get(trigger_text, 0)
+            changes["BossOnly"] = (
+                self._ui_widgets["BossOnly"].isChecked()
+                and changes["TriggerMode"] != 2
+            )
             changes["CooldownCoordX"] = int(
                 self._ui_widgets["CooldownCoordX"].text() or 0
             )
@@ -334,6 +346,7 @@ class SimplifiedSkillWidget(QWidget):
             self._ui_widgets["Enabled"].setChecked(config.get("Enabled", False))
             self._ui_widgets["Key"].setText(config.get("Key", ""))
             self._ui_widgets["Priority"].setChecked(config.get("Priority", False))
+            self._ui_widgets["BossOnly"].setChecked(config.get("BossOnly", False))
             self._ui_widgets["Timer"].setText(str(config.get("Timer", 1000)))
 
             trigger_mode = config.get("TriggerMode", 0)
@@ -388,6 +401,7 @@ class SimplifiedSkillWidget(QWidget):
         # 选择“按住”时隐藏定时/冷却参数
         self.cooldown_frame.setVisible(is_cooldown_mode)
         self.timer_frame.setVisible(is_timer_mode)
+        self._update_boss_only_availability(is_hold_mode)
 
         condition = config.get("ExecuteCondition", 0)
         self.condition_frame.setVisible(condition != 0)
@@ -400,6 +414,21 @@ class SimplifiedSkillWidget(QWidget):
 
         # BUFF限制(1)和区域资源检测(3)没有额外键，只有资源条件(2)才显示额外键
         self.alt_key_frame.setVisible(condition == 2)
+
+    def _update_boss_only_availability(self, is_hold_mode: bool):
+        boss_only = self._ui_widgets.get("BossOnly")
+        if not boss_only:
+            return
+        boss_only.setEnabled(not is_hold_mode)
+        if is_hold_mode:
+            boss_only.blockSignals(True)
+            try:
+                boss_only.setChecked(False)
+            finally:
+                boss_only.blockSignals(False)
+            boss_only.setToolTip(_BOSS_ONLY_HOLD_TOOLTIP)
+        else:
+            boss_only.setToolTip(_BOSS_ONLY_TOOLTIP)
 
     def get_frame(self):
         return self
@@ -436,6 +465,7 @@ class SimplifiedSkillWidget(QWidget):
             "Enabled",
             "Key",
             "Priority",
+            "BossOnly",
             "Timer",
             "TriggerModeCombo",
             "CooldownCoordX",

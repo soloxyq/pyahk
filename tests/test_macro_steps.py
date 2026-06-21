@@ -88,6 +88,29 @@ def test_config_respects_explicit_empty():
     assert cfg["global"]["macro_steps"] == []
 
 
+def test_config_normalizes_boss_mode_fields():
+    cfg = {
+        "skills": {"Skill1": {"Key": "r", "BossOnly": 1}},
+        "global": {"boss_mode_hotkey": "xbutton1"},
+    }
+    kn.normalize_config_keys(cfg)
+    assert cfg["skills"]["Skill1"]["BossOnly"] is True
+    assert cfg["global"]["boss_mode_hotkey"] == "XButton1"
+
+
+def test_config_disables_boss_only_for_hold_mode():
+    cfg = {"skills": {"Skill1": {"TriggerMode": 2, "BossOnly": True}}}
+    kn.normalize_config_keys(cfg)
+    assert cfg["skills"]["Skill1"]["BossOnly"] is False
+
+
+def test_normalize_side_mouse_button_aliases():
+    assert kn.normalize_key_name("x1") == "XButton1"
+    assert kn.normalize_key_name("button8") == "XButton1"
+    assert kn.normalize_key_name("x2") == "XButton2"
+    assert kn.normalize_key_name("button9") == "XButton2"
+
+
 if __name__ == "__main__":
     fns = sorted(
         (n, f) for n, f in globals().items() if n.startswith("test_") and callable(f)

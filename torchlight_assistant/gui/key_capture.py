@@ -3,12 +3,14 @@
 """通用按键录制 Mixin —— pynput 一次性捕获键盘/鼠标按键,UI 无关。
 
 调用方提供回调,本 Mixin 负责监听器生命周期与按键名解析:捕获到第一个键即回调并停止。
-键名返回小写普通键 / 标准鼠标键名(LButton/RButton/MButton),与 key_names 归一化兼容。
+键名返回小写普通键 / 标准鼠标键名(LButton/RButton/MButton/XButton1/XButton2),与 key_names 归一化兼容。
 
 线程安全:pynput 监听运行在自己的工作线程,捕获结果经 QObject 信号(队列连接)切回 GUI
 线程后再触发回调,避免在非 GUI 线程操作 Qt 控件(Codex 复审)。无 pynput 时优雅降级
 (capture_key_once 返回 False)。
 """
+
+import time
 
 from PySide6.QtCore import QTimer, QObject, Signal
 
@@ -37,6 +39,8 @@ class KeyCaptureMixin:
     _kc_keyboard_listener = None
     _kc_mouse_listener = None
     _kc_bridge = None
+    _kc_capture_id = 0
+    _kc_started_at = 0.0
 
     def capture_key_once(self, on_captured, timeout_ms: int = 5000, on_timeout=None) -> bool:
         """开始一次性监听。捕获到键盘/鼠标按键 → on_captured(key_name:str) 并自动停止。
@@ -47,18 +51,29 @@ class KeyCaptureMixin:
         if not PYNPUT_AVAILABLE or self._kc_listening:
             return False
         # 在 GUI 线程创建 bridge,跨线程 emit 会自动走队列连接,槽在 GUI 线程执行
+        self._kc_capture_id = getattr(self, "_kc_capture_id", 0) + 1
+        capture_id = self._kc_capture_id
         bridge = _CaptureBridge()
         bridge.captured.connect(on_captured)
         if on_timeout is not None:
             bridge.timed_out.connect(on_timeout)
         self._kc_bridge = bridge
         self._kc_listening = True
+        self._kc_started_at = time.monotonic()
         try:
-            self._kc_keyboard_listener = keyboard.Listener(on_press=self._kc_on_key, suppress=False)
-            self._kc_mouse_listener = mouse.Listener(on_click=self._kc_on_mouse, suppress=False)
+            self._kc_keyboard_listener = keyboard.Listener(
+                on_press=lambda key, cid=capture_id: self._kc_on_key(cid, key),
+                suppress=False,
+            )
+            self._kc_mouse_listener = mouse.Listener(
+                on_click=lambda x, y, button, pressed, cid=capture_id: self._kc_on_mouse(
+                    cid, x, y, button, pressed
+                ),
+                suppress=False,
+            )
             self._kc_keyboard_listener.start()
             self._kc_mouse_listener.start()
-            QTimer.singleShot(timeout_ms, self._kc_timeout)  # GUI 线程,安全
+            QTimer.singleShot(timeout_ms, lambda cid=capture_id: self._kc_timeout(cid))
             return True
         except Exception as e:
             LOG_ERROR(f"[按键录制] 启动失败: {e}")
@@ -82,30 +97,38 @@ class KeyCaptureMixin:
             self._kc_mouse_listener = None
             self._kc_bridge = None
 
-    def _kc_timeout(self):
+    def _kc_timeout(self, capture_id: int):
         # 由 QTimer 在 GUI 线程触发
-        if not self._kc_listening:
+        if not self._kc_listening or capture_id != getattr(self, "_kc_capture_id", 0):
             return
         bridge = self._kc_bridge
         self.cancel_capture()
         if bridge is not None:
             bridge.timed_out.emit()
 
-    def _kc_on_key(self, key):  # pynput 线程
-        if not self._kc_listening:
+    def _kc_on_key(self, capture_id: int, key):  # pynput 线程
+        if not self._kc_listening or capture_id != getattr(self, "_kc_capture_id", 0):
             return
         name = self._pynput_key_name(key)
         if name:
-            self._kc_emit(name)
+            self._kc_emit(capture_id, name)
 
-    def _kc_on_mouse(self, x, y, button, pressed):  # pynput 线程
-        if not self._kc_listening or not pressed:
+    def _kc_on_mouse(self, capture_id: int, x, y, button, pressed):  # pynput 线程
+        if (
+            not self._kc_listening
+            or capture_id != getattr(self, "_kc_capture_id", 0)
+            or not pressed
+        ):
+            return
+        if time.monotonic() - getattr(self, "_kc_started_at", 0.0) < 0.15:
             return
         name = self._pynput_button_name(button)
         if name:
-            self._kc_emit(name)
+            self._kc_emit(capture_id, name)
 
-    def _kc_emit(self, name: str):  # pynput 线程
+    def _kc_emit(self, capture_id: int, name: str):  # pynput 线程
+        if not self._kc_listening or capture_id != getattr(self, "_kc_capture_id", 0):
+            return
         bridge = self._kc_bridge
         self.cancel_capture()  # 先停监听(置空 _kc_bridge),本地仍持 bridge 引用
         if bridge is not None:
@@ -134,8 +157,27 @@ class KeyCaptureMixin:
     def _pynput_button_name(button) -> str:
         # 仅在 pynput 可用(监听已启动)时才会被调用,Button 必定已定义
         try:
-            return {Button.left: "LButton", Button.right: "RButton", Button.middle: "MButton"}.get(
-                button, ""
+            known_buttons = (
+                (getattr(Button, "left", None), "LButton"),
+                (getattr(Button, "right", None), "RButton"),
+                (getattr(Button, "middle", None), "MButton"),
+                (getattr(Button, "x1", None), "XButton1"),
+                (getattr(Button, "x2", None), "XButton2"),
             )
+            for pynput_button, ahk_name in known_buttons:
+                if pynput_button is not None and button == pynput_button:
+                    return ahk_name
+
+            raw_name = (getattr(button, "name", "") or str(button)).lower()
+            if raw_name.startswith("button."):
+                raw_name = raw_name[len("button."):]
+            return {
+                "x1": "XButton1",
+                "xbutton1": "XButton1",
+                "button8": "XButton1",
+                "x2": "XButton2",
+                "xbutton2": "XButton2",
+                "button9": "XButton2",
+            }.get(raw_name, "")
         except Exception:
             return ""

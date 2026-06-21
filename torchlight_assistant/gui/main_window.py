@@ -255,6 +255,8 @@ class GameSkillConfigUI(QMainWindow):
         state = engine_state.get("state", MacroState.STOPPED)
         stationary_mode = engine_state.get("stationary_mode", False)
         force_move_active = engine_state.get("force_move_active", False)
+        boss_mode = bool(engine_state.get("boss_mode", False))
+        boss_mode_available = bool(engine_state.get("boss_mode_available", False))
 
         state_text = {
             MacroState.STOPPED: StatusStrings.STOPPED,
@@ -274,10 +276,20 @@ class GameSkillConfigUI(QMainWindow):
             elif stationary_mode:
                 state_text = StatusStrings.PAUSED_STATIONARY
 
-        self.status_label.setText(f"状态: {state_text}")
+        boss_text = ""
+        if boss_mode_available and state in (MacroState.RUNNING, MacroState.PAUSED):
+            boss_text = f"BOSS:{'开' if boss_mode else '关'}"
+
+        status_line = f"状态: {state_text}"
+        if boss_text:
+            status_line = f"{status_line} | {boss_text}"
+        self.status_label.setText(status_line)
         if self.osd_status_window:
             color = {"STOPPED": "red", "READY": "yellow", "RUNNING": "lime", "PAUSED": "yellow", "DEBUG": "cyan"}.get(state.name, "white")
-            self.osd_status_window.update_status(state_text, color)
+            osd_text = state_text
+            if boss_text:
+                osd_text = f"{state_text}\n{boss_text}"
+            self.osd_status_window.update_status(osd_text, color)
 
     def _on_macro_status_updated(self, engine_state: Dict[str, Any]):
         QTimer.singleShot(0, lambda: self._perform_macro_status_updated_ui(engine_state))

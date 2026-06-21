@@ -1,7 +1,7 @@
 """按键名归一化工具 —— 全项目单一可信源。
 
 内部存储、JSON 配置、Python→AHK 协议统一使用 **AHK 标准按键名**。
-鼠标键必须是 LButton / RButton / MButton;GUI 可接受 right_mouse / leftclick /
+鼠标键必须是 LButton / RButton / MButton / XButton1 / XButton2;GUI 可接受 right_mouse / leftclick /
 mouse_right 这类别名作为输入,但归一化后统一为标准名。详见 AGENTS.md 4.5。
 
 为什么需要这个模块:
@@ -32,6 +32,12 @@ _KEY_ALIAS_MAP = {
     "middlemouse": "MButton",
     "mouse_middle": "MButton",
     "mbutton": "MButton",
+    "xbutton1": "XButton1",
+    "xbutton2": "XButton2",
+    "x1": "XButton1",
+    "x2": "XButton2",
+    "button8": "XButton1",
+    "button9": "XButton2",
     # 特殊键
     "spacebar": "space",
     "space_bar": "space",
@@ -160,7 +166,7 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
     覆盖字段:skills.*.Key/AltKey、global.skill_sequence、global.macro_steps
     (含旧 skill_sequence → macro_steps 的一次性迁移)、
     global.priority_keys.special_keys / managed_keys(键名 + target)、
-    global.stationary_mode_config 的强制移动相关键、
+    global.stationary_mode_config 的强制移动相关键、global.boss_mode_hotkey、
     global.resource_management 的 hp/mp 按键。
 
     任何字段缺失或结构异常都安全跳过(整体 try/except 包裹),绝不因归一化导致
@@ -179,6 +185,14 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
                     skill["Key"] = normalize_key_field(skill["Key"])
                 if "AltKey" in skill:
                     skill["AltKey"] = normalize_key_field(skill["AltKey"])
+                if "BossOnly" in skill:
+                    skill["BossOnly"] = bool(skill["BossOnly"])
+                    try:
+                        trigger_mode = int(skill.get("TriggerMode", 0))
+                    except (TypeError, ValueError):
+                        trigger_mode = 0
+                    if trigger_mode == 2:
+                        skill["BossOnly"] = False
 
         glob = config.get("global")
         if not isinstance(glob, dict):
@@ -187,6 +201,9 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         # --- global.skill_sequence ---
         if isinstance(glob.get("skill_sequence"), str):
             glob["skill_sequence"] = normalize_key_field(glob["skill_sequence"])
+
+        if isinstance(glob.get("boss_mode_hotkey"), str) and glob["boss_mode_hotkey"]:
+            glob["boss_mode_hotkey"] = normalize_key_name(glob["boss_mode_hotkey"])
 
         # --- global.macro_steps (通用宏步骤) ---
         # 迁移:仅当 macro_steps 键缺失 且 skill_sequence 非空时,从旧 CSV 合成。

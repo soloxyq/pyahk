@@ -51,6 +51,8 @@ class MacroEngine:
         # 当前配置的按键
         self._current_stationary_key = ""
         self._current_force_move_key = ""
+        self._current_boss_mode_key = ""
+        self._boss_mode_active = False
 
         self.config_manager = ConfigManager()
 
@@ -253,13 +255,23 @@ class MacroEngine:
             stationary_key = stationary_config.get("hotkey")
             LOG_INFO(f"[热键管理] 原地模式配置: {stationary_config}")
             LOG_INFO(f"[热键管理] 原地模式热键: {stationary_key}")
+            # 跟踪动态热键,避免后注册覆盖先注册的 AHK Hotkey。
+            # Z 已在 _register_secondary_hotkeys 中注册为执行/暂停键。
+            registered_business_keys: set[str] = {"z"}
 
             # 注册原地模式热键
+            self._current_stationary_key = ""
             if stationary_key:
+                key_lower = (stationary_key or "").lower()
                 LOG_INFO(f"[热键管理] 准备注册原地模式热键: {stationary_key}")
-                if self.input_handler.register_hook(stationary_key, "intercept"):
+                if key_lower in registered_business_keys:
+                    LOG_ERROR(
+                        f"[原地模式] 跳过 '{stationary_key}': 已被其他动态热键占用"
+                    )
+                elif self.input_handler.register_hook(stationary_key, "intercept"):
                     # 更新当前原地模式热键
-                    self._current_stationary_key = stationary_key.lower()
+                    self._current_stationary_key = key_lower
+                    registered_business_keys.add(key_lower)
                     LOG_INFO(f"[原地模式] 注册Hook成功: {stationary_key} (intercept)")
                     LOG_INFO(
                         f"[原地模式] 当前原地模式热键已设置为: {self._current_stationary_key}"
@@ -267,16 +279,22 @@ class MacroEngine:
                 else:
                     LOG_ERROR(f"[原地模式] 注册Hook失败: {stationary_key}")
             else:
-                self._current_stationary_key = ""
                 LOG_INFO("[热键管理] 未配置原地模式热键")
 
             # 注册强制移动键（monitor模式，不拦截但监控状态）
             force_move_key = stationary_config.get("force_move_hotkey")
+            self._current_force_move_key = ""
             if force_move_key:
+                key_lower = (force_move_key or "").lower()
                 LOG_INFO(f"[热键管理] 准备注册强制移动键: {force_move_key}")
-                if self.input_handler.register_hook(force_move_key, "monitor"):
+                if key_lower in registered_business_keys:
+                    LOG_ERROR(
+                        f"[强制移动键] 跳过 '{force_move_key}': 已被其他动态热键占用"
+                    )
+                elif self.input_handler.register_hook(force_move_key, "monitor"):
                     # 更新当前强制移动键
-                    self._current_force_move_key = force_move_key.lower()
+                    self._current_force_move_key = key_lower
+                    registered_business_keys.add(key_lower)
                     LOG_INFO(f"[强制移动键] 注册Hook成功: {force_move_key} (monitor)")
                     LOG_INFO(
                         f"[强制移动键] 当前强制移动键已设置为: {self._current_force_move_key}"
@@ -284,8 +302,29 @@ class MacroEngine:
                 else:
                     LOG_ERROR(f"[强制移动键] 注册Hook失败: {force_move_key}")
             else:
-                self._current_force_move_key = ""
                 LOG_INFO("[热键管理] 未配置强制移动键")
+
+            # BOSS 模式切换键：只在技能模式注册,宏模式不生效。
+            boss_mode_key = self._global_config.get("boss_mode_hotkey", "")
+            self._current_boss_mode_key = ""
+            if self._global_config.get("sequence_enabled", False):
+                if boss_mode_key:
+                    LOG_INFO("[BOSS模式] 当前为宏模式,不注册 BOSS 模式热键")
+            elif boss_mode_key:
+                key_lower = (boss_mode_key or "").lower()
+                LOG_INFO(f"[热键管理] 准备注册 BOSS 模式热键: {boss_mode_key}")
+                if key_lower in registered_business_keys:
+                    LOG_ERROR(
+                        f"[BOSS模式] 跳过 '{boss_mode_key}': 已被其他动态热键占用"
+                    )
+                elif self.input_handler.register_hook(boss_mode_key, "intercept"):
+                    self._current_boss_mode_key = key_lower
+                    registered_business_keys.add(key_lower)
+                    LOG_INFO(f"[BOSS模式] 注册Hook成功: {boss_mode_key} (intercept)")
+                else:
+                    LOG_ERROR(f"[BOSS模式] 注册Hook失败: {boss_mode_key}")
+            else:
+                LOG_INFO("[BOSS模式] 未配置 BOSS 模式热键")
 
             # 注册管理按键配置
             priority_config = self._global_config.get("priority_keys", {})
@@ -293,10 +332,6 @@ class MacroEngine:
 
             if priority_config.get("enabled", False):
                 LOG_INFO("[热键管理] 优先级配置已启用")
-
-                # 跟踪已注册的业务热键,防止 special/managed 跨类冲突
-                # 同一个 key 注册到多类会导致后注册的 Hotkey 覆盖前者,行为难排查
-                registered_business_keys: set[str] = set()
 
                 # 注册特殊按键（如space）- 使用AHK标准按键名
                 special_keys = priority_config.get("special_keys", [])
@@ -371,6 +406,8 @@ class MacroEngine:
         elif key_lower == self._current_stationary_key:
             # 原地模式按键（X键）- 按一下切换状态
             self._on_stationary_key_press()
+        elif key_lower == self._current_boss_mode_key:
+            self._toggle_boss_mode()
         else:
             LOG_INFO(f"[热键管理] 未处理的按键: {key}")
 
@@ -592,6 +629,7 @@ class MacroEngine:
             self.pathfinding_manager.stop()
             self.resource_manager.stop()
             self.border_manager.stop()
+            self._set_boss_mode_active(False, notify=False)
             # 注意：不调用 input_handler.cleanup()，保持AHK进程和F8热键运行
             self._prepared_mode = "none"
 
@@ -608,6 +646,7 @@ class MacroEngine:
 
         if self._prepared_mode == "combat":
             LOG_INFO("[状态转换] 启动技能管理器")
+            self._set_boss_mode_active(False, notify=False)
             self.skill_manager.start()
         elif self._prepared_mode == "pathfinding":
             LOG_INFO("[状态转换] 启动寻路管理器")
@@ -623,10 +662,17 @@ class MacroEngine:
 
     def _publish_status_update(self):
         """发布当前完整的状态信息，确保状态同步"""
+        boss_mode_available = (
+            self._prepared_mode == "combat"
+            and bool(self._global_config.get("boss_mode_hotkey"))
+            and not self._global_config.get("sequence_enabled", False)
+        )
         status_info = {
             "state": self._state,
             "stationary_mode": self._stationary_mode_active,
             "force_move_active": self._force_move_active,
+            "boss_mode": self._boss_mode_active,
+            "boss_mode_available": boss_mode_available,
         }
         event_bus.publish("engine:status_updated", status_info)
 
@@ -947,6 +993,26 @@ class MacroEngine:
         self._publish_status_update()
         LOG_INFO("[交互模式] 已取消")
 
+    def _set_boss_mode_active(self, active: bool, notify: bool = True):
+        """设置运行时 BOSS 模式状态。该状态不写入配置。"""
+        self._boss_mode_active = bool(active)
+        if hasattr(self.skill_manager, "set_boss_mode_active"):
+            self.skill_manager.set_boss_mode_active(self._boss_mode_active)
+        if notify:
+            LOG_INFO(f"[BOSS模式] {'开启' if self._boss_mode_active else '关闭'}")
+            event_bus.publish("engine:boss_mode_changed", self._boss_mode_active)
+            self._publish_status_update()
+
+    def _toggle_boss_mode(self):
+        """BOSS 模式热键:只在技能模式运行/暂停时切换。"""
+        if self._prepared_mode != "combat" or self._global_config.get("sequence_enabled", False):
+            LOG_INFO("[BOSS模式] 当前非技能模式,忽略切换")
+            return
+        if self._state not in (MacroState.RUNNING, MacroState.PAUSED):
+            LOG_INFO("[BOSS模式] 仅在 RUNNING/PAUSED 状态切换")
+            return
+        self._set_boss_mode_active(not self._boss_mode_active)
+
     def get_current_state(self) -> MacroState:
         return self._state
 
@@ -1106,6 +1172,7 @@ class MacroEngine:
                 "Enabled": False,
                 "Key": str(i),
                 "Priority": False,
+                "BossOnly": False,
                 "Timer": 1000,
                 "TriggerMode": 0,
                 "CooldownCoordX": 0,
@@ -1126,6 +1193,7 @@ class MacroEngine:
             "cooldown_checker_interval": 100,
             "capture_interval": 40,
             "sound_feedback_enabled": False,
+            "boss_mode_hotkey": "",
             "window_activation": {"enabled": False, "ahk_class": "", "ahk_exe": ""},
             "stationary_mode_config": {
                 "mode_type": "block_mouse",

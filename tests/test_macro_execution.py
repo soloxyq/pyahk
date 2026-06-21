@@ -58,6 +58,14 @@ class FakeInput:
         self.calls.append(("release", key))
         return True
 
+    def execute_skill_normal(self, key):
+        self.calls.append(("normal", key))
+        return True
+
+    def execute_skill_high(self, key):
+        self.calls.append(("high", key))
+        return True
+
 
 class FakeScheduler:
     def __init__(self, running=False):
@@ -216,6 +224,26 @@ def test_switch_macro_to_skill_stops_ahk_macro_and_rebuilds_scheduler():
     assert ("stop_macro",) in sm.input_handler.calls
     assert all(task[0] != "sequence_scheduler" for task in sm.unified_scheduler.added_tasks)
     assert any(task[0] == "cooldown_checker" for task in sm.unified_scheduler.added_tasks)
+
+
+def test_boss_only_skips_until_boss_mode_enabled():
+    sm = _make_sm(sequence_enabled=False)
+    skill = {
+        "Enabled": True,
+        "TriggerMode": 0,
+        "Key": "R",
+        "BossOnly": True,
+        "Priority": False,
+        "ExecuteCondition": 0,
+    }
+
+    sm._try_execute_skill("Ultimate", skill, object())
+    assert not _calls(sm, "normal")
+
+    sm.set_boss_mode_active(True)
+    sm._try_execute_skill("Ultimate", skill, object())
+
+    assert ("normal", "R") in sm.input_handler.calls
 
 
 def test_serializer_uses_ahk_line_protocol():

@@ -18,9 +18,10 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QLineEdit,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QObject, Signal
 from typing import Dict, Any, Set, List, Union
 import json
+import time
 
 from .custom_widgets import ConfigCheckBox
 from ..utils.debug_log import LOG_INFO, LOG_ERROR
@@ -35,6 +36,17 @@ try:
 except ImportError:
     PYNPUT_AVAILABLE = False
     LOG_ERROR("[优先级按键] pynput 不可用，按键监听功能将被禁用")
+
+
+class _PriorityCaptureBridge(QObject):
+    """把 pynput 监听线程捕获结果切回 GUI 线程。"""
+
+    captured = Signal(int, str)
+    timed_out = Signal(int)
+
+
+_LISTEN_TIMEOUT_MS = 15000
+_MOUSE_STARTUP_GRACE_SEC = 0.15
 
 
 class PriorityKeysWidget(QWidget):
@@ -57,6 +69,11 @@ class PriorityKeysWidget(QWidget):
         self._key_listening = False
         self._keyboard_listener = None
         self._mouse_listener = None
+        self._listen_capture_id = 0
+        self._listen_started_at = 0.0
+        self._capture_bridge = _PriorityCaptureBridge(self)
+        self._capture_bridge.captured.connect(self._on_captured_key_gui)
+        self._capture_bridge.timed_out.connect(self._stop_key_listening_timeout)
         
         self._setup_ui()
         self._load_default_keys()
@@ -871,9 +888,13 @@ class PriorityKeysWidget(QWidget):
             return
             
         if self._key_listening:
+            self._stop_key_listening()
             return
-            
+
+        self._listen_capture_id += 1
+        capture_id = self._listen_capture_id
         self._key_listening = True
+        self._listen_started_at = time.monotonic()
         self.listen_key_btn.setText("⏹️ 停止监听")
         self.listen_key_btn.setStyleSheet("QPushButton { background-color: #ff6b6b; color: white; }")
         self.key_input.setText("正在监听按键，请按下要添加的按键...")
@@ -882,19 +903,23 @@ class PriorityKeysWidget(QWidget):
         try:
             # 启动键盘和鼠标监听
             self._keyboard_listener = keyboard.Listener(
-                on_press=self._on_key_captured,
+                on_press=lambda key, cid=capture_id: self._on_key_captured(cid, key),
                 suppress=False
             )
             self._mouse_listener = mouse.Listener(
-                on_click=self._on_mouse_captured,
+                on_click=lambda x, y, button, pressed, cid=capture_id: self._on_mouse_captured(
+                    cid, x, y, button, pressed
+                ),
                 suppress=False
             )
             
             self._keyboard_listener.start()
             self._mouse_listener.start()
             
-            # 设置5秒超时
-            QTimer.singleShot(5000, self._stop_key_listening_timeout)
+            QTimer.singleShot(
+                _LISTEN_TIMEOUT_MS,
+                lambda cid=capture_id: self._stop_key_listening_timeout(cid),
+            )
             
         except Exception as e:
             LOG_ERROR(f"[按键监听] 启动失败: {e}")
@@ -922,43 +947,50 @@ class PriorityKeysWidget(QWidget):
             LOG_ERROR(f"[按键监听] 停止失败: {e}")
         
         # 如果没有捕获到按键，恢复原始状态
-        if self.key_input.text() in ["正在监听按键，请按下要添加的按键...", "监听超时，请重试或使用手动输入"]:
+        if self.key_input.text() == "正在监听按键，请按下要添加的按键...":
             self.key_input.setText("")
             self.key_input.setStyleSheet("")
             self.add_key_btn.setEnabled(False)
 
-    def _stop_key_listening_timeout(self):
+    def _stop_key_listening_timeout(self, capture_id: int = 0):
         """监听超时处理"""
-        if self._key_listening:
+        if self._key_listening and capture_id == self._listen_capture_id:
             self.key_input.setText("监听超时，请重试或使用手动输入")
             self.key_input.setStyleSheet("QLineEdit { background-color: #f8d7da; }")
             self._stop_key_listening()
 
-    def _on_key_captured(self, key):
+    def _on_key_captured(self, capture_id: int, key):
         """捕获键盘按键"""
-        if not self._key_listening:
+        if not self._key_listening or capture_id != self._listen_capture_id:
             return
             
         try:
             key_name = self._get_key_name(key)
             if key_name:
-                self._set_captured_key(key_name)
-                self._stop_key_listening()
+                self._capture_bridge.captured.emit(capture_id, key_name)
         except Exception as e:
             LOG_ERROR(f"[按键监听] 键盘按键处理失败: {e}")
 
-    def _on_mouse_captured(self, x, y, button, pressed):
+    def _on_mouse_captured(self, capture_id: int, x, y, button, pressed):
         """捕获鼠标按键"""
-        if not self._key_listening or not pressed:
+        if not self._key_listening or capture_id != self._listen_capture_id or not pressed:
+            return
+        if time.monotonic() - self._listen_started_at < _MOUSE_STARTUP_GRACE_SEC:
             return
             
         try:
             button_name = self._get_button_name(button)
             if button_name:
-                self._set_captured_key(button_name)
-                self._stop_key_listening()
+                self._capture_bridge.captured.emit(capture_id, button_name)
         except Exception as e:
             LOG_ERROR(f"[按键监听] 鼠标按键处理失败: {e}")
+
+    def _on_captured_key_gui(self, capture_id: int, key_name: str):
+        """在 GUI 线程应用捕获结果。"""
+        if not self._key_listening or capture_id != self._listen_capture_id:
+            return
+        self._set_captured_key(key_name)
+        self._stop_key_listening()
 
     def _set_captured_key(self, key_name: str):
         """设置捕获到的按键"""
@@ -993,12 +1025,28 @@ class PriorityKeysWidget(QWidget):
     def _get_button_name(self, button) -> str:
         """获取鼠标按钮名称"""
         try:
-            button_mapping = {
-                Button.left: 'LButton',
-                Button.right: 'RButton',
-                Button.middle: 'MButton'
-            }
-            return button_mapping.get(button, "")
+            known_buttons = (
+                (getattr(Button, 'left', None), 'LButton'),
+                (getattr(Button, 'right', None), 'RButton'),
+                (getattr(Button, 'middle', None), 'MButton'),
+                (getattr(Button, 'x1', None), 'XButton1'),
+                (getattr(Button, 'x2', None), 'XButton2'),
+            )
+            for pynput_button, ahk_name in known_buttons:
+                if pynput_button is not None and button == pynput_button:
+                    return ahk_name
+
+            raw_name = (getattr(button, 'name', '') or str(button)).lower()
+            if raw_name.startswith('button.'):
+                raw_name = raw_name[len('button.'):]
+            return {
+                'x1': 'XButton1',
+                'xbutton1': 'XButton1',
+                'button8': 'XButton1',
+                'x2': 'XButton2',
+                'xbutton2': 'XButton2',
+                'button9': 'XButton2',
+            }.get(raw_name, "")
         except Exception as e:
             LOG_ERROR(f"[按键监听] 获取鼠标按钮名称失败: {e}")
         return ""
@@ -1008,7 +1056,7 @@ class PriorityKeysWidget(QWidget):
         if self.key_input.isReadOnly():
             # 切换到手动输入模式
             self.key_input.setReadOnly(False)
-            self.key_input.setPlaceholderText("手动输入按键名称 (如: space, RButton, ctrl；right_mouse 作为别名兼容)")
+            self.key_input.setPlaceholderText("手动输入按键名称 (如: space, RButton, XButton1, ctrl；right_mouse 作为别名兼容)")
             self.key_input.setText("")
             self.key_input.setStyleSheet("")
             self.manual_input_btn.setText("🎧 监听模式")
@@ -1048,6 +1096,8 @@ class PriorityKeysWidget(QWidget):
             'LButton': '左键',
             'RButton': '右键',
             'MButton': '中键',
+            'XButton1': '侧键1',
+            'XButton2': '侧键2',
             'left_mouse': '左键',
             'right_mouse': '右键',
             'middle_mouse': '中键',
