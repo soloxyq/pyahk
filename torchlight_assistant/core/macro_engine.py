@@ -169,6 +169,9 @@ class MacroEngine:
         )
         event_bus.subscribe("hotkey:z_press", self._handle_z_press)
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
+        # AHK 子进程意外退出 → 强制停机 + 告警。由 AHKInputHandler 在命令发送失败时探测到进程
+        # 已退出后,经 ahk_signal_bridge 切回 GUI 线程发布本事件(故本 handler 已在主线程)。
+        event_bus.subscribe("ahk_process_died", self._on_ahk_process_died)
 
     def _setup_primary_hotkey(self):
         """设置永久根热键 (F8/F7/F9)
@@ -332,7 +335,7 @@ class MacroEngine:
                         delay = config.get("delay", 0)
                         hold_ms = config.get("hold_ms", 0)
                         # 发送管理按键配置到AHK
-                        self.input_handler.command_sender.set_managed_key_config(
+                        self.input_handler.set_managed_key_config(
                             key, target, delay, hold_ms
                         )
                         LOG_INFO(
@@ -679,9 +682,9 @@ class MacroEngine:
                         
                         # 设置输入模式
                         input_mode = self._global_config.get("input_mode", "direct")
-                        if hasattr(self.input_handler, "command_sender") and self.input_handler.command_sender:
+                        if hasattr(self.input_handler, "set_send_mode"):
                             try:
-                                self.input_handler.command_sender.set_send_mode(input_mode)
+                                self.input_handler.set_send_mode(input_mode)
                                 LOG_INFO(f"【输入模式】 已设置为: {input_mode}")
                             except Exception as e:
                                 LOG_ERROR(f"【输入模式】 设置失败: {e}")
@@ -882,8 +885,8 @@ class MacroEngine:
                 batch_config["stationary_type"] = mode_type
             
             # 只有在有配置更新时才发送
-            if batch_config and hasattr(self.input_handler, "command_sender") and self.input_handler.command_sender:
-                self.input_handler.command_sender.batch_update_config(batch_config)
+            if batch_config and hasattr(self.input_handler, "batch_update_config"):
+                self.input_handler.batch_update_config(batch_config)
                 LOG_INFO(f"【紧急按键缓存】 已更新AHK配置: {batch_config}")
             
         except Exception as e:
@@ -899,14 +902,11 @@ class MacroEngine:
         self._stationary_mode_active = not self._stationary_mode_active
 
         # 通知AHKCommandSender原地模式状态变化
-        if (
-            hasattr(self.input_handler, "command_sender")
-            and self.input_handler.command_sender
-        ):
+        if hasattr(self.input_handler, "set_stationary_mode"):
             stationary_config = self._global_config.get("stationary_mode_config", {})
             mode_type = stationary_config.get("mode_type", "shift_modifier")
 
-            self.input_handler.command_sender.set_stationary_mode(
+            self.input_handler.set_stationary_mode(
                 self._stationary_mode_active, mode_type
             )
 
@@ -930,11 +930,8 @@ class MacroEngine:
         self._force_move_active = True
 
         # 通知AHK强制移动状态变化
-        if (
-            hasattr(self.input_handler, "command_sender")
-            and self.input_handler.command_sender
-        ):
-            self.input_handler.command_sender.set_force_move_state(True)
+        if hasattr(self.input_handler, "set_force_move_state"):
+            self.input_handler.set_force_move_state(True)
 
         self._publish_status_update()
         LOG_INFO("[交互模式] 已激活")
@@ -944,11 +941,8 @@ class MacroEngine:
         self._force_move_active = False
 
         # 通知AHK强制移动状态变化
-        if (
-            hasattr(self.input_handler, "command_sender")
-            and self.input_handler.command_sender
-        ):
-            self.input_handler.command_sender.set_force_move_state(False)
+        if hasattr(self.input_handler, "set_force_move_state"):
+            self.input_handler.set_force_move_state(False)
 
         self._publish_status_update()
         LOG_INFO("[交互模式] 已取消")
@@ -961,6 +955,48 @@ class MacroEngine:
 
     def stop_macro(self) -> bool:
         return self._set_state(MacroState.STOPPED)
+
+    def _on_ahk_process_died(self, key: str = ""):
+        """AHK 子进程意外退出的应急处理(已在 GUI 线程):告警 + 延后停机。
+
+        停机用 QTimer.singleShot(0) 延后到下一轮事件循环:命令发送失败的探测可能发生在状态
+        转换内部(_set_state → _on_state_enter 里的控制命令发送失败),若此处同步 stop 会重入
+        _set_state 造成状态错乱。延后执行可避开重入,且最终一定落到 STOPPED。
+        AHK 既死,Python 已无法经 WM_COPYDATA 发释放命令,游戏内卡死的持久按住键留待 OS 级兜底。
+        """
+        LOG_ERROR("[引擎] ⚠️ 检测到 AHK 子进程已退出,强制停止主功能并告警。")
+        # 告警:不可错过的提示音 + 既有声音反馈(若启用)
+        try:
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONHAND)
+        except Exception:
+            pass
+        try:
+            if self.sound_manager:
+                self.sound_manager.play("goodbye")
+        except Exception as e:
+            LOG_ERROR(f"[引擎] AHK 崩溃告警音播放失败: {e}")
+        try:
+            event_bus.publish("engine:ahk_died_notice")
+        except Exception:
+            pass
+        # 延后停机,避免在状态转换内部同步重入 _set_state
+        try:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, self._stop_due_to_ahk_death)
+        except Exception as e:
+            LOG_ERROR(f"[引擎] 调度 AHK 崩溃停机失败,改为直接停机: {e}")
+            self._stop_due_to_ahk_death()
+
+    def _stop_due_to_ahk_death(self):
+        """实际停机(主线程,延后执行):AHK 崩溃后强制切回 STOPPED。"""
+        try:
+            if self._state != MacroState.STOPPED:
+                self.stop_macro()
+        except Exception as e:
+            LOG_ERROR(f"[引擎] AHK 崩溃后强制停止失败: {e}")
 
     def toggle_pause_resume(self) -> bool:
         try:

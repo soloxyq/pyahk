@@ -305,6 +305,11 @@ class SkillManager:
             if old_sequence_enabled:
                 self._stop_ahk_macro()
             if new_sequence_enabled:
+                # 🔧 进入宏模式:先释放技能模式遗留的 TriggerMode=2 持久按住键,否则卡键。
+                # config_updated 先于本方法调用 update_all_configs(),而那时 self._global_config 仍是
+                # 旧值(sequence_enabled=False),会沿技能路径保留这些持键。此处兜底释放。
+                if not old_sequence_enabled:
+                    self._release_hold_keys()
                 self._set_ahk_macro_steps()
                 if not self._is_paused:
                     self._start_ahk_macro(sync_steps=False)
@@ -317,6 +322,11 @@ class SkillManager:
                     f"[统一调度器] 序列模式状态变化: {old_sequence_enabled} -> {new_sequence_enabled}"
                 )
                 self._setup_all_scheduled_tasks()
+                # 🔧 切回技能模式:宏模式期间从未持有 TriggerMode=2 按住键,需补按下。
+                # (update_all_configs 在旧宏模式下 _is_macro_mode() 读旧值=True 而提前 return,
+                #  跳过了按住键应用;_apply_hold_keys 幂等,仅按下尚未持有的键)
+                if not new_sequence_enabled and not self._is_paused:
+                    self._apply_hold_keys()
             else:
                 if not new_sequence_enabled:
                     # 技能模式：更新冷却检查间隔

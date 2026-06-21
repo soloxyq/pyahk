@@ -41,6 +41,8 @@ class AHKInputHandler:
         self.dry_run_mode = False
         # 当特殊按键激活时，丢弃所有非紧急（HP/MP以外）的入队请求
         self._drop_non_emergency = False
+        # AHK 子进程死亡探测:命令发送失败时检查存活,首次发现进程退出即告警并上报(只报一次)
+        self._ahk_death_notified = False
         
         self._init_ahk_system()
         
@@ -105,7 +107,44 @@ class AHKInputHandler:
         except Exception as e:
             LOG_INFO(f"[AHK输入] 启动AHK失败: {e}")
             return False
-    
+
+    def is_ahk_alive(self) -> bool:
+        """AHK 子进程是否仍存活(已被 stop() 主动清理或非预期退出都返回 False)。"""
+        proc = self.ahk_process
+        return proc is not None and proc.poll() is None
+
+    def check_ahk_alive(self) -> bool:
+        """命令发送失败时调用:探测 AHK 子进程是否已意外退出。
+
+        - 进程已被 stop() 主动清理(ahk_process=None)→ 不视为崩溃,静默返回 False。
+        - 进程对象仍在但已退出(有 returncode)→ 视为崩溃:首次发现时 LOG_ERROR,并经
+          ahk_signal_bridge(队列连接)切回 GUI 线程发布 'ahk_process_died',由 MacroEngine
+          接管(强制 STOPPED + 告警)。命令发送多在调度器 worker 线程,故必须经信号桥切回主线程。
+        返回 AHK 是否存活。
+        """
+        proc = self.ahk_process
+        if proc is None:
+            return False
+        if proc.poll() is None:
+            return True
+        if not self._ahk_death_notified:
+            self._ahk_death_notified = True
+            LOG_ERROR(
+                f"[AHK输入] ⚠️ AHK 子进程已意外退出 (returncode={proc.returncode})!"
+                f"所有按键命令将静默失效,且可能残留卡死的持久按住键。正在请求停止主功能。"
+            )
+            try:
+                ahk_signal_bridge.ahk_event.emit("ahk_process_died:")
+            except Exception as e:
+                LOG_ERROR(f"[AHK输入] 上报 AHK 死亡事件失败: {e}")
+        return False
+
+    def _check_send(self, ok: bool) -> bool:
+        """命令发送返回假值时探测 AHK 存活(已死则一次性告警+触发停机)。透传原返回值。"""
+        if not ok:
+            self.check_ahk_alive()
+        return ok
+
     def send_key(self, key_str: str) -> bool:
         """
         发送按键
@@ -124,19 +163,23 @@ class AHKInputHandler:
             return False
         
         if "," in key_str:
-            return self.command_sender.send_sequence(key_str, priority=2)
+            return self._check_send(self.command_sender.send_sequence(key_str, priority=2))
         else:
-            return self.command_sender.send_key(key_str, priority=2)
+            return self._check_send(self.command_sender.send_key(key_str, priority=2))
     
     def activate_target_window(self):
         """请求AHK激活目标窗口"""
         LOG_INFO(f"[AHK输入] 正在请求AHK激活窗口...")
-        return self.command_sender.activate_window()
+        return self._check_send(self.command_sender.activate_window())
 
     def set_target_window(self, target: str):
         """设置AHK的目标窗口"""
         LOG_INFO(f"[AHK输入] 正在设置AHK目标窗口: {target}")
-        return self.command_sender.set_target_window(target)
+        return self._check_send(self.command_sender.set_target_window(target))
+
+    def set_send_mode(self, mode: str) -> bool:
+        """设置 AHK 按键发送模式。"""
+        return self._check_send(self.command_sender.set_send_mode(mode))
 
     def click_mouse(self, button: str = "left", hold_time: Optional[float] = None) -> bool:
         """
@@ -154,7 +197,7 @@ class AHKInputHandler:
         if self._drop_non_emergency:
             return False
 
-        return self.command_sender.send_mouse_click(button, priority=2)
+        return self._check_send(self.command_sender.send_mouse_click(button, priority=2))
 
     def click_mouse_at(self, x: int, y: int, hold_time: Optional[float] = None) -> bool:
         """点击屏幕指定坐标
@@ -178,33 +221,33 @@ class AHKInputHandler:
         if not key or self._drop_non_emergency:
             return
         if "," in key:
-            self.command_sender.send_sequence(key, priority=2)
+            self._check_send(self.command_sender.send_sequence(key, priority=2))
         else:
-            self.command_sender.send_normal(key)
+            self._check_send(self.command_sender.send_normal(key))
 
     def execute_skill_high(self, key: str):
         if not key or self._drop_non_emergency:
             return
         if "," in key:
-            self.command_sender.send_sequence(key, priority=1)
+            self._check_send(self.command_sender.send_sequence(key, priority=1))
         else:
-            self.command_sender.send_high_priority(key)
+            self._check_send(self.command_sender.send_high_priority(key))
 
     def execute_utility(self, key: str):
         if not key or self._drop_non_emergency:
             return
         if "," in key:
-            self.command_sender.send_sequence(key, priority=3)
+            self._check_send(self.command_sender.send_sequence(key, priority=3))
         else:
-            self.command_sender.send_low_priority(key)
+            self._check_send(self.command_sender.send_low_priority(key))
     
     def execute_hp_potion(self, key: str):
         if key:
-            self.command_sender.send_emergency(key)
+            self._check_send(self.command_sender.send_emergency(key))
     
     def execute_mp_potion(self, key: str):
         if key:
-            self.command_sender.send_emergency(key)
+            self._check_send(self.command_sender.send_emergency(key))
 
     def hold_key(self, key: str) -> bool:
         """按住键(不释放)。用于 TriggerMode=2 持久化按住模式 (start/resume 时调用)。
@@ -221,7 +264,7 @@ class AHKInputHandler:
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        return self.command_sender.hold_key(key)
+        return self._check_send(self.command_sender.hold_key(key))
 
     def release_key(self, key: str) -> bool:
         """释放被 hold_key 按住的键。用于 TriggerMode=2 (stop/pause 时调用)。
@@ -246,7 +289,7 @@ class AHKInputHandler:
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        return self.command_sender.release_key(key, priority=0)
+        return self._check_send(self.command_sender.release_key(key, priority=0))
 
     def set_macro_steps(self, steps) -> bool:
         """把通用宏步骤下发给 AHK 端解释器。"""
@@ -257,7 +300,7 @@ class AHKInputHandler:
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        return self.command_sender.set_macro_steps(steps)
+        return self._check_send(self.command_sender.set_macro_steps(steps))
 
     def start_macro(self) -> bool:
         """启动 AHK 端通用宏循环。"""
@@ -268,7 +311,7 @@ class AHKInputHandler:
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        return self.command_sender.start_macro()
+        return self._check_send(self.command_sender.start_macro())
 
     def stop_macro(self) -> bool:
         """停止 AHK 端通用宏循环并释放宏持键。"""
@@ -279,15 +322,15 @@ class AHKInputHandler:
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        return self.command_sender.stop_macro()
+        return self._check_send(self.command_sender.stop_macro())
 
     def clear_queue(self):
         """清空所有队列(含 emergency)。用于 PAUSED 状态完全停下。"""
-        self.command_sender.clear_queue(-1)
+        return self._check_send(self.command_sender.clear_queue(-1))
 
     def clear_non_emergency_queue(self):
         """只清非紧急队列,保留 emergency。用于管理按键期间保留 HP/MP 救命动作。"""
-        self.command_sender.clear_queue(-2)
+        return self._check_send(self.command_sender.clear_queue(-2))
 
     def get_queue_stats(self) -> dict:
         return {"wm_copydata_mode": True}
@@ -297,7 +340,7 @@ class AHKInputHandler:
 
         绕过两层 register_hook 的保留键检查,仅供 MacroEngine._setup_primary_hotkey 调用。
         """
-        return self.command_sender.register_root_hook(key)
+        return self._check_send(self.command_sender.register_root_hook(key))
 
     def register_hook(self, key: str, mode: str = "intercept"):
         """
@@ -319,36 +362,54 @@ class AHKInputHandler:
                 f"F8/F7/F9 是永久根热键,业务配置不可覆盖。"
             )
             return False
-        return self.command_sender.register_hook(key, mode)
+        return self._check_send(self.command_sender.register_hook(key, mode))
     
     def unregister_hook(self, key: str):
-        return self.command_sender.unregister_hook(key)
-    
+        return self._check_send(self.command_sender.unregister_hook(key))
+
     def pause_queue(self):
-        return self.command_sender.pause()
-    
+        return self._check_send(self.command_sender.pause())
+
     def resume_queue(self):
-        return self.command_sender.resume()
+        return self._check_send(self.command_sender.resume())
     
     def set_force_move_state(self, active: bool) -> bool:
         """设置强制移动状态"""
-        return self.command_sender.set_force_move_state(active)
+        return self._check_send(self.command_sender.set_force_move_state(active))
     
     def set_force_move_key(self, key: str) -> bool:
         """设置强制移动键"""
-        return self.command_sender.set_force_move_key(key)
+        return self._check_send(self.command_sender.set_force_move_key(key))
     
     def set_force_move_replacement_key(self, key: str) -> bool:
         """设置强制移动替换键"""
-        return self.command_sender.set_force_move_replacement_key(key)
+        return self._check_send(self.command_sender.set_force_move_replacement_key(key))
 
     def set_force_move_passthrough_keys(self, keys) -> bool:
         """设置强制移动白名单(位移技能,如 RButton 闪现)"""
-        return self.command_sender.set_force_move_passthrough_keys(keys)
+        return self._check_send(self.command_sender.set_force_move_passthrough_keys(keys))
+
+    def set_stationary_mode(self, active: bool, mode_type: str = "shift_modifier") -> bool:
+        """设置原地模式状态。"""
+        return self._check_send(
+            self.command_sender.set_stationary_mode(active, mode_type)
+        )
+
+    def set_managed_key_config(
+        self, key: str, target: str, delay: int, hold_ms: int = 0
+    ) -> bool:
+        """设置管理按键配置。"""
+        return self._check_send(
+            self.command_sender.set_managed_key_config(key, target, delay, hold_ms)
+        )
+
+    def batch_update_config(self, config_dict: dict) -> bool:
+        """批量更新 AHK 端缓存配置。"""
+        return self._check_send(self.command_sender.batch_update_config(config_dict))
 
     def clear_all_configurable_hooks(self) -> bool:
         """清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）"""
-        return self.command_sender.clear_all_configurable_hooks()
+        return self._check_send(self.command_sender.clear_all_configurable_hooks())
     
     def set_python_window_state(self, state: str) -> bool:
         """设置Python窗口状态
@@ -356,7 +417,7 @@ class AHKInputHandler:
         Args:
             state: "main" 或 "osd"
         """
-        return self.command_sender.set_python_window_state(state)
+        return self._check_send(self.command_sender.set_python_window_state(state))
     
     def set_drop_non_emergency(self, enabled: bool):
         """在特殊按键激活时启用，丢弃所有非紧急入队"""
@@ -397,7 +458,10 @@ class AHKInputHandler:
     
     def set_dry_run_mode(self, enabled: bool):
         self.dry_run_mode = enabled
-        LOG_INFO(f"[AHK输入] 干跑模式已 {'\u5f00\u542f' if enabled else '\u5173\u95ed'}")
+        # 注意:不要把含反斜杠的转义串写进 f-string 的 {} 表达式 —— Python<3.12 会在 import 期
+        # 抛 SyntaxError(PEP 701 才放开)。把三元表达式抽到普通赋值,兼容所有版本。
+        state = "开启" if enabled else "关闭"
+        LOG_INFO(f"[AHK输入] 干跑模式已 {state}")
     
     def __del__(self):
         try:

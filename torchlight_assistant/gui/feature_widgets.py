@@ -312,4 +312,6 @@ class SkillConfigWidget(QWidget):
             LOG_INFO(f"[SkillConfigWidget] 创建技能控件失败 {skill_name}: {e}")
             import traceback
             traceback.print_exc()
-        skill_widget.refresh(skill_config)
+        # 注意:不要在此处调用 skill_widget.refresh() —— SimplifiedSkillWidget.__init__ 已 refresh 过。
+        # 旧代码把它放在 try 之外且依赖 skill_widget 局部变量:一旦上面构造抛异常,这里会以
+        # UnboundLocalError 把整个技能列表创建中断(后续技能全丢)。
