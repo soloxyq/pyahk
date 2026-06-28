@@ -2,45 +2,42 @@
     "skills": {
         "Skill1": {
             "Enabled": true,
-            "Key": "LButton",
+            "Key": "e",
             "Priority": false,
-            "Timer": 100,
-            "TriggerMode": 2,
-            "BossOnly": false,
-            "CooldownCoordX": 815,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "CooldownCoordX": 960,
             "CooldownCoordY": 1000,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 900,
-            "ConditionCoordY": 600,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
             "ConditionColor": 0,
-            "AltKey": "9"
+            "AltKey": ""
         },
         "Skill2": {
-            "Enabled": true,
-            "Key": "e",
+            "Enabled": false,
+            "Key": "q",
             "Priority": false,
-            "Timer": 175,
+            "Timer": 1000,
             "TriggerMode": 1,
-            "BossOnly": false,
-            "CooldownCoordX": 1497,
-            "CooldownCoordY": 1030,
-            "CooldownSize": 11,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 1310,
-            "ConditionCoordY": 992,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
             "ConditionColor": 0,
-            "AltKey": "2"
+            "AltKey": ""
         },
         "Skill3": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "r",
             "Priority": false,
-            "Timer": 650,
+            "Timer": 1000,
             "TriggerMode": 1,
-            "BossOnly": true,
-            "CooldownCoordX": 1549,
-            "CooldownCoordY": 1033,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -50,13 +47,12 @@
         },
         "Skill4": {
             "Enabled": false,
-            "Key": "q",
+            "Key": "t",
             "Priority": false,
-            "Timer": 150,
-            "TriggerMode": 2,
-            "BossOnly": false,
-            "CooldownCoordX": 1547,
-            "CooldownCoordY": 1031,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -68,31 +64,29 @@
             "Enabled": false,
             "Key": "RButton",
             "Priority": false,
-            "Timer": 150,
+            "Timer": 1000,
             "TriggerMode": 1,
-            "BossOnly": false,
-            "CooldownCoordX": 1035,
-            "CooldownCoordY": 1000,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 126,
-            "ConditionCoordY": 970,
-            "ConditionColor": 1,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
             "AltKey": ""
         },
         "Skill6": {
             "Enabled": false,
-            "Key": "f",
+            "Key": "6",
             "Priority": false,
-            "Timer": 195,
-            "TriggerMode": 1,
-            "BossOnly": false,
-            "CooldownCoordX": 1650,
-            "CooldownCoordY": 1031,
+            "Timer": 1000,
+            "TriggerMode": 0,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 1800,
-            "ConditionCoordY": 970,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
             "ConditionColor": 0,
             "AltKey": ""
         },
@@ -102,7 +96,6 @@
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 0,
-            "BossOnly": false,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
@@ -118,7 +111,6 @@
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 0,
-            "BossOnly": false,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
@@ -135,11 +127,11 @@
             "enabled": false
         },
         "input_mode": "direct",
-        "boss_mode_hotkey": "XButton1",
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
         "cooldown_checker_interval": 125,
+        "sequence_timer_interval": 1000,
         "capture_interval": 55,
         "hp_cooldown": 1000,
         "mp_cooldown": 1000,
@@ -147,8 +139,8 @@
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
-            "ahk_class": "POEWindowClass",
-            "ahk_exe": "PathOfExile_x64.exe"
+            "ahk_class": "",
+            "ahk_exe": "PathOfExile.exe"
         },
         "stationary_mode_config": {
             "hotkey": "",
@@ -158,7 +150,7 @@
             "force_move_passthrough_keys": []
         },
         "affix_reroll": {
-            "enabled": true,
+            "enabled": false,
             "target_affixes": [],
             "max_attempts": 100,
             "click_delay": 200,
@@ -180,56 +172,41 @@
             "hp_config": {
                 "enabled": true,
                 "key": "1",
-                "threshold": 50,
+                "threshold": 40,
                 "cooldown": 1000,
-                "tolerance_h": 25,
-                "tolerance_s": 29,
-                "tolerance_v": 70,
-                "detection_mode": "text_ocr",
-                "text_x1": 106,
-                "text_y1": 786,
-                "text_x2": 209,
-                "text_y2": 815,
-                "ocr_engine": "paddle",
-                "match_threshold": 0.7,
-                "region_x1": 136,
-                "region_y1": 910,
-                "region_x2": 213,
-                "region_y2": 1004,
+                "tolerance_h": 8,
+                "tolerance_s": 40,
+                "tolerance_v": 60,
+                "detection_mode": "rectangle",
+                "region_x1": 148,
+                "region_y1": 901,
+                "region_x2": 162,
+                "region_y2": 1023,
                 "colors": [
                     {
                         "name": "Color1",
-                        "target_h": 157,
-                        "target_s": 75,
-                        "target_v": 29,
+                        "target_h": 0,
+                        "target_s": 80,
+                        "target_v": 50,
                         "tolerance_h": 10,
-                        "tolerance_s": 30,
-                        "tolerance_v": 50
-                    },
-                    {
-                        "name": "Color2",
-                        "target_h": 40,
-                        "target_s": 84,
-                        "target_v": 48,
-                        "tolerance_h": 10,
-                        "tolerance_s": 30,
-                        "tolerance_v": 50
+                        "tolerance_s": 40,
+                        "tolerance_v": 60
                     }
                 ]
             },
             "mp_config": {
                 "enabled": true,
                 "key": "2",
-                "threshold": 40,
+                "threshold": 30,
                 "cooldown": 1000,
-                "tolerance_h": 6,
+                "tolerance_h": 10,
                 "tolerance_s": 40,
-                "tolerance_v": 69,
-                "detection_mode": "circle",
-                "center_x": 1793,
-                "center_y": 969,
-                "radius": 36,
-                "half": "full",
+                "tolerance_v": 60,
+                "detection_mode": "rectangle",
+                "region_x1": 1755,
+                "region_y1": 909,
+                "region_x2": 1769,
+                "region_y2": 1026,
                 "colors": [
                     {
                         "name": "Color1",
@@ -237,70 +214,30 @@
                         "target_s": 80,
                         "target_v": 58,
                         "tolerance_h": 10,
-                        "tolerance_s": 30,
-                        "tolerance_v": 50
+                        "tolerance_s": 40,
+                        "tolerance_v": 60
                     }
                 ]
             },
             "check_interval": 200
         },
         "priority_keys": {
-            "enabled": true,
-            "special_keys": [
-                "space"
-            ],
+            "enabled": false,
+            "special_keys": [],
             "managed_keys": {}
         },
-        "macro_steps": [
-            {
-                "type": "press",
-                "key": "1"
-            },
-            {
-                "type": "press",
-                "key": "2"
-            },
-            {
-                "type": "press",
-                "key": "3"
-            },
-            {
-                "type": "press",
-                "key": "4"
-            },
-            {
-                "type": "press",
-                "key": "5"
-            },
-            {
-                "type": "press",
-                "key": "6"
-            },
-            {
-                "type": "press",
-                "key": "7"
-            },
-            {
-                "type": "press",
-                "key": "8"
-            },
-            {
-                "type": "press",
-                "key": "9"
-            }
-        ],
-        "skill_sequence": "1,2,3,4,5,6,7,8,9",
+        "skill_sequence": "1,2,3,4,5,6,7,8",
         "process_history": {
             "recent_processes": [
-                "NutstoreClient.exe",
-                "notepad++.exe"
+                "PathOfExile.exe",
+                "PathOfExileSteam.exe"
             ]
         },
         "tesseract_ocr": {
             "tesseract_cmd": "C:\\Program Files\\Tesseract-OCR\\tesseract.exe",
             "lang": "eng",
             "psm_mode": 7,
-            "char_whitelist": "0123456789/,"
+            "char_whitelist": "0123456789/"
         }
     }
 }
