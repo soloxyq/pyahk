@@ -722,6 +722,7 @@ class MacroEngine:
                         return
                     LOG_INFO("【热键】 F8 - 从 STOPPED状态启动")
                     if full_config:
+                        normalize_config_keys(full_config)
                         self._skills_config = full_config.get("skills", {})
                         self._global_config = full_config.get("global", {})
                         self.sound_manager.update_config(self._global_config)

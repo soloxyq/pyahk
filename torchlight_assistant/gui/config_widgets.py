@@ -174,13 +174,17 @@ class StationaryModeWidget(QWidget):
         self.force_move_passthrough_keys_entry = ConfigLineEdit()
         self.force_move_passthrough_keys_entry.setMaximumHeight(32)
         self.force_move_passthrough_keys_entry.setPlaceholderText("如: RButton, space")
+        self.force_move_passthrough_keys_entry.setToolTip(
+            "强制移动期间允许程序自动发出的按键。特殊按键不会自动加入这里，"
+            "需要保留时请显式填写。"
+        )
         grid_layout.addWidget(self.force_move_passthrough_keys_entry, 4, 1)
 
         description_label = QLabel(
             "• 原地模式: 开启后，角色将原地释放技能而不移动。\n"
             "• 交互/强制移动键: 按住此键将临时屏蔽所有技能，只执行移动（鼠标左键）或交互。\n"
             "• 交互替换键: 交互模式激活时，非白名单技能键将被替换为此键（通常设置为移动键，如f）。\n"
-            "• 强制移动白名单: 逗号分隔，白名单键和 HP/MP 紧急药剂不会被替换。"
+            "• 强制移动白名单: 逗号分隔，仅控制程序自动发键；特殊按键不会自动加入，HP/MP 紧急药剂始终不会被替换。"
         )
         description_label.setStyleSheet("color: #888888; font-size: 9pt;")
         description_label.setWordWrap(True)

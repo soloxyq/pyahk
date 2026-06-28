@@ -1018,6 +1018,10 @@ SendPress(key, forceMoveBypass := false) {
         ; 在白名单里 → 落到下面的正常发送路径
     }
 
+    if (ShouldBlockMouseInStationary(key)) {
+        return
+    }
+
     ; 正常按键处理
     if (ShouldAddShiftModifier(key)) {
         ; 带shift修饰符
@@ -1080,6 +1084,9 @@ FormatKeyForSend(key) {
 
 SendDown(key) {
     ; 按住按键
+    if (ShouldBlockMouseInStationary(key)) {
+        return
+    }
     Send "{" key " down}"
 }
 
@@ -1108,11 +1115,26 @@ ShouldAddShiftModifier(key) {
     return true
 }
 
+ShouldBlockMouseInStationary(key) {
+    ; block_mouse 原地模式:吞掉自动发送的左右键 press/down,避免角色被鼠标技能带着移动。
+    ; release 始终放行,避免切换模式或中止流程时产生卡键。
+    global StationaryModeActive, StationaryModeType
+    return StationaryModeActive && (StationaryModeType = "block_mouse") && IsMouseButtonKey(key)
+}
+
+IsMouseButtonKey(key) {
+    lower := CachedStrLower(key)
+    return (lower = "lbutton") || (lower = "rbutton") || (lower = "left") || (lower = "right")
+}
+
 ; ExecuteSequence 已废弃: sequence 现在在 EnqueueAction 入口直接展开为
 ; 多个原子动作进入同优先级队列,复用 DelayUntil 异步机制,不再需要同步执行
 
 ExecuteMouseClick(data) {
     ; 鼠标点击: "left" 或 "right" 或 "middle"
+    if (ShouldBlockMouseInStationary(data)) {
+        return
+    }
     Click data
 }
 
@@ -1159,6 +1181,7 @@ RegisterHook(key, mode) {
 UnregisterHook(key) {
     ; 🔧 AHK v2 作用域:函数内对全局变量赋值会自动 local 化,顶部统一 global 声明
     global RegisteredHooks, SpecialKeysPressed, SpecialKeysPaused
+    global ManagedKeysConfig, ActiveManagedKeys
 
     ; 简化版本：直接取消，不需要重复注销
 
@@ -1182,6 +1205,18 @@ UnregisterHook(key) {
         }
     } catch {
         ; 取消失败，静默处理
+    }
+
+    if (mode = "priority") {
+        if (ManagedKeysConfig.Has(key)) {
+            ManagedKeysConfig.Delete(key)
+        }
+        if (ActiveManagedKeys.Has(key)) {
+            ActiveManagedKeys.Delete(key)
+        }
+        if (ActiveManagedKeys.Count = 0) {
+            SetMacroManagedSuppressed(false)
+        }
     }
 
     ; 🔧 special 模式注销时清理 Pause 状态:
@@ -1436,7 +1471,7 @@ SendStatsToPython() {
 ClearAllConfigurableHooks() {
     ; 简化版本：清空所有记录的 Hook
     ; F8/F7/F9 永久根热键不在 RegisteredHooks 中,自动被保留(见 RegisterHook 的 key_upper 检查)
-    global ActiveManagedKeys, SpecialKeysPressed, SpecialKeysPaused
+    global ActiveManagedKeys, SpecialKeysPressed, SpecialKeysPaused, ManagedKeysConfig
 
     ; 收集所有要删除的键
     keysToRemove := []
@@ -1449,8 +1484,9 @@ ClearAllConfigurableHooks() {
         UnregisterHook(key)
     }
 
-    ; 配置切换:所有 managed_keys 即将注销,残留 single-flight 锁无意义
+    ; 配置切换:所有 managed_keys 即将注销,残留 single-flight 锁/旧映射无意义
     ActiveManagedKeys := Map()
+    ManagedKeysConfig := Map()
     SetMacroManagedSuppressed(false)
 
     ; 兜底:即使 per-key 注销有遗漏,也确保 special 状态彻底归零

@@ -57,7 +57,7 @@ class MacroEngine:
 ```
 
 **事件订阅**(在 `_setup_primary_hotkey()` 与 `_setup_event_subscriptions()`):
-- `intercept_key_down` → `_handle_ahk_intercept_key`(分发 F8/F7/F9/Z/原地模式键)
+- `intercept_key_down` → `_handle_ahk_intercept_key`(分发 F8/F7/F9/Z/原地模式键/BOSS 模式键)
 - `special_key_pause` → 启用/关闭 `set_drop_non_emergency`
 - `managed_key_down` → 暂停调度器 + clear_non_emergency_queue
 - `managed_key_complete` → 恢复调度器
@@ -70,8 +70,8 @@ class MacroEngine:
 技能调度。订阅 `engine:config_updated`,根据配置往 `UnifiedScheduler` 注册 3 类任务:
 - 定时技能(`TriggerMode=0`)→ `execute_timed_skill(skill_name)`
 - 冷却检查(`TriggerMode=1`)→ `check_cooldowns()`(定时一次性扫所有技能)
-- 序列(`sequence_enabled=true`)→ `execute_sequence_step()`
-- 资源管理 → `check_resources()`(序列/技能模式都注册,2025 修复 B1)
+- 通用宏(`sequence_enabled=true`)→ Python 下发 `macro_steps` 给 AHK 端宏解释器,不再注册 Python 步进任务
+- 资源管理 → `check_resources()`(宏/技能模式都注册,2025 修复 B1)
 
 ```python
 class SkillManager:
@@ -88,16 +88,25 @@ class SkillManager:
 
     # 调度器回调
     def execute_timed_skill(self, skill_name: str): ...
-    def execute_sequence_step(self): ...
     def check_cooldowns(self): ...                       # 一帧检测所有技能
     def check_resources(self): ...                       # 委派给 resource_manager
+
+    # AHK 端通用宏控制
+    def _set_ahk_macro_steps(self): ...
+    def _start_ahk_macro(self, sync_steps: bool = True): ...
+    def _stop_ahk_macro(self): ...
+    def set_boss_mode_active(self, active: bool): ...
 ```
 
 **性能优化**:`_prepare_frame_detection_cache()` 一次取帧给所有技能用,避免重复 `get_current_frame()`。
 
 **优先级按键暂停响应**:订阅 `scheduler_pause_requested` / `scheduler_resume_requested`,在管理键期间暂停整个 `UnifiedScheduler`(节省 70-90% CPU,事件驱动)。
 
-**hold 模式技能**(`TriggerMode=2`):一次性 `hold_key()`/`release_key()`,在 `start/stop/pause/resume` 与配置热更新时增量同步。
+**hold 模式技能**(`TriggerMode=2`):一次性 `hold_key()`/`release_key()`,在 `start/stop/pause/resume` 与配置热更新时增量同步。按下顺序稳定为鼠标键优先,同类内部按配置顺序,避免“左键按住后键盘键没跟上”的时序问题。
+
+**BOSS 模式**:`BossOnly=true` 的定时/冷却技能在 BOSS 模式关闭时跳过;按住型不参与 BOSS 模式,GUI 和配置归一化会禁用该组合。
+
+**通用宏模式**:`sequence_enabled=true` 时,定时/冷却任务不注册,AHK 端 `MacroTick` 循环执行 `macro_steps`;Python 调度器只保留资源检测任务。
 
 ---
 
@@ -173,6 +182,11 @@ class AHKInputHandler:
     def set_drop_non_emergency(self, enabled: bool): ...
     def set_dry_run_mode(self, enabled: bool): ...
 
+    # AHK 端通用宏
+    def set_macro_steps(self, steps) -> bool: ...
+    def start_macro(self) -> bool: ...
+    def stop_macro(self) -> bool: ...
+
     # ⚠️ click_mouse_at(x, y) 暂未实现,洗练/寻路调用会记错并返回 False
     def click_mouse_at(self, x: int, y: int, hold_time=None) -> bool: ...
 
@@ -238,6 +252,12 @@ class AHKCommandSender:
     def set_managed_key_config(self, key: str, target: str, delay: int, hold_ms: int = 0): ...
     def set_python_window_state(self, state: str) -> bool: ...
     def batch_update_config(self, config_dict: dict) -> bool: ...
+
+    # AHK 端通用宏
+    def serialize_macro_steps(steps) -> str: ...         # "type:data" 行协议
+    def set_macro_steps(self, steps) -> bool: ...
+    def start_macro(self) -> bool: ...
+    def stop_macro(self) -> bool: ...
 ```
 
 ---
@@ -324,7 +344,7 @@ class UnifiedScheduler:
     def get_status(self) -> dict: ...
 ```
 
-`SkillManager` 注册的 3 类任务:`timed_skill_{name}` / `cooldown_checker` / `resource_checker` / `sequence_scheduler`。
+`SkillManager` 注册的任务:`timed_skill_{name}` / `cooldown_checker` / `resource_checker`。宏模式不注册 `sequence_scheduler`;步骤循环在 AHK 端 `MacroTick` 内执行。
 
 ---
 
@@ -425,7 +445,7 @@ class CaptureConfig:
 
 | 文件 | 用途 |
 |------|------|
-| `paddle_ocr_manager.py` | PaddleOCR 引擎(给装备洗练用) |
+| `paddle_ocr_manager.py` | PaddleOCR 引擎(HP/MP 数字 OCR、区域框自动校准;也可给洗练扩展复用) |
 | `tesseract_ocr_manager.py` | Tesseract 引擎(给资源 text_ocr 用) |
 | `cnn_digit_recognizer.py` | 自训 Keras CNN 数字识别 |
 | `window_utils.py` | Win32 窗口枚举/类名/进程名查询 |
@@ -447,7 +467,9 @@ class CaptureConfig:
 | `skill_config_widget.py` | 技能配置 |
 | `resource_widgets.py` | HP/MP 配置(含三种检测模式) |
 | `resource_config_manager.py` | Resource 配置中央化(2025.10 重构提取) |
-| `priority_keys_widget.py` | 优先级按键(special/managed) |
+| `priority_keys_widget.py` | 优先级按键(special/managed/mapping,含 Qt 本地按键捕获兜底) |
+| `macro_steps_widget.py` | 通用宏步骤编辑器(down/up/press/delay) |
+| `key_capture.py` | GUI 按键捕获 mixin(支持 XButton1/XButton2) |
 | `region_selection_dialog.py` | 区域选择对话框 |
 | `color_picker_dialog.py` | HSV 颜色选择 |
 | `color_analysis_tools.py` | 可视化 HSV 调参工具 |
