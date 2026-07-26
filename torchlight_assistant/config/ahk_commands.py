@@ -28,6 +28,9 @@ CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS = 21 # 强制移动期间不被替换的白�
 CMD_SET_MACRO_STEPS = 22  # 设置 AHK 端宏步骤
 CMD_START_MACRO = 23      # 启动 AHK 端宏循环
 CMD_STOP_MACRO = 24       # 停止 AHK 端宏循环并释放宏持键
+CMD_SET_SKILL_HOLD_KEYS = 25  # 声明式设置 TriggerMode=2 期望持键集合(空=全部释放)
+CMD_SET_ACCEPTING_ACTIONS = 26  # 运行时闸门:false=原子停止屏障,清场并封住所有输入生产路径(安全清理命令仍放行)
+CMD_SHUTDOWN = 27  # 优雅关闭:AHK 自行释放所有持键后退出(terminate 不触发 OnExit)
 
 # 命令名称映射（用于调试）
 CMD_NAMES = {
@@ -55,6 +58,9 @@ CMD_NAMES = {
     CMD_SET_MACRO_STEPS: "SET_MACRO_STEPS",
     CMD_START_MACRO: "START_MACRO",
     CMD_STOP_MACRO: "STOP_MACRO",
+    CMD_SET_SKILL_HOLD_KEYS: "SET_SKILL_HOLD_KEYS",
+    CMD_SET_ACCEPTING_ACTIONS: "SET_ACCEPTING_ACTIONS",
+    CMD_SHUTDOWN: "SHUTDOWN",
 }
 
 def get_command_name(cmd_id: int) -> str:

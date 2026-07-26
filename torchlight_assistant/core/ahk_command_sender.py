@@ -259,26 +259,59 @@ class AHKCommandSender:
         """
         return self.enqueue(f"mouse_click:{button}", priority)
     
-    def hold_key(self, key: str, priority: int = 2) -> bool:
+    # 注意:TriggerMode=2 的持久按住键**不再**通过队列的 hold:/release: 动作实现,
+    # 改用声明式 set_skill_hold_keys(见下方)。原因:入队成功 ≠ 已按下,
+    # 且 normal 级 hold: 会被管理按键的 ClearNonEmergencyQueues 清掉,
+    # 导致 Python 账本与实际状态分叉。队列里的 hold:/release: 现在只由
+    # AHK 端管理按键的 hold_ms 配置内部生成。
+    @staticmethod
+    def serialize_skill_hold_keys(keys) -> str:
+        """把期望持键集合序列化成 AHK 行协议(每行一个键名,顺序=按下顺序)。"""
+        return "\n".join(
+            str(k).strip() for k in (keys or []) if str(k).strip()
+        )
+
+    def set_skill_hold_keys(self, keys) -> bool:
+        """声明式下发 TriggerMode=2 期望持键的**完整集合**(空集合=释放全部)。
+
+        AHK 端独占维护"实际已按下"状态并做差量同步,因此本命令幂等:
+        重复下发同一集合不会产生额外按键。
         """
-        按住按键
-        
-        Args:
-            key: 按键名称
-            priority: 优先级
+        from torchlight_assistant.config.ahk_commands import CMD_SET_SKILL_HOLD_KEYS
+
+        return send_ahk_cmd(
+            self.window_title,
+            CMD_SET_SKILL_HOLD_KEYS,
+            self.serialize_skill_hold_keys(keys),
+        )
+
+    def set_accepting_actions(self, enabled: bool) -> bool:
+        """运行时闸门。关闸 = AHK 端原子停止屏障(清场+封住所有输入生产路径)。
+
+        用于"按了 F8/Z 之后绝不再有键打进游戏":Python 侧 join 调度线程只等 2 秒,
+        超时后在飞回调仍可能下发命令,这道闸门是最后防线。AHK 端封锁点:
+        EnqueueAction/MacroTick/HandleManagedKey/START_MACRO/非空持键声明;
+        清队/停宏/空持键声明/释放等安全清理命令不受影响。
         """
-        return self.enqueue(f"hold:{key}", priority)
-    
-    def release_key(self, key: str, priority: int = 2) -> bool:
+        from torchlight_assistant.config.ahk_commands import CMD_SET_ACCEPTING_ACTIONS
+
+        return send_ahk_cmd(
+            self.window_title,
+            CMD_SET_ACCEPTING_ACTIONS,
+            "true" if enabled else "false",
+        )
+
+    def shutdown(self) -> bool:
+        """请求 AHK 自行释放全部持键后退出。
+
+        必须优先于 terminate():Windows 上 Popen.terminate() 是 TerminateProcess,
+        不会触发 AHK 的 OnExit,持键会残留在游戏里。
         """
-        释放按键
-        
-        Args:
-            key: 按键名称
-            priority: 优先级
-        """
-        return self.enqueue(f"release:{key}", priority)
-    
+        from torchlight_assistant.config.ahk_commands import CMD_SHUTDOWN
+
+        return send_ahk_cmd(self.window_title, CMD_SHUTDOWN)
+
+
     # ========================================================================
     # 队列控制
     # ========================================================================

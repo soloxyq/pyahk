@@ -2,9 +2,8 @@
 
 资源百分比语义说明:
 本模块所有 HP/MP 百分比（match_percentage）来自对模板 HSV / 当前帧 HSV 的逐像素容差匹配后，
-通过“自底向上连续填充行段长度 / 总高度 (或半圆掩膜高度)”得到的近似填充度指标                match_percentage = self.border_frame_manager.compare_resource_circle(
-                    frame, center_x, center_y, radius, resource_type, 0.0, config
-                )它并非对真实血/魔球体积或像素面积的精确线性映射，可能与游戏内显示的精确数值存在偏差。
+通过“自底向上连续填充行段长度 / 总高度 (或半圆掩膜高度)”得到的近似填充度指标。
+它并非对真实血/魔球体积或像素面积的精确线性映射，可能与游戏内显示的精确数值存在偏差。
 因此:
 1. 该值适合作为阈值触发的相对判定（< threshold 触发补给），不适合作为精确读数展示。
 2. 不同分辨率 / UI 主题 / 光照会改变 HSV 分布，需重新截取模板。
@@ -286,6 +285,15 @@ class ResourceManager:
             LOG_ERROR(f"[ResourceManager] 详细错误信息: {traceback.format_exc()}")
             match_percentage = 100.0
 
+        # 🔧 检测失败(compare_resource_circle 返回 None)= 本轮状态未知,必须跳过:
+        # 既不触发药剂(否则模板/区域异常会被当成"血量为 0"而无限狂按),也不上报 OSD
+        # (避免把 None 当成 0% 显示成"血量耗尽")。
+        if not isinstance(match_percentage, (int, float)):
+            LOG_ERROR(
+                f"[ResourceManager] {resource_type.upper()} 本轮检测无效(None),跳过判定与上报"
+            )
+            return False
+
         # 上报OSD
         if self.debug_display_manager:
             if resource_type == "hp":
@@ -293,7 +301,7 @@ class ResourceManager:
             elif resource_type == "mp":
                 self.debug_display_manager.update_mana(match_percentage)
 
-        return bool(isinstance(match_percentage, (int, float)) and match_percentage < threshold)
+        return bool(match_percentage < threshold)
 
     def capture_template_hsv(self, frame: np.ndarray):
         """在F8准备阶段截取并保存模板区域的HSV数据到border_frame_manager的缓存"""

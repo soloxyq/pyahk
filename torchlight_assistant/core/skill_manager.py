@@ -50,9 +50,8 @@ class SkillManager:
         self._required_consecutive_checks = 2
         self._boss_mode_active = False
 
-        # 按住键状态跟踪（一次性按下/释放，不在循环中）
-        self._held_hold_keys = set()
-        self._held_hold_order: List[str] = []
+        # 注意:不再镜像"实际按住了哪些键"。TriggerMode=2 持键的唯一权威账本在 AHK 端
+        # (SkillHeldKeys/SkillHeldOrder),Python 只声明期望集合,见 _sync_skill_hold_keys。
 
         # 自主调度相关属性
         self._global_config = {}
@@ -62,16 +61,19 @@ class SkillManager:
 
         # 订阅MacroEngine事件
         self._setup_event_subscriptions()
-        # 注意：初始化阶段不执行按住/释放（_release_hold_keys），按住/释放只在 start/pause/resume/stop 或配置热更新时一次性执行
+        # 注意:初始化阶段不下发持键声明;期望持键只在 start/pause/resume/stop 或配置热更新时声明一次
 
     def _setup_event_subscriptions(self):
         """设置事件订阅"""
         # 移除对engine:state_changed的订阅，避免与MacroEngine的直接调用产生竞态条件
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
-        
-        # 🚀 订阅优先级按键的调度器控制事件
-        event_bus.subscribe("scheduler_pause_requested", self._on_scheduler_pause_requested)
-        event_bus.subscribe("scheduler_resume_requested", self._on_scheduler_resume_requested)
+
+        # 🔧 已移除 scheduler_pause_requested / scheduler_resume_requested 订阅:
+        # 管理按键期间暂停整个 UnifiedScheduler 会连 resource_checker 一起停(HP/MP 救命
+        # 药剂检测停摆),且 resume() 会重置**所有**任务的 next_run_time —— 频繁按管理键
+        # 时长周期任务与资源检测会被无限推迟(饿死)。管理按键的输入独占语义已由 AHK 端
+        # HandleManagedKey(清非紧急队列 + delay_clear 期间持续清队)完整保证,Python 侧
+        # 再暂停调度器不产生额外效果,只贡献相位漂移。
 
     def _on_config_updated(self, skills_config, global_config):
         """响应配置更新，并动态更新调度器任务"""
@@ -79,33 +81,6 @@ class SkillManager:
         self.update_all_configs(skills_config)
         self.update_global_config(global_config)
     
-    def _on_scheduler_pause_requested(self, event_data):
-        """响应优先级按键按下 - 暂停调度器以节省CPU资源"""
-        try:
-            reason = event_data.get('reason', 'unknown')
-            active_keys = event_data.get('active_keys', [])
-            
-            # 暂停统一调度器，但不改变 _is_paused 状态（这是临时性能优化暂停）
-            if self.unified_scheduler.get_status()["running"]:
-                self.unified_scheduler.pause()
-                LOG(f"[性能优化] 调度器已暂停 - {reason}, 激活按键: {active_keys}")
-
-        except Exception as e:
-            LOG_ERROR(f"[性能优化] 暂停调度器异常: {e}")
-    
-    def _on_scheduler_resume_requested(self, event_data):
-        """响应优先级按键释放 - 恢复调度器"""
-        try:
-            reason = event_data.get('reason', 'unknown')
-            
-            # 只有在 SkillManager 正在运行且未被用户手动暂停时才恢复
-            if self._is_running and not self._is_paused:
-                self.unified_scheduler.resume()
-                LOG(f"[性能优化] 调度器已恢复 - {reason}")
-            
-        except Exception as e:
-            LOG_ERROR(f"[性能优化] 恢复调度器异常: {e}")
-
     def _start_autonomous_scheduling(self):
         """使用统一调度器启动所有定时任务"""
         if not self._is_running:
@@ -187,8 +162,8 @@ class SkillManager:
     def pause(self):
         """暂停所有技能活动"""
         self._is_paused = True
-        # 一次性释放所有按住键 + 停止 AHK 端宏(释放宏持键)
-        self._release_hold_keys()
+        # 释放所有技能持键(声明空集合) + 停止 AHK 端宏(释放宏持键)
+        self._release_skill_hold_keys()
         self._stop_ahk_macro()
 
         # 暂停统一调度器
@@ -208,8 +183,8 @@ class SkillManager:
             if self._is_macro_mode():
                 self._start_ahk_macro()
             else:
-                # 一次性重新按住
-                self._apply_hold_keys()
+                # 重新声明完整期望持键集合
+                self._sync_skill_hold_keys()
 
     def update_all_configs(self, skills_config: Dict[str, Any]):
         """更新所有技能配置并同步调度器"""
@@ -228,14 +203,8 @@ class SkillManager:
                 if config.get("Enabled") and config.get("TriggerMode") == 0
             }
 
-            # 在覆盖前提取旧的“按住”集合
-            old_hold_keys = self._get_configured_hold_keys()
-
             # 更新配置
             self._skills_config = skills_config
-
-            # 覆盖后提取新的“按住”集合
-            new_hold_keys = self._get_configured_hold_keys()
 
             # 记录新的技能配置
             new_timed_skills = {
@@ -248,9 +217,9 @@ class SkillManager:
             if self._is_running and self.unified_scheduler.get_status()["running"]:
                 if self._is_macro_mode():
                     return
-                # 非暂停状态下，同步按住集合的增量（一次性按/放）
+                # 非暂停状态下,重新声明完整期望集合(AHK 端自行算差量,幂等)
                 if not self._is_paused:
-                    self._apply_delta_hold_keys(old_hold_keys, new_hold_keys)
+                    self._sync_skill_hold_keys()
                 # 移除不再需要的定时技能任务
                 removed_skills = old_timed_skills - new_timed_skills
                 for skill_name in removed_skills:
@@ -310,7 +279,7 @@ class SkillManager:
                 # config_updated 先于本方法调用 update_all_configs(),而那时 self._global_config 仍是
                 # 旧值(sequence_enabled=False),会沿技能路径保留这些持键。此处兜底释放。
                 if not old_sequence_enabled:
-                    self._release_hold_keys()
+                    self._release_skill_hold_keys()
                 self._set_ahk_macro_steps()
                 if not self._is_paused:
                     self._start_ahk_macro(sync_steps=False)
@@ -325,9 +294,9 @@ class SkillManager:
                 self._setup_all_scheduled_tasks()
                 # 🔧 切回技能模式:宏模式期间从未持有 TriggerMode=2 按住键,需补按下。
                 # (update_all_configs 在旧宏模式下 _is_macro_mode() 读旧值=True 而提前 return,
-                #  跳过了按住键应用;_apply_hold_keys 幂等,仅按下尚未持有的键)
+                #  跳过了持键同步;声明式下发幂等,AHK 端只按下尚未持有的键)
                 if not new_sequence_enabled and not self._is_paused:
-                    self._apply_hold_keys()
+                    self._sync_skill_hold_keys()
             else:
                 if not new_sequence_enabled:
                     # 技能模式：更新冷却检查间隔
@@ -780,69 +749,51 @@ class SkillManager:
                         seen.add(k)
             # 稳定顺序：鼠标键先按下；同类内部保持配置文件/Skill1..Skill8 顺序。
             keys.sort(key=lambda key: 0 if self._is_mouse_hold_key(key) else 1)
+            self._warn_hold_key_conflicts(keys)
         except Exception as e:
             LOG_ERROR(f"[按住] 提取配置失败: {e}")
         return keys
 
-    def _apply_hold_keys(self):
-        """按下当前应按住但尚未按住的键，并记录在 _held_hold_keys"""
-        target = self._get_configured_hold_keys()
-        to_press = [key for key in target if key not in self._held_hold_keys]
-        if not to_press:
-            return
-        LOG_INFO(f"[按住] 按下: {to_press}")
-        for k in to_press:
-            try:
-                if self.input_handler.hold_key(k):
-                    self._held_hold_keys.add(k)
-                    if k not in self._held_hold_order:
-                        self._held_hold_order.append(k)
-            except Exception as e:
-                LOG_ERROR(f"[按住] hold_key 失败 {k}: {e}")
+    def _warn_hold_key_conflicts(self, hold_keys: List[str]) -> None:
+        """检出"管理键映射目标 == TriggerMode=2 持久持键"这种自相矛盾的配置。
 
-    def _release_hold_keys(self):
-        """释放当前已按住的所有键，并清空 _held_hold_keys"""
-        if not self._held_hold_keys:
+        管理键会为 target 生成 press:/hold:+release: 队列动作,净效果是把该键抬起;
+        AHK 端已能靠 ForgetSkillHeldKey + Reconcile 恢复,但用户的真实意图几乎肯定
+        不是"按一下管理键就把持续技能打断再重按",所以这里明确报出来。
+        """
+        if not hold_keys:
             return
-        keys = [key for key in reversed(self._held_hold_order) if key in self._held_hold_keys]
-        remaining = sorted(self._held_hold_keys - set(keys))
-        keys.extend(remaining)
-        LOG_INFO(f"[按住] 释放: {keys}")
-        for k in keys:
-            try:
-                self.input_handler.release_key(k)
-            except Exception as e:
-                LOG_ERROR(f"[按住] release_key 失败 {k}: {e}")
-        self._held_hold_keys.clear()
-        self._held_hold_order.clear()
+        lowered = {k.lower() for k in hold_keys}
+        managed = (self._global_config.get("priority_keys") or {}).get("managed_keys") or {}
+        for key, cfg in managed.items():
+            target = key
+            if isinstance(cfg, dict):
+                target = (cfg.get("target") or key) or key
+            if str(target).lower() in lowered:
+                LOG_ERROR(
+                    f"[按住] 配置冲突: 管理键 {key} 的映射目标 {target} 同时是 TriggerMode=2 持久持键, "
+                    f"按下管理键会打断该持续技能(AHK 会在管理键序列结束后自动补按)"
+                )
 
-    def _apply_delta_hold_keys(self, old_set, new_set):
-        """运行中配置热更新：按下新增，释放移除，保持一次性语义"""
-        old_set = set(old_set)
-        new_order = list(new_set)
-        new_set = set(new_order)
-        to_press = [key for key in new_order if key not in old_set]
-        to_release = [key for key in reversed(self._held_hold_order) if key not in new_set]
-        if to_press:
-            LOG_INFO(f"[按住] 配置变更-按下: {to_press}")
-            for k in to_press:
-                try:
-                    if self.input_handler.hold_key(k):
-                        self._held_hold_keys.add(k)
-                        if k not in self._held_hold_order:
-                            self._held_hold_order.append(k)
-                except Exception as e:
-                    LOG_ERROR(f"[按住] hold_key 失败 {k}: {e}")
-        if to_release:
-            LOG_INFO(f"[按住] 配置变更-释放: {to_release}")
-            for k in to_release:
-                try:
-                    self.input_handler.release_key(k)
-                    self._held_hold_keys.discard(k)
-                    if k in self._held_hold_order:
-                        self._held_hold_order.remove(k)
-                except Exception as e:
-                    LOG_ERROR(f"[按住] release_key 失败 {k}: {e}")
+    def _sync_skill_hold_keys(self, keys: Optional[List[str]] = None) -> bool:
+        """把期望持键的**完整集合**声明给 AHK(单一权威在 AHK 端)。
+
+        Python 不再镜像"实际按住了什么":AHK 收到完整集合后做幂等差量同步
+        (LIFO 释放多余键、按序补按缺失键,抑制期只推迟新增 down)。
+        因此这里既是 apply 也是 delta,也是 release —— 传空集合即全部释放。
+        """
+        target = list(keys) if keys is not None else self._get_configured_hold_keys()
+        try:
+            ok = self.input_handler.set_skill_hold_keys(target)
+            LOG_INFO(f"[按住] 已声明期望持键: {target or '(空:全部释放)'}")
+            return bool(ok)
+        except Exception as e:
+            LOG_ERROR(f"[按住] 下发期望持键失败 {target}: {e}")
+            return False
+
+    def _release_skill_hold_keys(self) -> bool:
+        """释放全部技能持键(声明空集合)。属安全清理命令,干跑下也会真实下发。"""
+        return self._sync_skill_hold_keys([])
 
     # ===== 现有逻辑 =====
     def prepare_border_only(self):
@@ -873,20 +824,23 @@ class SkillManager:
         if self._is_macro_mode():
             self._start_ahk_macro()
         else:
-            # 一次性按住配置中的按住键
-            self._apply_hold_keys()
+            # 声明配置中的期望持键集合
+            self._sync_skill_hold_keys()
 
     def stop(self):
         if not self._is_running:
             return
-        # 先停推进,再释放(含宏持键),避免调度线程竞态
+        # 🔧 停止顺序:停生产者并**等待调度线程退出** → 再释放持键/停宏。
+        # 反过来(先释放后停调度)会让在飞的回调在释放之后又入队新动作。
         self._is_running = False
         self._is_paused = False
-        self._release_hold_keys()
-        self._stop_ahk_macro()
 
-        # 停止自主调度
+        # 1) 停生产者:_stop_autonomous_scheduling 内部 join 调度线程(timeout 2s)
         self._stop_autonomous_scheduling()
+
+        # 2) 生产者已停,再释放技能持键(声明空集合)与宏持键
+        self._release_skill_hold_keys()
+        self._stop_ahk_macro()
 
         self.border_frame_manager.stop()
         self.clear_cache()
@@ -903,7 +857,11 @@ class SkillManager:
         self._is_running = False
         self._is_paused = True
 
-        # 释放宏持键,防止紧急停止时键悬空
+        # 释放技能持键与宏持键,防止紧急停止时键悬空
+        try:
+            self._release_skill_hold_keys()
+        except Exception as e:
+            LOG_ERROR(f"[紧急停止] 释放技能持键失败: {e}")
         try:
             self._stop_ahk_macro()
         except Exception as e:

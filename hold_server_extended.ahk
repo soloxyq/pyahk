@@ -84,6 +84,30 @@ global MacroSpecialSuppressed := false
 global MacroManagedSuppressed := false
 global MACRO_TICK_MS := 5
 
+; 🎯 技能持久按住键(TriggerMode=2)—— 声明式账本,AHK 独占"实际按下"状态
+; Python 只声明"期望按住哪些键"(有序,鼠标键在前),不再镜像实际状态。
+; 好处:hold 不再经动作队列,管理键清队/特殊键抑制都不会让两端账本分叉;
+; 抑制期间只推迟新增 down,抑制结束后 ReconcileSkillHoldKeys() 自动补按。
+global SkillHoldDesiredOrder := []  ; 期望持键(按 Python 下发顺序)
+global SkillHeldKeys := Map()       ; 实际已 SendDown 的键
+global SkillHeldOrder := []         ; 实际按下顺序(LIFO 释放用)
+
+; 🎯 队列级临时持键(目前唯一来源:管理键 hold_ms 配置生成的 hold:target)
+; 它与技能持键账本是两套独立机制,但同样必须在"完全停下"时被释放,
+; 否则 PAUSED/STOPPED 恰好落在 hold:target 与 release:target 之间时,
+; release 会随 emergency 队列一起被清掉 → 该键真实卡在按下状态。
+global ManagedHoldTargets := Map()
+
+; 🎯 运行时闸门:Python 进入 STOPPED/PAUSED 时**第一件事**就是关掉它。
+; 理由:UnifiedScheduler.stop() 只 join 2 秒,若在飞回调(如 OCR)超时未退出,
+; 它之后仍可能继续下发命令,而此时 Python 侧的停止流程已经走完。
+; 关闸 = 原子停止屏障(CMD_SET_ACCEPTING_ACTIONS(false) 同一条消息内 ClearQueue(-1)),
+; 且闸门封住**所有**输入生产路径:EnqueueAction(最深卡点,覆盖 CMD_ENQUEUE/管理键/
+; sequence 展开)、MacroTick、HandleManagedKey、CMD_START_MACRO、非空持键声明,
+; 以及 IsSkillHoldSuppressed(压住 Reconcile 的补按环节)。
+; 清队列/停宏/释放持键/空持键声明等安全清理命令永远放行,释放(up)永不被闸门拦截。
+global RuntimeAcceptingActions := true
+
 ; 🎯 基于F8状态的智能窗口句柄缓存
 global CurrentPythonWindow := "TorchLightAssistant_MainWindow_12345"  ; 启动时默认主窗口
 global CachedPythonHwnd := 0  ; 缓存的Python窗口句柄
@@ -250,6 +274,28 @@ SetTimer(ProcessQueue, 20)
 ; 宏解释器独立 tick:只推进 AHK 端宏状态机,不占用全局 DelayUntil/队列
 SetTimer(MacroTick, MACRO_TICK_MS)
 
+; 进程退出兜底:仅覆盖**正常退出路径**(ExitApp / CMD_SHUTDOWN / 用户手动关脚本)。
+; ⚠️ Windows 的 TerminateProcess(Python Popen.terminate/kill)不会触发 OnExit ——
+; 所以 Python 停 AHK 必须先发 CMD_SHUTDOWN 优雅关闭,terminate 只是超时兜底
+; (走到 terminate 时持键可能残留,无法避免)。
+OnExit(AhkOnExitHandler)
+AhkOnExitHandler(reason, code) {
+    try {
+        ReleaseAllSkillHoldKeys()
+    } catch {
+        ; 退出路径不再抛错
+    }
+    try {
+        ReleaseMacroHeldKeys()
+    } catch {
+    }
+    try {
+        ReleaseAllManagedHoldTargets()
+    } catch {
+    }
+    return 0  ; 允许退出
+}
+
 ; ===============================================================================
 ; AHK 端通用宏解释器
 ; ===============================================================================
@@ -314,8 +360,13 @@ StopMacro() {
 
 MacroTick() {
     global MacroSteps, MacroActive, MacroIndex, MacroDueTime
-    global MacroSpecialSuppressed, MacroManagedSuppressed
+    global MacroSpecialSuppressed, MacroManagedSuppressed, RuntimeAcceptingActions
 
+    ; 闸门关闭时宏必须静默:正常关闸走 ClearQueue(-1)→StopMacro 已置 MacroActive=false,
+    ; 这里是防御第二层 —— 关闸与本 tick 之间不留任何"再发一键"的窗口
+    if (!RuntimeAcceptingActions) {
+        return
+    }
     if (!MacroActive || MacroSpecialSuppressed || MacroManagedSuppressed) {
         return
     }
@@ -343,8 +394,10 @@ MacroTick() {
     if (stype = "delay") {
         MacroDueTime := A_TickCount + Max(Integer(data), 1)
     } else if (stype = "down") {
-        SendDown(data)
-        TrackMacroDown(data)
+        ; 同技能持键账本:被 block_mouse 吞掉时不记账,避免 ReleaseMacroHeldKeys 发出多余的 up
+        if (SendDown(data)) {
+            TrackMacroDown(data)
+        }
     } else if (stype = "up") {
         SendUp(data)
         TrackMacroUp(data)
@@ -436,9 +489,174 @@ SetMacroManagedSuppressed(enabled) {
 }
 
 ; ===============================================================================
+; 技能持久按住键(TriggerMode=2)声明式同步
+; ===============================================================================
+; 是否处于输入抑制期(特殊键按住 / 管理键序列进行中 / 运行时闸门关闭)。
+; 抑制只推迟"新增 down";释放(up)永不受抑制影响。
+; 闸门关闭视同抑制:关闸后 desired 必为空(非空声明在协议层被拒),
+; 这里是防御第二层 —— 即使有残留 desired,关闸期间也绝不按下新键。
+IsSkillHoldSuppressed() {
+    global SpecialKeysPaused, ActiveManagedKeys, RuntimeAcceptingActions
+    return !RuntimeAcceptingActions || SpecialKeysPaused || ActiveManagedKeys.Count > 0
+}
+
+; 接收 Python 下发的完整期望集合(每行一个键名)。空 param = 释放全部技能持键。
+SetSkillHoldKeys(param) {
+    global SkillHoldDesiredOrder
+
+    desired := []
+    seen := Map()
+    if (param != "") {
+        for index, line in StrSplit(param, "`n", "`r") {
+            key := Trim(line, "`r`n `t ")
+            if (key = "" || seen.Has(key)) {
+                continue
+            }
+            seen[key] := true
+            desired.Push(key)
+        }
+    }
+    SkillHoldDesiredOrder := desired
+    ReconcileSkillHoldKeys()
+}
+
+; 差量同步:先 LIFO 释放不再期望的键(始终立即执行),再按下缺失的键(抑制期推迟)。
+; 幂等:用同一集合重复调用不会产生额外按键。
+ReconcileSkillHoldKeys() {
+    global SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
+
+    desired := Map()
+    for index, key in SkillHoldDesiredOrder {
+        desired[key] := true
+    }
+
+    ; 1) 释放不再期望的键 —— 任何抑制都不能推迟 up,否则就是卡键
+    idx := SkillHeldOrder.Length
+    while (idx > 0) {
+        key := SkillHeldOrder[idx]
+        if (!desired.Has(key)) {
+            SendUp(key)
+            SkillHeldKeys.Delete(key)
+            SkillHeldOrder.RemoveAt(idx)
+        }
+        idx -= 1
+    }
+
+    ; 2) 抑制期不新增 down:期望集合已记录,抑制结束时本函数会被再次调用补齐
+    if (IsSkillHoldSuppressed()) {
+        return
+    }
+
+    ; 3) 按 Python 下发顺序补按缺失键(鼠标键先于键盘键由 Python 侧排序保证)
+    for index, key in SkillHoldDesiredOrder {
+        if (SkillHeldKeys.Has(key)) {
+            continue
+        }
+        ; 只在**真正发出** down 之后才记账:block_mouse 原地模式会吞掉鼠标键的 down,
+        ; 若无条件记账,账本就会谎报"已按住",此后 Reconcile 永远跳过它 → 技能静默失效。
+        ; 不记账则该键留在 desired 里,下一次 Reconcile(含关闭原地模式时)会重试。
+        if (!SendDown(key)) {
+            continue
+        }
+        SkillHeldKeys[key] := true
+        SkillHeldOrder.Push(key)
+    }
+}
+
+; 注销账本里的某个键(不发任何按键)。
+; 用途:队列动作(管理键的 release:X / press:X)会**物理抬起**与持久持键同名的键,
+; 此时账本必须同步失忆,否则 Reconcile 会因"账本说还按着"而不补按 → 持续技能永久失效。
+; 返回 true 表示确实注销了(调用方据此决定是否立刻 Reconcile 补按)。
+ForgetSkillHeldKey(key) {
+    global SkillHeldKeys, SkillHeldOrder
+
+    if (!SkillHeldKeys.Has(key)) {
+        return false
+    }
+    SkillHeldKeys.Delete(key)
+    idx := SkillHeldOrder.Length
+    while (idx > 0) {
+        if (SkillHeldOrder[idx] = key) {
+            SkillHeldOrder.RemoveAt(idx)
+        }
+        idx -= 1
+    }
+    return true
+}
+
+; ---------- 队列级临时持键(管理键 hold_ms)----------
+MarkManagedHoldTarget(key) {
+    global ManagedHoldTargets
+    ManagedHoldTargets[key] := true
+}
+
+ClearManagedHoldTarget(key) {
+    global ManagedHoldTargets
+    if (ManagedHoldTargets.Has(key)) {
+        ManagedHoldTargets.Delete(key)
+    }
+}
+
+; 清队列会丢弃还没执行的 release:target,必须在这里补发 up,否则该键真实卡死。
+; 返回 true 表示补发的 up 里有键同时是持久持键(账本已同步失忆),
+; 调用方需要决定是否 ReconcileSkillHoldKeys() 补按 —— 若紧接着就要
+; ReleaseAllSkillHoldKeys()(完全停下),则不该补按。
+ReleaseAllManagedHoldTargets() {
+    global ManagedHoldTargets
+
+    forgotHold := false
+    for key, _ in ManagedHoldTargets {
+        SendUp(key)
+        ; 该 target 可能同时是 TriggerMode=2 持久持键:这里真实发了 up,
+        ; 技能账本必须同步,否则 Reconcile 以为还按着 → 永不补按。
+        if (ForgetSkillHeldKey(key)) {
+            forgotHold := true
+        }
+    }
+    ManagedHoldTargets := Map()
+    return forgotHold
+}
+
+; SHUTDOWN 的实际退出动作(由一次性定时器调用,确保 WM_COPYDATA 已返回)
+AhkShutdownNow() {
+    ExitApp 0
+}
+
+; 安全收尾:LIFO 释放全部技能持键,并清空期望+实际账本(清空后不会被 Reconcile 重新按下)。
+ReleaseAllSkillHoldKeys() {
+    global SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
+
+    released := Map()
+    idx := SkillHeldOrder.Length
+    while (idx > 0) {
+        key := SkillHeldOrder[idx]
+        if (SkillHeldKeys.Has(key)) {
+            SendUp(key)
+            released[key] := true
+        }
+        idx -= 1
+    }
+    ; 兜底:未进 Order 的账本残留也一并释放
+    for key, _ in SkillHeldKeys {
+        if (!released.Has(key)) {
+            SendUp(key)
+        }
+    }
+
+    SkillHoldDesiredOrder := []
+    SkillHeldKeys := Map()
+    SkillHeldOrder := []
+}
+
+; ===============================================================================
 ; 命令接收 (WM_COPYDATA)
 ; ===============================================================================
 WM_COPYDATA(wParam, lParam, msg, hwnd) {
+    ; ⚠️ AHK v2 作用域:被本函数**赋值**的全局必须在这里声明(super-global 也一样),
+    ; 且声明必须出现在第一次使用之前 —— RuntimeAcceptingActions 在 CMD_ENQUEUE 分支
+    ; 里就要被读取,所以统一提到函数顶部,不能放在后面的 case 里。
+    global RuntimeAcceptingActions
+
     ; 解析COPYDATASTRUCT
     ; dwData = 命令ID
     ; lpData = 参数字符串（可选）
@@ -484,6 +702,11 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         case CMD_ENQUEUE:
             ; ENQUEUE - 添加到队列
             ; 参数格式: "priority:action"
+            ; 闸门关闭(Python 已进入 STOPPED)时拒绝入队:这是"按了 F8 绝不再有键打进游戏"
+            ; 的最后一道防线,覆盖 join 超时后仍在跑的在飞回调。
+            if (!RuntimeAcceptingActions) {
+                return 0
+            }
             parts := CachedStrSplit(param, ":", , 2)
             if (parts.Length >= 2) {
                 priority := Integer(parts[1])
@@ -493,8 +716,41 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             }
             return 0
 
+        case CMD_SET_ACCEPTING_ACTIONS:
+            ; SET_ACCEPTING_ACTIONS - 运行时闸门开关,参数 "true" / "false"
+            ; 关闸 = **原子停止屏障**:同一条消息内完成 关闸+清队+停宏+释放全部持键。
+            ; 只关闸不清场是不够的:已入队的动作仍会被 ProcessQueue 消费,
+            ; MacroTick 仍以 5ms 周期真实发键 —— 靠 Python 侧后续命令补清必然有空窗。
+            RuntimeAcceptingActions := (param = "true")
+            if (!RuntimeAcceptingActions) {
+                ClearQueue(-1)
+            } else {
+                ; 开闸与抑制解除同型:补按被推迟的持键(正常流程 desired 已空,是空转;
+                ; Python 随后会重新声明完整集合)
+                ReconcileSkillHoldKeys()
+            }
+            return 1
+
+        case CMD_SHUTDOWN:
+            ; SHUTDOWN - 优雅关闭。Python 的 Popen.terminate() 在 Windows 上是
+            ; TerminateProcess,**不会**触发 OnExit,所以这里是唯一可靠的释放时机。
+            ; 必须先原子清场:若只释放持键不清队列,本消息返回后、退出定时器触发前,
+            ; 已到期的 ProcessQueue 可能先执行一次旧队列 → 退出前多发按键。
+            ; ClearQueue(-1) 已包含 停宏(含宏持键)+队列级临时持键+技能持键 三类释放。
+            RuntimeAcceptingActions := false
+            ClearQueue(-1)
+            ; 不在消息处理函数里直接 ExitApp:先让本次 SendMessage 正常返回 1,
+            ; 再由一次性定时器退出,避免 Python 阻塞在无超时的 SendMessageW 上。
+            SetTimer(AhkShutdownNow, -1)
+            return 1
+
         case CMD_PAUSE:
             ; PAUSE - 暂停队列处理
+            ; ⚠️ AHK v2 作用域:顶层 `global IsPaused := false` 只是 super-global,
+            ; 函数内**赋值**仍需顶部 global 声明,否则写的是函数局部变量,
+            ; ProcessQueue 的 `if (IsPaused) return` 闸门永远不会生效(实测已确认)。
+            ; 本声明同时覆盖下方 CMD_RESUME 的赋值(AHK v2 声明是函数级的)。
+            global IsPaused
             IsPaused := true
             return 1
 
@@ -532,6 +788,9 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 global StationaryModeActive, StationaryModeType
                 StationaryModeActive := (parts[1] = "true")
                 StationaryModeType := parts[2]
+                ; block_mouse 会吞掉鼠标键的 down(此时账本刻意不记账)。
+                ; 关闭原地模式后必须补按,否则鼠标持久持键要等到下次 Z/F8 才恢复。
+                ReconcileSkillHoldKeys()
                 return 1
             }
             return 0
@@ -606,12 +865,28 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
         case CMD_START_MACRO:
             ; START_MACRO - 从第 1 步启动/重启通用宏循环
+            ; 闸门关闭时拒绝:STOPPED/PAUSED 期间迟到的启动命令不得让 MacroTick 复活
+            if (!RuntimeAcceptingActions) {
+                return 0
+            }
             StartMacro()
             return 1
 
         case CMD_STOP_MACRO:
             ; STOP_MACRO - 停止通用宏并按 LIFO 释放宏持键
             StopMacro()
+            return 1
+
+        case CMD_SET_SKILL_HOLD_KEYS:
+            ; SET_SKILL_HOLD_KEYS - 声明式设置 TriggerMode=2 期望持键的完整集合
+            ; 参数格式: 每行一个键名(顺序=按下顺序,鼠标键在前),如 "RButton`nq"
+            ; 空 param = 释放全部技能持键(属安全清理命令,干跑/闸门关闭都必须放行)。
+            ; 非空集合会按下按键,闸门关闭时**拒绝而非推迟**:若只记入 desired,
+            ; 下次开闸的 Reconcile 会把它按下,但那已不是 Python 当时的最新意图。
+            if (param != "" && !RuntimeAcceptingActions) {
+                return 0
+            }
+            SetSkillHoldKeys(param)
             return 1
 
         case CMD_SET_PYTHON_WINDOW_STATE:
@@ -712,6 +987,10 @@ ClearManagedKeyMark(key) {
     }
     if (ActiveManagedKeys.Count = 0) {
         SetMacroManagedSuppressed(false)
+        ; 抑制解除:补齐被推迟的技能持键 down。
+        ; "管理键临时 release:X/press:X 与持久持键同名"造成的误释放,靠 ExecuteAction 里的
+        ; ForgetSkillHeldKey 把账本改脏,这次 Reconcile 才能看见缺口并补按(缺一不可)。
+        ReconcileSkillHoldKeys()
     }
 }
 
@@ -742,6 +1021,9 @@ UpdateBatchConfig(configString) {
             }
         }
     }
+
+    ; stationary_type 变化会改变 block_mouse 拦截范围,同 CMD_SET_STATIONARY 需要补按
+    ReconcileSkillHoldKeys()
 }
 
 ; ===============================================================================
@@ -784,6 +1066,13 @@ EnqueueAction(priority, action) {
     ; 🔧 防御性 global 声明:虽然函数内当前只有 .Push() 方法调用(不会触发 local 化),
     ; 但显式声明可防止未来误改导致的隐式作用域问题
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue, QueueStats
+    global RuntimeAcceptingActions
+
+    ; 🚧 最深的统一卡点:闸门关闭时任何来源(WM_COPYDATA / 管理键 / sequence 展开 /
+    ; 未来新增调用方)都不得向队列写入。关闸即"完全停下",队列必须保持空。
+    if (!RuntimeAcceptingActions) {
+        return
+    }
 
     ; 🔧 BUG修复(B5+B16): 拦截 sequence 类型,展开为多个原子动作进入同一优先级队列
     ; 这样可复用 DelayUntil 异步机制,避免 ExecuteSequence 中的同步 Sleep 阻塞所有队列
@@ -846,6 +1135,11 @@ ClearQueue(priority) {
             EmergencyQueue := []
             ; emergency 里 cleanup:key 动作丢失,同步清 single-flight 锁
             ActiveManagedKeys := Map()
+            ; release:target 也随 emergency 一起丢失 → 必须补发 up,否则该键卡在按下。
+            ; 与 case -1 不同:这里只清了 emergency,持久持键仍应保持,所以要补按。
+            if (ReleaseAllManagedHoldTargets()) {
+                ReconcileSkillHoldKeys()
+            }
         case 1:
             TotalQueueCount := TotalQueueCount - QueueCounts["high"]
             QueueCounts["high"] := 0
@@ -877,6 +1171,12 @@ ClearQueue(priority) {
             DelayUntil := 0
             DelayClearOthers := false
             StopMacro()
+            ; 先释放队列级临时持键:被丢弃的 release:target 不会再执行,只有这里能补 up。
+            ; 这里刻意**不**补按持久持键 —— 紧随其后的 ReleaseAllSkillHoldKeys() 就要全部释放。
+            ReleaseAllManagedHoldTargets()
+            ; 技能持久按住键与队列无关(走声明式命令),但 ClearQueue(-1) 语义是"完全停下",
+            ; 必须同步释放并清空账本,否则 PAUSED 后仍有键按住
+            ReleaseAllSkillHoldKeys()
         case -2:
             ; 🔧 清空所有非紧急队列(保留 emergency,用于管理按键期间保护 HP/MP 救命动作)
             ; emergency 不动 → cleanup:key 仍会执行 → ActiveManagedKeys 不需手动清
@@ -960,6 +1260,7 @@ ExecuteAction(action) {
     ; 避免在 if 分支内零散声明导致维护困难
     global ACTION_CLEANUP, ACTION_PRESS, ACTION_SEQUENCE, ACTION_HOLD, ACTION_RELEASE, ACTION_MOUSE_CLICK, ACTION_DELAY, ACTION_NOTIFY
     global DelayUntil, DelayClearOthers
+    global SkillHeldKeys, SkillHeldOrder, ManagedHoldTargets
 
     ; 🚀 处理清理标记（使用常量比较）
     if (InStr(action, ACTION_CLEANUP . ":")) {
@@ -971,7 +1272,13 @@ ExecuteAction(action) {
     ; 🚀 解析动作类型（使用缓存分割）
     parts := CachedStrSplit(action, ":", , 2)
     if parts.Length < 2 {
-        SendPress(action, IsEmergencyAction(action)) ; 兼容旧的直接发送key的模式
+        ; 兼容旧的直接发送key的模式(Python 现在一律发 "press:key",此分支只为向后兼容)
+        ; 同带前缀的 press:一样,裸键与持久持键同名时也会把它抬起,必须同步账本。
+        if (SendPress(action, IsEmergencyAction(action))) {
+            if (ForgetSkillHeldKey(action)) {
+                ReconcileSkillHoldKeys()
+            }
+        }
         return
     }
 
@@ -980,12 +1287,27 @@ ExecuteAction(action) {
 
     ; 🚀 执行动作（直接常量比较，无函数调用开销）
     ; 注意: sequence 已在 EnqueueAction 入口展开为多个原子动作,此处不再处理
+    ; ⚠️ 队列动作是技能持键账本之外的**第二个物理写者**:管理键 hold_ms 会生成
+    ; hold:target / release:target,hold_ms=0 生成 press:target(down+up)。若 target
+    ; 与某个 TriggerMode=2 持久持键同名,这些动作会把持键物理抬起。必须同步账本,
+    ; 否则 Reconcile 以为键还按着 → 永不补按 → 持续技能整局静默失效。
     if (actionType = ACTION_PRESS) {
-        SendPress(actionData, IsEmergencyAction(action))
+        if (SendPress(actionData, IsEmergencyAction(action))) {
+            ; press 的净效果是抬起;只有真正发出(未被替换/未被吞)时才注销账本
+            if (ForgetSkillHeldKey(actionData)) {
+                ReconcileSkillHoldKeys()   ; 抑制期内是空转,抑制结束时会再补按
+            }
+        }
     } else if (actionType = ACTION_HOLD) {
-        SendDown(actionData)
+        if (SendDown(actionData)) {
+            MarkManagedHoldTarget(actionData)
+        }
     } else if (actionType = ACTION_RELEASE) {
         SendUp(actionData)
+        ClearManagedHoldTarget(actionData)
+        if (ForgetSkillHeldKey(actionData)) {
+            ReconcileSkillHoldKeys()
+        }
     } else if (actionType = ACTION_MOUSE_CLICK) {
         ExecuteMouseClick(actionData)
     } else if (actionType = ACTION_DELAY) {
@@ -1003,6 +1325,10 @@ ExecuteAction(action) {
     }
 }
 
+; 返回值语义(三个 Send* 函数统一):
+;   true  = 已向全局输入流真实发出针对 key 本身的按键事件
+;   false = 没有(被原地模式吞掉 / 被强制移动替换成别的键 / 走 ControlSend 未改全局键态)
+; 调用方据此维护持键账本,避免"以为发了其实没发"或"以为没动其实已抬起"。
 SendPress(key, forceMoveBypass := false) {
     ; 发送按键 (按下并释放，最小延时)
     global ForceMoveActive, ForceMoveReplacementKey, ForceMovePassthroughKeys, SendKeyMode, TargetWin
@@ -1013,22 +1339,21 @@ SendPress(key, forceMoveBypass := false) {
     if (ForceMoveActive && !forceMoveBypass) {
         if (!ForceMovePassthroughKeys.Has(CachedStrLower(key))) {
             SendKeyInternal(ForceMoveReplacementKey)
-            return
+            return false   ; 发的是替换键,key 本身没被碰过
         }
         ; 在白名单里 → 落到下面的正常发送路径
     }
 
     if (ShouldBlockMouseInStationary(key)) {
-        return
+        return false
     }
 
     ; 正常按键处理
     if (ShouldAddShiftModifier(key)) {
-        ; 带shift修饰符
-        SendKeyInternal("+" . key)
-    } else {
-        SendKeyInternal(key)
+        ; 带shift修饰符(+{key} 末尾仍是 key up)
+        return SendKeyInternal("+" . key)
     }
+    return SendKeyInternal(key)
 }
 
 SendKeyInternal(key) {
@@ -1039,14 +1364,15 @@ SendKeyInternal(key) {
         ; ControlSend模式 - 直接发送到目标窗口
         try {
             ControlSend FormatKeyForSend(key), , TargetWin
+            ; ControlSend 只投递窗口消息,不改变全局键态 → 不影响持键账本
+            return false
         } catch {
             ; 如果ControlSend失败，回退到直接模式
-            SendDirect(key)
+            return SendDirect(key)
         }
-    } else {
-        ; 直接发送模式 (SendInput)
-        SendDirect(key)
     }
+    ; 直接发送模式 (SendInput)
+    return SendDirect(key)
 }
 
 SendDirect(key) {
@@ -1067,6 +1393,8 @@ SendDirect(key) {
         Sleep 5
         Send "{" key " up}"
     }
+    ; 所有分支的净效果都是"key 最终处于抬起状态"
+    return true
 }
 
 FormatKeyForSend(key) {
@@ -1085,14 +1413,16 @@ FormatKeyForSend(key) {
 SendDown(key) {
     ; 按住按键
     if (ShouldBlockMouseInStationary(key)) {
-        return
+        return false   ; 被原地模式吞掉 → 调用方不得记账,否则账本谎报"已按下"
     }
     Send "{" key " down}"
+    return true
 }
 
 SendUp(key) {
-    ; 释放按键
+    ; 释放按键(永不被任何模式拦截,否则就是卡键)
     Send "{" key " up}"
+    return true
 }
 
 ShouldAddShiftModifier(key) {
@@ -1216,6 +1546,7 @@ UnregisterHook(key) {
         }
         if (ActiveManagedKeys.Count = 0) {
             SetMacroManagedSuppressed(false)
+            ReconcileSkillHoldKeys()  ; 抑制解除,补齐被推迟的技能持键
         }
     }
 
@@ -1230,6 +1561,7 @@ UnregisterHook(key) {
         if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
             SpecialKeysPaused := false
             SetMacroSpecialSuppressed(false)
+            ReconcileSkillHoldKeys()  ; 抑制解除,补齐被推迟的技能持键
             SendEventToPython("special_key_pause:end")
         }
     }
@@ -1282,6 +1614,8 @@ HandleSpecialKeyUp(key) {
     if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
         SpecialKeysPaused := false
         SetMacroSpecialSuppressed(false)
+        ; 抑制解除:补齐抑制期间被推迟的技能持键 down
+        ReconcileSkillHoldKeys()
         SendEventToPython("special_key_pause:end")
     }
 
@@ -1292,6 +1626,14 @@ HandleSpecialKeyUp(key) {
 ; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射 + 去重
 HandleManagedKey(key) {
     global ManagedKeysConfig, EmergencyQueue, HighQueue, NormalQueue, LowQueue, IsPaused
+    global RuntimeAcceptingActions
+
+    ; 闸门关闭(STOPPED 过渡窗口 / PAUSED)= 完全停下:管理键不再重映射入队。
+    ; $Hook 会吞掉原始按键,此时按管理键无任何输出,与"完全暂停"语义一致;
+    ; STOPPED 的 Hook 注销完成后按键即恢复原生直通。
+    if (!RuntimeAcceptingActions) {
+        return
+    }
 
     ; 🎯 去重机制：防止快速重复按键（Master方案学习）
     if (IsManagedKeyActive(key)) {
@@ -1496,6 +1838,10 @@ ClearAllConfigurableHooks() {
         SetMacroSpecialSuppressed(false)
         SendEventToPython("special_key_pause:end")
     }
+
+    ; 抑制状态已彻底归零:与期望集合对齐一次。
+    ; STOPPED 路径下 Python 已先下发空集合,此处为无操作;配置热切换时则补齐被推迟的 down。
+    ReconcileSkillHoldKeys()
 }
 
 ; ===============================================================================

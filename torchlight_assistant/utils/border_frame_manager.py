@@ -457,8 +457,13 @@ class BorderFrameManager:
         # OpenCV H: 85..155 ~= 170..310 degrees,覆盖青蓝/蓝紫屏障色。
         return (h >= 85) & (h <= 155) & (s >= 35) & (v >= 35)
 
-    def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0, color_config: Optional[dict] = None) -> float:
-        """使用半圆形蒙版和连续段检测算法，返回匹配百分比（0.0-100.0）"""
+    def compare_resource_circle(self, frame: np.ndarray, center_x: int, center_y: int, radius: int, resource_type: str, threshold: float = 0.0, color_config: Optional[dict] = None) -> Optional[float]:
+        """使用半圆形蒙版和连续段检测算法，返回匹配百分比（0.0-100.0）。
+
+        🔧 检测失败(模板缺失/区域越界/异常)返回 **None**,而不是 0.0。
+        0.0 的语义是"资源真的空了",会让上层判定血量耗尽 → 无限狂按药剂;
+        None 表示"本轮状态未知",上层必须跳过本轮而不触发。
+        """
         try:
             import cv2
 
@@ -490,17 +495,19 @@ class BorderFrameManager:
                         self._template_cache[template_name] = cached_template
                     LOG_INFO(f"[圆形检测] 已创建资源模板: {template_name}")
                 else:
-                    LOG_ERROR(f"[圆形检测] 无法从区域创建模板: {template_name}")
-                    return 0.0
+                    LOG_ERROR(f"[圆形检测] 无法从区域创建模板: {template_name} → 本轮跳过(不触发)")
+                    return None
 
             template_hsv = cached_template.get("image")
             if template_hsv is None:
-                LOG_ERROR(f"[圆形检测] 缓存的模板无效: {template_name}")
-                return 0.0
+                LOG_ERROR(f"[圆形检测] 缓存的模板无效: {template_name} → 本轮跳过(不触发)")
+                return None
 
             x1, y1 = center_x - radius, center_y - radius
             region = self.get_region_from_frame(frame, x1, y1, radius * 2, radius * 2)
-            if region is None: return 0.0
+            if region is None:
+                LOG_ERROR(f"[圆形检测] {resource_type} 区域超出捕获帧 → 本轮跳过(不触发)")
+                return None
 
             if region.shape[2] == 4:
                 region = cv2.cvtColor(region, cv2.COLOR_BGRA2BGR)
@@ -601,8 +608,8 @@ class BorderFrameManager:
             return match_percentage
 
         except Exception as e:
-            LOG_ERROR(f"[圆形检测] {resource_type} 检测异常: {e}")
-            return 0.0
+            LOG_ERROR(f"[圆形检测] {resource_type} 检测异常: {e} → 本轮跳过(不触发)")
+            return None
 
     def compare_cooldown_image(self, frame: np.ndarray, x: int, y: int, skill_name: str, size: int, threshold: float = 0.7) -> Optional[float]:
         """使用HSV容差检测，统一处理技能冷却。

@@ -4,11 +4,12 @@
             "Enabled": true,
             "Key": "c",
             "Priority": false,
-            "Timer": 400,
-            "TriggerMode": 0,
-            "CooldownCoordX": 795,
-            "CooldownCoordY": 995,
-            "CooldownSize": 24,
+            "Timer": 256,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 790,
+            "CooldownCoordY": 993,
+            "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 900,
             "ConditionCoordY": 600,
@@ -19,23 +20,25 @@
             "Enabled": true,
             "Key": "LButton",
             "Priority": false,
-            "Timer": 95,
+            "Timer": 96,
             "TriggerMode": 0,
+            "BossOnly": false,
             "CooldownCoordX": 857,
             "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
-            "ConditionCoordX": 1310,
-            "ConditionCoordY": 992,
+            "ConditionCoordX": 1347,
+            "ConditionCoordY": 1005,
             "ConditionColor": 0,
-            "AltKey": "2"
+            "AltKey": ""
         },
         "Skill3": {
             "Enabled": true,
             "Key": "3",
             "Priority": false,
-            "Timer": 1000,
+            "Timer": 256,
             "TriggerMode": 1,
+            "BossOnly": false,
             "CooldownCoordX": 919,
             "CooldownCoordY": 995,
             "CooldownSize": 12,
@@ -51,6 +54,7 @@
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 1,
+            "BossOnly": false,
             "CooldownCoordX": 981,
             "CooldownCoordY": 995,
             "CooldownSize": 12,
@@ -62,14 +66,15 @@
         },
         "Skill5": {
             "Enabled": false,
-            "Key": "x",
+            "Key": "2",
             "Priority": false,
             "Timer": 200,
             "TriggerMode": 1,
-            "CooldownCoordX": 0,
-            "CooldownCoordY": 0,
+            "BossOnly": false,
+            "CooldownCoordX": 857,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
-            "ExecuteCondition": 1,
+            "ExecuteCondition": 0,
             "ConditionCoordX": 611,
             "ConditionCoordY": 933,
             "ConditionColor": 0,
@@ -77,10 +82,11 @@
         },
         "Skill6": {
             "Enabled": false,
-            "Key": "6",
+            "Key": "0",
             "Priority": false,
             "Timer": 1000,
             "TriggerMode": 1,
+            "BossOnly": false,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
@@ -92,10 +98,11 @@
         },
         "Skill7": {
             "Enabled": false,
-            "Key": "7",
+            "Key": "5",
             "Priority": false,
             "Timer": 1000,
-            "TriggerMode": 0,
+            "TriggerMode": 1,
+            "BossOnly": false,
             "CooldownCoordX": 0,
             "CooldownCoordY": 0,
             "CooldownSize": 12,
@@ -107,12 +114,13 @@
         },
         "Skill8": {
             "Enabled": false,
-            "Key": "8",
+            "Key": "6",
             "Priority": false,
             "Timer": 1000,
-            "TriggerMode": 0,
-            "CooldownCoordX": 0,
-            "CooldownCoordY": 0,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 1108,
+            "CooldownCoordY": 995,
             "CooldownSize": 12,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
@@ -127,11 +135,11 @@
             "enabled": false
         },
         "input_mode": "direct",
+        "boss_mode_hotkey": "",
         "queue_processor_interval": 35,
         "key_press_duration": 10,
         "mouse_click_duration": 5,
         "cooldown_checker_interval": 110,
-        "sequence_timer_interval": 1000,
         "capture_interval": 60,
         "hp_cooldown": 1000,
         "mp_cooldown": 2000,
@@ -143,7 +151,7 @@
             "ahk_exe": "Diablo IV.exe"
         },
         "stationary_mode_config": {
-            "hotkey": "xbutton1",
+            "hotkey": "XButton1",
             "mode_type": "shift_modifier",
             "force_move_hotkey": "a",
             "force_move_replacement_key": "f",
@@ -175,7 +183,7 @@
             "hp_config": {
                 "enabled": true,
                 "key": "1",
-                "threshold": 30,
+                "threshold": 40,
                 "cooldown": 1000,
                 "tolerance_h": 25,
                 "tolerance_s": 33,
@@ -183,7 +191,7 @@
                 "detection_mode": "circle",
                 "center_x": 608,
                 "center_y": 989,
-                "radius": 70,
+                "radius": 50,
                 "colors": [
                     {
                         "name": "Color1",
@@ -237,13 +245,42 @@
             "special_keys": [
                 "space"
             ],
-            "managed_keys": {
-                "RButton": {
-                    "target": "RButton",
-                    "delay": 25
-                }
-            }
+            "managed_keys": {}
         },
+        "macro_steps": [
+            {
+                "type": "press",
+                "key": "1"
+            },
+            {
+                "type": "press",
+                "key": "2"
+            },
+            {
+                "type": "press",
+                "key": "3"
+            },
+            {
+                "type": "press",
+                "key": "4"
+            },
+            {
+                "type": "press",
+                "key": "5"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
+                "key": "7"
+            },
+            {
+                "type": "press",
+                "key": "8"
+            }
+        ],
         "skill_sequence": "1,2,3,4,5,6,7,8",
         "process_history": {
             "recent_processes": [

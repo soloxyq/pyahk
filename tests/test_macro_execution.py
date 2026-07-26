@@ -50,12 +50,9 @@ class FakeInput:
         self.calls.append(("stop_macro",))
         return True
 
-    def hold_key(self, key):
-        self.calls.append(("hold", key))
-        return True
-
-    def release_key(self, key):
-        self.calls.append(("release", key))
+    def set_skill_hold_keys(self, keys):
+        # 声明式:记录每次下发的**完整期望集合**(空列表=释放全部)
+        self.calls.append(("skill_hold", list(keys)))
         return True
 
     def execute_skill_normal(self, key):
@@ -68,10 +65,12 @@ class FakeInput:
 
 
 class FakeScheduler:
-    def __init__(self, running=False):
+    def __init__(self, running=False, log=None):
         self.running = running
         self.paused = False
         self.stopped = False
+        # 与 FakeInput 共享同一个有序事件表,才能断言"停调度线程"与"释放持键"的先后
+        self.log = log if log is not None else []
         self.added_tasks = []
         self.removed_tasks = []
         self.updated = []
@@ -86,6 +85,7 @@ class FakeScheduler:
     def stop(self):
         self.running = False
         self.stopped = True
+        self.log.append(("scheduler_stop",))
         return True
 
     def pause(self):
@@ -146,7 +146,9 @@ def _make_sm(sequence_enabled=True, steps=None, scheduler_running=False):
         FakeBorderManager(),
         resource_manager=FakeResourceManager(),
     )
-    sm.unified_scheduler = FakeScheduler(running=scheduler_running)
+    sm.unified_scheduler = FakeScheduler(
+        running=scheduler_running, log=sm.input_handler.calls
+    )
     sm._global_config = {
         "sequence_enabled": sequence_enabled,
         "macro_steps": steps if steps is not None else list(_STEPS),
@@ -165,7 +167,7 @@ def test_start_macro_mode_delegates_steps_to_ahk():
 
     assert _calls(sm, "set_macro_steps")[-1][1] == _STEPS
     assert _calls(sm, "start_macro")
-    assert not _calls(sm, "hold")  # 技能按住配置不属于宏模式
+    assert not _calls(sm, "skill_hold")  # 技能按住配置不属于宏模式
     assert all(task[0] != "sequence_scheduler" for task in sm.unified_scheduler.added_tasks)
     assert any(task[0] == "resource_checker" for task in sm.unified_scheduler.added_tasks)
 
@@ -244,6 +246,117 @@ def test_boss_only_skips_until_boss_mode_enabled():
     sm._try_execute_skill("Ultimate", skill, object())
 
     assert ("normal", "R") in sm.input_handler.calls
+
+
+_HOLD_SKILLS = {
+    # 键盘持键在配置里排在鼠标键之前,验证下发时被重排为"鼠标键优先"
+    "Skill1": {"Enabled": True, "TriggerMode": 2, "Key": "q"},
+    "Skill2": {"Enabled": True, "TriggerMode": 2, "Key": "RButton"},
+    "Skill3": {"Enabled": False, "TriggerMode": 2, "Key": "e"},  # 未启用不应下发
+    "Skill4": {"Enabled": True, "TriggerMode": 0, "Key": "1"},   # 非按住模式不应下发
+}
+
+
+def _hold_sets(sm):
+    return [c[1] for c in sm.input_handler.calls if c[0] == "skill_hold"]
+
+
+def test_skill_mode_start_declares_full_hold_set_mouse_first():
+    """技能模式 start:声明完整期望集合,鼠标键排在键盘键之前。"""
+    sm = _make_sm(sequence_enabled=False)
+    sm._skills_config = dict(_HOLD_SKILLS)
+
+    sm.start()
+
+    assert _hold_sets(sm)[-1] == ["RButton", "q"]
+
+
+def test_pause_declares_empty_set_and_resume_redeclares_full():
+    """pause 声明空集合(释放全部);resume 重新声明完整集合。"""
+    sm = _make_sm(sequence_enabled=False)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm._is_running = True
+
+    sm.pause()
+    assert _hold_sets(sm)[-1] == []
+
+    sm.resume()
+    assert _hold_sets(sm)[-1] == ["RButton", "q"]
+
+
+def test_stop_declares_empty_set_after_scheduler_stopped():
+    """stop 必须先停调度线程再释放持键(否则在飞回调会在释放后又入队)。"""
+    sm = _make_sm(sequence_enabled=False, scheduler_running=True)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm._is_running = True
+
+    sm.stop()
+
+    assert _hold_sets(sm)[-1] == []
+    assert sm.unified_scheduler.stopped is True
+
+    # 真正断言顺序:调度线程必须在"声明空持键集合"之前就停掉
+    names = [c[0] for c in sm.input_handler.calls]
+    stop_idx = names.index("scheduler_stop")
+    release_idx = max(
+        i
+        for i, c in enumerate(sm.input_handler.calls)
+        if c[0] == "skill_hold" and c[1] == []
+    )
+    assert stop_idx < release_idx, sm.input_handler.calls
+
+
+def test_switch_skill_to_macro_releases_hold_keys():
+    """技能→宏:必须先释放技能持键,否则持键在宏模式下永久卡住。"""
+    sm = _make_sm(sequence_enabled=False, scheduler_running=True)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm._is_running = True
+
+    sm.update_global_config(
+        {
+            "sequence_enabled": True,
+            "macro_steps": [{"type": "press", "key": "2"}],
+            "resource_management": {"check_interval": 200},
+        }
+    )
+
+    assert [] in _hold_sets(sm)
+    assert ("start_macro",) in sm.input_handler.calls
+
+
+def test_switch_macro_to_skill_redeclares_hold_keys():
+    """宏→技能:补声明完整期望集合(宏模式期间从未持有技能持键)。"""
+    sm = _make_sm(sequence_enabled=True, scheduler_running=True)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm._is_running = True
+
+    sm.update_global_config(
+        {
+            "sequence_enabled": False,
+            "macro_steps": [],
+            "resource_management": {"check_interval": 200},
+        }
+    )
+
+    assert _hold_sets(sm)[-1] == ["RButton", "q"]
+
+
+def test_emergency_stop_releases_hold_keys():
+    """紧急停止也必须释放技能持键,否则键悬空。"""
+    sm = _make_sm(sequence_enabled=False)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm._is_running = True
+
+    sm.emergency_stop()
+
+    assert _hold_sets(sm)[-1] == []
+
+
+def test_hold_set_serialized_as_line_protocol():
+    """期望持键用换行分隔的行协议下发(顺序即按下顺序)。"""
+    assert AHKCommandSender.serialize_skill_hold_keys(["RButton", "q"]) == "RButton\nq"
+    assert AHKCommandSender.serialize_skill_hold_keys([]) == ""
+    assert AHKCommandSender.serialize_skill_hold_keys(None) == ""
 
 
 def test_serializer_uses_ahk_line_protocol():

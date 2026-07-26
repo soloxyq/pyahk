@@ -284,6 +284,25 @@ class GameSkillConfigUI(QMainWindow):
         if boss_text:
             status_line = f"{status_line} | {boss_text}"
         self.status_label.setText(status_line)
+
+        # 🔧 DEBUG/干跑只允许在 STOPPED 切换:非 STOPPED 置灰,并把勾选状态与引擎对齐
+        if self.top_controls and hasattr(self.top_controls, "debug_mode_checkbox"):
+            cb = self.top_controls.debug_mode_checkbox
+            can_toggle = state == MacroState.STOPPED
+            cb.setEnabled(can_toggle)
+            cb.setToolTip(
+                "启用后不真实发送按键(干跑),并显示调试 OSD。\n"
+                "只能在「停止」状态下切换:运行中翻转会让 Python 与 AHK 端状态失配。"
+                if can_toggle
+                else "运行中不可切换 DEBUG/干跑,请先按 F8 停止。"
+            )
+            engine_debug = bool(
+                self.macro_engine._global_config.get("debug_mode", {}).get("enabled", False)
+            )
+            if cb.isChecked() != engine_debug:
+                cb.blockSignals(True)
+                cb.setChecked(engine_debug)
+                cb.blockSignals(False)
         if self.osd_status_window:
             color = {"STOPPED": "red", "READY": "yellow", "RUNNING": "lime", "PAUSED": "yellow", "DEBUG": "cyan"}.get(state.name, "white")
             osd_text = state_text
@@ -462,11 +481,22 @@ class GameSkillConfigUI(QMainWindow):
             self.skill_config.sequence_frame.setVisible(is_sequence_mode)
 
     def _on_debug_mode_changed(self, state: int):
-        """处理DEBUG MODE复选框状态变化"""
+        """处理DEBUG MODE复选框状态变化。
+
+        🔧 引擎只在 STOPPED 接受切换(DEBUG 同时驱动干跑,运行中翻转会让 Python 与 AHK
+        状态失配)。被拒绝时把复选框回滚到引擎真实值,避免 UI 显示与实际不一致。
+        """
         enabled = state == 2  # Qt.CheckState.Checked == 2
         try:
-            self.macro_engine.set_debug_mode(enabled)
-            LOG_INFO(f"[UI] DEBUG MODE设置为: {enabled}")
+            accepted = self.macro_engine.set_debug_mode(enabled)
+            if accepted:
+                LOG_INFO(f"[UI] DEBUG MODE设置为: {enabled}")
+            else:
+                LOG_ERROR("[UI] DEBUG MODE 切换被拒绝(需先按 F8 停止),已回滚复选框")
+                cb = self.top_controls.debug_mode_checkbox
+                cb.blockSignals(True)
+                cb.setChecked(not enabled)
+                cb.blockSignals(False)
         except Exception as e:
             LOG_ERROR(f"[UI] 设置DEBUG MODE失败: {e}")
 

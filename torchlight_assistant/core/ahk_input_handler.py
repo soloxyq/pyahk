@@ -249,47 +249,25 @@ class AHKInputHandler:
         if key:
             self._check_send(self.command_sender.send_emergency(key))
 
-    def hold_key(self, key: str) -> bool:
-        """按住键(不释放)。用于 TriggerMode=2 持久化按住模式 (start/resume 时调用)。
+    def set_skill_hold_keys(self, keys) -> bool:
+        """声明式下发 TriggerMode=2 期望持键的**完整集合**(取代旧 hold_key/release_key)。
 
-        不检查 _drop_non_emergency:hold 是 START/RESUME 时的一次性状态切换,
-        不能被 Space 闪避动态阻断,否则会出现"持续技能在闪避后没自动恢复"。
+        Python 只声明"配置期望按住哪些键";AHK 端独占维护"实际已按下哪些键"并做
+        幂等差量同步。因此不再存在"入队成功但动作被清掉"导致的账本分叉。
+
+        干跑规则(与 stop_macro/clear_queue 同类):
+        - **空集合 = 安全清理命令**,即使干跑也必须真实下发,否则会留下卡键;
+        - 非空集合会产生真实按键,干跑时只记 OSD 不下发。
         """
-        if not key:
-            return False
-        if self.dry_run_mode:
+        key_list = [str(k).strip() for k in (keys or []) if str(k).strip()]
+        if key_list and self.dry_run_mode:
             if self.debug_display_manager:
                 try:
-                    self.debug_display_manager.add_action(f"Hold:{key}")
+                    self.debug_display_manager.add_action(f"SkillHold:{','.join(key_list)}")
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        return self._check_send(self.command_sender.hold_key(key))
-
-    def release_key(self, key: str) -> bool:
-        """释放被 hold_key 按住的键。用于 TriggerMode=2 (stop/pause 时调用)。
-
-        故意不检查 _drop_non_emergency:release 必须能无条件执行,
-        否则按住模式在闪避期间被卡住,留下"键持续按住"的灾难性 stuck state。
-
-        🔧 必须用 emergency priority(0):
-        - normal 队列里的 release:* 会被 managed_key 的 delay_clear 期间的
-          ClearNonEmergencyQueues() 清掉 → 键卡死
-        - SpecialKeysPaused 期间 ProcessQueue 只扫每个队列队首,如果队首是
-          普通 press:* (不安全),后面的 release:* 会被埋住,延迟释放
-        - emergency 队列从不被 ClearNonEmergencyQueues 清,且按队首 FIFO
-          独立执行,是 release 唯一安全归宿
-        """
-        if not key:
-            return False
-        if self.dry_run_mode:
-            if self.debug_display_manager:
-                try:
-                    self.debug_display_manager.add_action(f"Release:{key}")
-                except Exception as e:
-                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
-            return True
-        return self._check_send(self.command_sender.release_key(key, priority=0))
+        return self._check_send(self.command_sender.set_skill_hold_keys(key_list))
 
     def set_macro_steps(self, steps) -> bool:
         """把通用宏步骤下发给 AHK 端解释器。"""
@@ -314,15 +292,30 @@ class AHKInputHandler:
         return self._check_send(self.command_sender.start_macro())
 
     def stop_macro(self) -> bool:
-        """停止 AHK 端通用宏循环并释放宏持键。"""
-        if self.dry_run_mode:
-            if self.debug_display_manager:
-                try:
-                    self.debug_display_manager.add_action("MacroStop")
-                except Exception as e:
-                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
-            return True
+        """停止 AHK 端通用宏循环并释放宏持键。
+
+        🔧 **安全清理命令,永不被干跑拦截**。AHK 端宏是跨进程的持久状态:
+        若干跑标志在宏运行期间被打开而这里静默吞掉命令,AHK 会继续真实发键、
+        且 down 步骤的键永久卡住(F8 也停不下来)。与 clear_queue 同类处理。
+        """
+        if self.dry_run_mode and self.debug_display_manager:
+            try:
+                self.debug_display_manager.add_action("MacroStop")
+            except Exception as e:
+                LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
         return self._check_send(self.command_sender.stop_macro())
+
+    def set_accepting_actions(self, enabled: bool) -> bool:
+        """运行时闸门。关闸 = AHK 端原子停止屏障。
+
+        关闸在 AHK 端同一条消息内完成 清队(-1)+停宏+释放全部持键,并封住所有
+        输入生产路径(EnqueueAction/MacroTick/HandleManagedKey/START_MACRO/
+        非空持键声明);安全清理命令(清队/停宏/空持键声明/释放)始终放行。
+        🔧 **本命令自身也是安全命令,永不被干跑拦截**(只会减少按键,不会产生按键)。
+        进入 STOPPED/PAUSED 时第一件事就关掉:UnifiedScheduler.stop() 只 join 2 秒,
+        超时的在飞回调之后仍可能下发命令,而那时 Python 侧停止流程已经走完。
+        """
+        return self._check_send(self.command_sender.set_accepting_actions(enabled))
 
     def clear_queue(self):
         """清空所有队列(含 emergency)。用于 PAUSED 状态完全停下。"""
@@ -441,16 +434,31 @@ class AHKInputHandler:
         self.ahk_process = None
 
         if process.poll() is None:
+            # 1) 优雅关闭:Windows 上 terminate() 是 TerminateProcess,**不会**触发 AHK 的
+            #    OnExit,持键会残留在游戏里。所以先请 AHK 自己释放持键再退出。
+            graceful = False
             try:
-                process.terminate()
-                process.wait(timeout=3)
-                LOG_INFO("[AHK输入] AHK进程已终止")
+                if self.command_sender.shutdown():
+                    process.wait(timeout=2)
+                    graceful = True
+                    LOG_INFO("[AHK输入] AHK已优雅退出(持键已由AHK自行释放)")
+            except subprocess.TimeoutExpired:
+                LOG_ERROR("[AHK输入] AHK未在2秒内响应优雅关闭,改用强制终止")
             except Exception as e:
-                LOG_INFO(f"[AHK输入] 终止AHK进程失败: {e}")
+                LOG_ERROR(f"[AHK输入] 请求AHK优雅关闭失败: {e}")
+
+            # 2) 兜底:优雅关闭失败才强制终止(此时持键可能残留,无法避免)
+            if not graceful:
                 try:
-                    process.kill()
+                    process.terminate()
+                    process.wait(timeout=3)
+                    LOG_INFO("[AHK输入] AHK进程已终止")
                 except Exception as e:
-                    LOG_INFO(f"[AHK输入] 强制终止AHK进程失败: {e}")
+                    LOG_INFO(f"[AHK输入] 终止AHK进程失败: {e}")
+                    try:
+                        process.kill()
+                    except Exception as e:
+                        LOG_INFO(f"[AHK输入] 强制终止AHK进程失败: {e}")
         else:
             LOG_INFO("[AHK输入] AHK进程已退出")
         
