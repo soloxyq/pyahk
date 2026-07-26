@@ -50,17 +50,20 @@ class MacroEngine:
     def prepare_border_only(self) -> bool: ...           # → READY
     def stop_macro(self) -> bool: ...                    # → STOPPED
     def toggle_pause_resume(self) -> bool: ...           # RUNNING ↔ PAUSED
-    def load_config(self, config_file: str): ...
-    def save_full_config(self, file_path: str, full_config: dict): ...
+    def load_config(self, config_file: str) -> bool: ...
+    def save_full_config(self, file_path: str, full_config: dict) -> bool: ...
     def set_debug_mode(self, enabled: bool): ...
     def cleanup(self): ...                               # 退出时分层清理
 ```
 
 **事件订阅**(在 `_setup_primary_hotkey()` 与 `_setup_event_subscriptions()`):
-- `intercept_key_down` → `_handle_ahk_intercept_key`(分发 F8/F7/F9/Z/原地模式键/BOSS 模式键)
+- `intercept_key_down` → `_handle_ahk_intercept_key`(STOPPED 下的 F8 先转给 GUI 采集当前配置;停止路径直接处理;其余分发 F7/F9/Z/原地模式键/BOSS 模式键)
+- `ui:sync_and_toggle_state_requested` → `_handle_f8_press(full_config)`
+- `ui:load_config_requested` → 严格验证后提交;发布 `engine:config_load_result`
+- `ui:save_full_config_requested` → 原子保存;成功后发布 `engine:config_updated` 与 `engine:config_save_result`
 - `special_key_pause` → 启用/关闭 `set_drop_non_emergency`
-- `managed_key_down` → 暂停调度器 + clear_non_emergency_queue
-- `managed_key_complete` → 恢复调度器
+- `managed_key_down` → `clear_non_emergency_queue`(不暂停调度器,避免 HP/MP 检测停摆)
+- `managed_key_complete` → 记录完成;AHK 自行解除抑制并补齐持键
 - `monitor_key_down/up` → 强制移动状态切换
 
 ---
@@ -354,9 +357,12 @@ class UnifiedScheduler:
 
 ```python
 class ConfigManager:
-    def load_config(self, file_path: str) -> dict: ...   # 失败返回空 dict + 日志
+    def load_config(self, file_path: str) -> dict: ...   # 失败或顶层非对象:记录日志并抛出
     def save_config(self, data: dict, file_path: str): ...  # JSON 缩进 4, ensure_ascii=False
 ```
+
+`load_config` 不再用空字典表示失败,因为 `{}` 本身是合法 JSON 对象。上层必须显式
+处理 `FileNotFoundError` / `JSONDecodeError` / `OSError` / `ValueError`。
 
 ---
 

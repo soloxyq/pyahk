@@ -1,0 +1,298 @@
+{
+    "skills": {
+        "Skill1": {
+            "Enabled": true,
+            "Key": "c",
+            "Priority": false,
+            "Timer": 256,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 790,
+            "CooldownCoordY": 993,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 900,
+            "ConditionCoordY": 600,
+            "ConditionColor": 0,
+            "AltKey": "9"
+        },
+        "Skill2": {
+            "Enabled": true,
+            "Key": "2",
+            "Priority": false,
+            "Timer": 96,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 857,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 1347,
+            "ConditionCoordY": 1005,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill3": {
+            "Enabled": true,
+            "Key": "3",
+            "Priority": false,
+            "Timer": 256,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 919,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill4": {
+            "Enabled": true,
+            "Key": "4",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 981,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill5": {
+            "Enabled": true,
+            "Key": "LButton",
+            "Priority": false,
+            "Timer": 96,
+            "TriggerMode": 0,
+            "BossOnly": false,
+            "CooldownCoordX": 857,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 611,
+            "ConditionCoordY": 933,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill6": {
+            "Enabled": true,
+            "Key": "w",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 1040,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill7": {
+            "Enabled": false,
+            "Key": "5",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 0,
+            "CooldownCoordY": 0,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        },
+        "Skill8": {
+            "Enabled": false,
+            "Key": "6",
+            "Priority": false,
+            "Timer": 1000,
+            "TriggerMode": 1,
+            "BossOnly": false,
+            "CooldownCoordX": 1108,
+            "CooldownCoordY": 995,
+            "CooldownSize": 12,
+            "ExecuteCondition": 0,
+            "ConditionCoordX": 0,
+            "ConditionCoordY": 0,
+            "ConditionColor": 0,
+            "AltKey": ""
+        }
+    },
+    "global": {
+        "sequence_enabled": false,
+        "debug_mode": {
+            "enabled": false
+        },
+        "input_mode": "direct",
+        "boss_mode_hotkey": "",
+        "queue_processor_interval": 35,
+        "key_press_duration": 10,
+        "mouse_click_duration": 5,
+        "cooldown_checker_interval": 110,
+        "capture_interval": 60,
+        "hp_cooldown": 1000,
+        "mp_cooldown": 2000,
+        "resource_check_interval": 200,
+        "sound_feedback_enabled": true,
+        "window_activation": {
+            "enabled": true,
+            "ahk_class": "Diablo IV Main Window Class",
+            "ahk_exe": "Diablo IV.exe"
+        },
+        "stationary_mode_config": {
+            "hotkey": "XButton1",
+            "mode_type": "block_mouse",
+            "force_move_hotkey": "a",
+            "force_move_replacement_key": "f",
+            "force_move_passthrough_keys": [
+                "RButton",
+                "space"
+            ]
+        },
+        "affix_reroll": {
+            "enabled": true,
+            "target_affixes": [],
+            "max_attempts": 100,
+            "click_delay": 200,
+            "enchant_button_coord": null,
+            "first_affix_button_coord": null,
+            "replace_button_coord": null,
+            "close_button_coord": null
+        },
+        "pathfinding_config": {
+            "hotkey": "f9",
+            "minimap_area": [
+                0,
+                0,
+                0,
+                0
+            ]
+        },
+        "resource_management": {
+            "hp_config": {
+                "enabled": true,
+                "key": "1",
+                "threshold": 40,
+                "cooldown": 1000,
+                "tolerance_h": 25,
+                "tolerance_s": 33,
+                "tolerance_v": 67,
+                "detection_mode": "circle",
+                "center_x": 608,
+                "center_y": 989,
+                "radius": 50,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 157,
+                        "target_s": 75,
+                        "target_v": 29,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    },
+                    {
+                        "name": "Color2",
+                        "target_h": 40,
+                        "target_s": 84,
+                        "target_v": 48,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    }
+                ]
+            },
+            "mp_config": {
+                "enabled": false,
+                "key": "2",
+                "threshold": 50,
+                "cooldown": 2000,
+                "tolerance_h": 10,
+                "tolerance_s": 30,
+                "tolerance_v": 50,
+                "detection_mode": "rectangle",
+                "region_x1": 1552,
+                "region_y1": 910,
+                "region_x2": 1560,
+                "region_y2": 1004,
+                "colors": [
+                    {
+                        "name": "Color1",
+                        "target_h": 104,
+                        "target_s": 80,
+                        "target_v": 58,
+                        "tolerance_h": 10,
+                        "tolerance_s": 30,
+                        "tolerance_v": 50
+                    }
+                ]
+            },
+            "check_interval": 200
+        },
+        "priority_keys": {
+            "enabled": true,
+            "special_keys": [
+                "space"
+            ],
+            "managed_keys": {}
+        },
+        "macro_steps": [
+            {
+                "type": "press",
+                "key": "1"
+            },
+            {
+                "type": "press",
+                "key": "2"
+            },
+            {
+                "type": "press",
+                "key": "3"
+            },
+            {
+                "type": "press",
+                "key": "4"
+            },
+            {
+                "type": "press",
+                "key": "5"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
+                "key": "7"
+            },
+            {
+                "type": "press",
+                "key": "8"
+            }
+        ],
+        "skill_sequence": "1,2,3,4,5,6,7,8",
+        "process_history": {
+            "recent_processes": [
+                "NutstoreClient.exe",
+                "notepad++.exe"
+            ]
+        },
+        "tesseract_ocr": {
+            "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+            "lang": "eng",
+            "psm_mode": 7,
+            "char_whitelist": "0123456789/"
+        }
+    }
+}

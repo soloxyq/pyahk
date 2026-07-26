@@ -60,7 +60,15 @@ class ResourceManager:
             from ..utils.tesseract_ocr_manager import get_tesseract_ocr_manager
             
             config_manager = ConfigManager()
-            global_config = config_manager.load_config("default.json")
+            try:
+                global_config = config_manager.load_config("default.json")
+            except Exception as e:
+                # ConfigManager 采用严格加载语义;这里保留原有 OCR 默认配置兜底。
+                LOG_ERROR(
+                    f"[ResourceManager] 读取 default.json 的 Tesseract 配置失败,"
+                    f"使用内置默认值: {e}"
+                )
+                global_config = {}
             tesseract_config = global_config.get("global", {}).get("tesseract_ocr", {})
             
             # 如果配置为空，使用默认值

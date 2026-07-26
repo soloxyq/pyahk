@@ -159,6 +159,8 @@ class GameSkillConfigUI(QMainWindow):
         event_bus.subscribe("engine:state_changed", self._on_macro_state_changed)
         event_bus.subscribe("engine:status_updated", self._on_macro_status_updated)
         event_bus.subscribe("engine:config_updated", self._on_config_update)
+        event_bus.subscribe("engine:config_load_result", self._on_config_load_result)
+        event_bus.subscribe("engine:config_save_result", self._on_config_save_result)
         event_bus.subscribe("affix_reroll:status_updated", self._on_affix_reroll_status_updated)
         event_bus.subscribe("affix_reroll:success", self._on_affix_reroll_success)
         event_bus.subscribe("affix_reroll:hide_ui", self._on_affix_reroll_hide_ui)
@@ -172,9 +174,17 @@ class GameSkillConfigUI(QMainWindow):
 
     def _load_initial_config_to_ui(self):
         if self.top_controls:
-            self.top_controls.set_current_config(
-                os.path.basename(self.macro_engine.current_config_file)
-            )
+            label = os.path.basename(self.macro_engine.current_config_file)
+            # 启动期加载失败时运行态是空配置,标签不能谎报"该文件已加载"。
+            # (失败详情弹窗由下面 ui:request_current_config 触发引擎一次性重放
+            #  engine:config_load_result 来展示 —— 引擎构造期发布的那次没人订阅。)
+            pending_error = None
+            getter = getattr(self.macro_engine, "get_pending_load_error", None)
+            if callable(getter):
+                pending_error = getter()
+            if pending_error is not None:
+                label = f"{label} (加载失败)"
+            self.top_controls.set_current_config(label)
         event_bus.publish("ui:request_current_config")
 
     def _perform_macro_state_changed_ui(self, new_state: MacroState):
@@ -471,8 +481,37 @@ class GameSkillConfigUI(QMainWindow):
             self._updating_ui = False
 
     def _toggle_visibility_and_macro(self):
-        full_config = self._gather_current_config_from_ui()
-        event_bus.publish("ui:sync_and_toggle_state_requested", full_config)
+        """启动时同步 GUI 配置;停止时不让控件采集失败阻断 F8。"""
+        if self.macro_engine.get_current_state() != MacroState.STOPPED:
+            event_bus.publish("ui:sync_and_toggle_state_requested", None)
+            return
+
+        try:
+            full_config = self._gather_current_config_from_ui()
+            event_bus.publish("ui:sync_and_toggle_state_requested", full_config)
+        except Exception as e:
+            LOG_ERROR(f"[UI] F8 同步当前配置失败,已取消状态切换: {e}")
+            # ⚠️ 不能在这里同步弹模态框:本方法可能运行在物理 F8 的 publish 链内
+            # (intercept_key_down → hotkey:f8_system_toggle),模态嵌套事件循环期间
+            # 这两个事件名仍在 EventBus 的递归标记里 —— 后续所有物理 F8/F7/F9
+            # (共用 intercept_key_down 信封)都会被同名递归保护静默吞掉。
+            # 与 _on_config_save_result 同型:QTimer.singleShot(0) 切出 publish 链。
+            # e 在 except 块退出后解绑,必须按值捕获;pending 标志防止弹窗打开期间
+            # 反复按 F8 堆叠出多个错误弹窗。
+            if getattr(self, "_config_error_dialog_pending", False):
+                return
+            self._config_error_dialog_pending = True
+            err = str(e)
+
+            def _show_config_error():
+                try:
+                    QMessageBox.critical(
+                        self, "配置错误", f"无法应用当前配置，未启动：{err}"
+                    )
+                finally:
+                    self._config_error_dialog_pending = False
+
+            QTimer.singleShot(0, _show_config_error)
 
     def _on_mode_selection_changed(self, text: str):
         if self.skill_config:
@@ -538,22 +577,64 @@ class GameSkillConfigUI(QMainWindow):
             if filename:
                 full_config = self._gather_current_config_from_ui()
                 event_bus.publish("ui:save_full_config_requested", filename, full_config)
-                if self.top_controls:
-                    self.top_controls.set_current_config(os.path.basename(filename))
         except Exception as e:
             LOG_ERROR(f"[UI] 保存配置文件时出错: {e}")
             QMessageBox.critical(self, "错误", f"保存配置文件失败: {e}")
+
+    def _on_config_save_result(self, file_path: str, success: bool, error: str = ""):
+        """保存结果可能来自事件链,统一切回 Qt 事件循环更新控件。"""
+        QTimer.singleShot(
+            0,
+            lambda: self._perform_config_save_result(file_path, success, error),
+        )
+
+    def _perform_config_save_result(
+        self, file_path: str, success: bool, error: str = ""
+    ):
+        if success:
+            if self.top_controls:
+                self.top_controls.set_current_config(os.path.basename(file_path))
+            LOG_INFO(f"[UI] 配置已保存: {file_path}")
+            return
+
+        LOG_ERROR(f"[UI] 配置保存失败,当前运行配置保持不变: {file_path}: {error}")
+        QMessageBox.critical(
+            self,
+            "保存配置失败",
+            f"无法保存配置文件，当前运行配置未改变。\n\n{error}",
+        )
 
     def _load_config_file(self):
         try:
             filename, _ = QFileDialog.getOpenFileName(self, "加载配置文件", "", "JSON Files (*.json)")
             if filename:
                 event_bus.publish("ui:load_config_requested", filename)
-                if self.top_controls:
-                    self.top_controls.set_current_config(os.path.basename(filename))
         except Exception as e:
             LOG_ERROR(f"[UI] 加载配置文件时出错: {e}")
             QMessageBox.critical(self, "错误", f"加载配置文件失败: {e}")
+
+    def _on_config_load_result(self, file_path: str, success: bool, error: str = ""):
+        """延后显示加载结果,避免在 EventBus publish 链中进入模态事件循环。"""
+        QTimer.singleShot(
+            0,
+            lambda: self._perform_config_load_result(file_path, success, error),
+        )
+
+    def _perform_config_load_result(
+        self, file_path: str, success: bool, error: str = ""
+    ):
+        if success:
+            if self.top_controls:
+                self.top_controls.set_current_config(os.path.basename(file_path))
+            LOG_INFO(f"[UI] 配置已加载: {file_path}")
+            return
+
+        LOG_ERROR(f"[UI] 配置加载失败,当前运行配置保持不变: {file_path}: {error}")
+        QMessageBox.critical(
+            self,
+            "加载配置失败",
+            f"无法加载配置文件，当前运行配置未改变。\n\n{error}",
+        )
 
     def _connect_window_activation_signals(self):
         if self.window_activation:

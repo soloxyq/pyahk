@@ -39,6 +39,10 @@ class MacroEngine:
         self._cleanup_done = False
         self._skills_config: Dict[str, Any] = {}
         self._global_config: Dict[str, Any] = {}
+        # 启动期加载失败的暂存:__init__ 里的 load_config 发布 config_load_result 时
+        # GUI 还没构造(main.py 先建引擎后建窗口),事件会被 EventBus 丢进虚空。
+        # 失败结果存在这里,由 ui:request_current_config 握手时一次性重放。
+        self._pending_load_error: Optional[Tuple[str, str]] = None
         self.current_config_file = self._resolve_initial_config_file(config_file)
         self._is_debug_mode_active = (
             False  # 跟踪当前是否处于调试模式（由配置和状态决定）
@@ -165,7 +169,7 @@ class MacroEngine:
         event_bus.subscribe("ui:save_full_config_requested", self.save_full_config)
         event_bus.subscribe(
             "ui:sync_and_toggle_state_requested", self._handle_f8_press
-        )  # F8 UI button
+        )  # F8 启动时的统一配置同步入口
         event_bus.subscribe(
             "ui:request_current_config", self._handle_ui_request_current_config
         )
@@ -395,7 +399,15 @@ class MacroEngine:
         LOG_INFO(f"[热键管理] 收到AHK拦截按键: {key}")
 
         if key_lower == "f8":
-            self._handle_f8_press()
+            if self._state == MacroState.STOPPED:
+                # 启动时先由 MainWindow 采集当前控件值,再发布
+                # ui:sync_and_toggle_state_requested 回到 _handle_f8_press。
+                # 直接启动会绕过尚未保存的 GUI 修改,继续使用旧配置。
+                event_bus.publish("hotkey:f8_system_toggle")
+            else:
+                # 停止是安全路径,不能依赖 GUI 配置采集:任何控件取值异常都不应
+                # 阻止用户用物理 F8 立即停机。
+                self._handle_f8_press()
         elif key_lower == "f7":
             self._on_f7_key_press()
         elif key_lower == "f9":
@@ -1226,7 +1238,24 @@ class MacroEngine:
             LOG_ERROR(f"[DEBUG MODE] 设置DEBUG MODE异常详情:\n{traceback.format_exc()}")
             return False
 
-    def load_config(self, config_file: str):
+    @staticmethod
+    def _validated_config_sections(
+        config_data: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """验证完整配置的最小结构并返回 skills/global 两段。"""
+        if not isinstance(config_data, dict):
+            raise ValueError("完整配置顶层必须是 JSON 对象")
+
+        skills_config = config_data.get("skills", {})
+        global_config = config_data.get("global", {})
+        if not isinstance(skills_config, dict):
+            raise ValueError("配置字段 'skills' 必须是 JSON 对象")
+        if not isinstance(global_config, dict):
+            raise ValueError("配置字段 'global' 必须是 JSON 对象")
+        return skills_config, global_config
+
+    def load_config(self, config_file: str) -> bool:
+        """加载并验证完整配置,成功后才提交到运行态。"""
         LOG_INFO(f"[配置加载] 开始加载配置文件: {config_file}")
         try:
             config_path = __import__("pathlib").Path(config_file)
@@ -1240,34 +1269,85 @@ class MacroEngine:
                 LOG_INFO(f"[MacroEngine] 从文件 '{config_file}' 加载配置。")
                 config_data = self.config_manager.load_config(config_file)
 
+            skills_config, global_config = self._validated_config_sections(
+                config_data
+            )
             # 🔧 统一归一化所有按键字段为 AHK 标准名(单一可信源,见 utils/key_names.py)
             normalize_config_keys(config_data)
-
-            self._skills_config = config_data.get("skills", {})
-            self._global_config = config_data.get("global", {})
-            self.sound_manager.update_config(self._global_config)
-            event_bus.publish(
-                "engine:config_updated", self._skills_config, self._global_config
-            )
-            self._remember_config_file(config_file)
         except Exception as e:
             LOG_ERROR(f"加载配置文件 '{config_file}' 失败: {e}")
+            # 暂存失败结果:启动期(GUI 尚未订阅)这条 publish 会被丢弃,
+            # 之后由 ui:request_current_config 握手一次性重放,保证失败可见。
+            self._pending_load_error = (config_file, str(e))
+            event_bus.publish(
+                "engine:config_load_result", config_file, False, str(e)
+            )
+            return False
 
-    def save_full_config(self, file_path: str, full_config: Dict[str, Any]):
+        self._pending_load_error = None
+        self._skills_config = skills_config
+        self._global_config = global_config
+        self._remember_config_file(config_file)
+
         try:
+            self.sound_manager.update_config(self._global_config)
+        except Exception as e:
+            # 文件与运行配置均已成功提交,附属声音配置失败单独告警。
+            LOG_ERROR(f"加载后更新声音配置失败: {e}")
+
+        event_bus.publish(
+            "engine:config_updated", self._skills_config, self._global_config
+        )
+        event_bus.publish("engine:config_load_result", config_file, True, "")
+        return True
+
+    def save_full_config(self, file_path: str, full_config: Dict[str, Any]) -> bool:
+        """原子保存完整配置,成功后才提交到运行态。
+
+        磁盘写入是提交边界:写入/序列化失败时保留当前引擎配置和当前文件名,
+        避免 UI/运行态显示新配置而磁盘仍是旧配置。F8 的临时运行同步不走这里,
+        因此不会未经用户点击“保存”就覆盖配置文件。
+        """
+        try:
+            skills_config, global_config = self._validated_config_sections(
+                full_config
+            )
             # 🔧 保存前归一化按键字段,保证写回磁盘的也是 AHK 标准名
             normalize_config_keys(full_config)
-
-            self._skills_config = full_config.get("skills", {})
-            self._global_config = full_config.get("global", {})
-            self.sound_manager.update_config(self._global_config)
-            event_bus.publish(
-                "engine:config_updated", self._skills_config, self._global_config
-            )
             self.config_manager.save_config(full_config, file_path)
-            self._remember_config_file(file_path)
         except Exception as e:
             LOG_ERROR(f"保存配置文件 '{file_path}' 失败: {e}")
+            event_bus.publish(
+                "engine:config_save_result", file_path, False, str(e)
+            )
+            return False
+
+        # 只有原子落盘成功后才更新运行态与当前配置文件。
+        # 成功保存 = 运行态与磁盘重新一致,启动期暂存的加载失败不再适用。
+        self._pending_load_error = None
+        self._skills_config = skills_config
+        self._global_config = global_config
+        self._remember_config_file(file_path)
+
+        try:
+            self.sound_manager.update_config(self._global_config)
+        except Exception as e:
+            # 配置已经成功保存,声音反馈更新失败不应谎报成“保存失败”。
+            LOG_ERROR(f"保存后更新声音配置失败: {e}")
+
+        event_bus.publish(
+            "engine:config_updated", self._skills_config, self._global_config
+        )
+        event_bus.publish("engine:config_save_result", file_path, True, "")
+        return True
+
+    def get_pending_load_error(self) -> Optional[Tuple[str, str]]:
+        """启动期暂存的加载失败 (config_file, error);无则 None。
+
+        供 GUI 初始化时判断"当前文件名标签是否在谎报"(加载失败时运行态是
+        初始空配置,不应把损坏文件名当作已加载展示)。
+        """
+        return self._pending_load_error
 
     def _handle_ui_request_current_config(self):
         """处理UI请求当前配置的事件"""
@@ -1275,6 +1355,15 @@ class MacroEngine:
         event_bus.publish(
             "engine:config_updated", self._skills_config, self._global_config
         )
+        # 一次性重放启动期丢失的加载失败:__init__ 里 load_config 发布
+        # config_load_result(False) 时 GUI 还没订阅(main.py 先建引擎后建窗口),
+        # 事件被 EventBus 丢弃。此刻 GUI 已订阅完并主动请求配置,补发一次。
+        # GUI 侧 handler 走 QTimer.singleShot(0) 延后弹窗,不在 publish 链内开模态;
+        # 清空后不会因重复请求二次弹窗。
+        if self._pending_load_error is not None:
+            file_path, error = self._pending_load_error
+            self._pending_load_error = None
+            event_bus.publish("engine:config_load_result", file_path, False, error)
 
     def _generate_default_config(self) -> Dict[str, Any]:
         """生成包含默认值的完整配置"""

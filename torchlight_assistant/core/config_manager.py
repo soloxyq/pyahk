@@ -3,33 +3,43 @@
 import json
 import os
 from pathlib import Path
-from typing import Dict, Any, Optional
-from ..utils.debug_log import LOG_INFO, LOG_ERROR
+from typing import Dict, Any
+from ..utils.debug_log import LOG_ERROR
 
 
 class ConfigManager:
     """A stateless tool for configuration file I/O."""
 
     def load_config(self, file_path: str) -> Dict[str, Any]:
-        """
-        Loads a configuration file and returns its content as a dictionary.
-        Returns an empty dict on failure and logs the error.
+        """加载 JSON 对象;读取、解析或顶层类型错误时记录并原样抛出。
+
+        调用方必须能区分“合法空对象”和“加载失败”。旧实现把所有错误折叠成
+        ``{}``,会让上层误把损坏文件提交成空运行配置。
         """
         path_to_load = Path(file_path)
         if not path_to_load.exists():
-            LOG_INFO(f"WARNING: 配置文件不存在: {file_path}")
-            return {}
+            error = FileNotFoundError(f"配置文件不存在: {file_path}")
+            LOG_ERROR(str(error))
+            raise error
         
         try:
             with open(path_to_load, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            return data
         except json.JSONDecodeError as e:
             LOG_ERROR(f"配置文件 {file_path} 格式错误: {e}")
-            return {} # Return empty dict on error
-        except IOError as e:
+            raise
+        except OSError as e:
             LOG_ERROR(f"读取配置文件 {file_path} 失败: {e}")
-            return {} # Return empty dict on error
+            raise
+
+        if not isinstance(data, dict):
+            error = ValueError(
+                f"配置文件 {file_path} 顶层必须是 JSON 对象,实际为 {type(data).__name__}"
+            )
+            LOG_ERROR(str(error))
+            raise error
+
+        return data
 
     def save_config(self, data: Dict[str, Any], file_path: str):
         """
