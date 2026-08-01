@@ -82,6 +82,7 @@ _EXTRACT = [
     "QueueItem",
     "PriorityOfQueueName",
     "CachedStrSplit",
+    "MonotonicMs",
 ]
 
 
@@ -498,7 +499,7 @@ loop 100 {
 Record("s15_low_backlog_during", QueueCounts["low"])
 ; 年龄是**墙钟毫秒**,上面的 tick 循环瞬间跑完 —— 测试用直接改时间戳模拟真实等待
 if (LowQueue.Length > 0) {
-    LowQueue[1].at := A_TickCount - 1000
+    LowQueue[1].at := MonotonicMs() - 1000
 }
 ; 高优先级停产 → 下一 tick 轮到它,但真实已等 1 秒 → 丢弃,不执行
 Tick()
@@ -538,7 +539,7 @@ loop 64 {
 }
 ; 墙钟语义:循环瞬间完成,直接改时间戳模拟 16 个都真实等了 1 秒
 for i, item in LowQueue {
-    item.at := A_TickCount - 1000
+    item.at := MonotonicMs() - 1000
 }
 Tick()                               ; 高停产:16 个全部过期,应全部丢弃且零执行
 staleExec := 0
@@ -550,10 +551,17 @@ loop 16 {
 Record("s19_stale_executed", staleExec)
 Record("s19_low_backlog", QueueCounts["low"])
 Record("s19_dropped", QueueStats["expired"])
+; 过期丢弃也要走 queue_drop 上报,且载荷里 expired= 必须等于刚才的丢弃数。
+; 节流按真实毫秒计,场景瞬间跑完必然被节流(标志保留)—— 把"上次通知时刻"
+; 拨回 2 秒前模拟真实等待,下一 tick 顶部就应把带 expired 的载荷发出去。
+LastOverloadNotifyAt := MonotonicMs() - 2000
+Tick()
+Record("s19c_notify_payload", OverloadNotifications.Length > 0 ? OverloadNotifications[OverloadNotifications.Length] : "(none)")
+Record("s19c_expected_expired", QueueStats["expired"])
 ; 时间戳本身必须是"现在"(强行标老的场景都覆写了 at,这里验证入队时记录的原始值)
 ResetAll()
 EnqueueAction(2, "press:probe")
-Record("s19b_at_delta", A_TickCount - NormalQueue[1].at)
+Record("s19b_at_delta", MonotonicMs() - NormalQueue[1].at)
 
 ; =====================================================================
 ; S20 重复执行同一序列必须每轮完整(真实 CachedStrSplit 下的回归:
@@ -647,7 +655,7 @@ loop 120 {                      ; 持续高优先级生产,normal 的 seqrun 一
 }
 ; 把在飞 seqrun 强行标老:即便真实等了 1 秒,它也必须执行而不是被过期丢弃
 if (NormalQueue.Length > 0) {
-    NormalQueue[1].at := A_TickCount - 1000
+    NormalQueue[1].at := MonotonicMs() - 1000
 }
 seqrunLeft := 0
 for i, a in NormalQueue {
@@ -789,7 +797,7 @@ _TIMER_PROBE = r"""
 Persistent
 
 global Fires := 0
-global StartAt := A_TickCount
+global StartAt := DllCall("Kernel32\GetTickCount64", "UInt64")
 global OutFile := A_Args.Length >= 1 ? A_Args[1] : (A_ScriptDir "\timer.txt")
 
 Fire() {
@@ -798,7 +806,7 @@ Fire() {
 }
 Finish() {
     global Fires, StartAt, OutFile
-    elapsed := A_TickCount - StartAt
+    elapsed := DllCall("Kernel32\GetTickCount64", "UInt64") - StartAt
     SetTimer(Fire, 0)
     try FileDelete(OutFile)
     FileAppend("elapsed_ms=" elapsed "`nfires=" Fires "`n", OutFile, "UTF-8")
@@ -1009,14 +1017,62 @@ def test_overload_backlog_stays_bounded():
 
 
 def test_overload_is_reported_not_silent():
-    """静默丢弃会让用户以为是技能配置问题,必须上报。"""
+    """静默丢弃会让用户以为是技能配置问题,必须上报。
+    载荷钉完整格式(而不只是前缀):Python 端 `_on_queue_drop` 按
+    `overload=N,expired=M` 解析,两边格式脱钩会让诊断静默失效。"""
     if AHK_EXE is None:
         print("SKIP: 未找到 AutoHotkey v2")
         return
     d = _measure()
     assert int(d["s4_overload_notifications"]) >= 1, "过载被静默丢弃,没有任何上报"
-    assert d["s4_first_notification"].startswith("queue_drop:overload="), (
-        f"上报事件格式不对: {d['s4_first_notification']}"
+    m = re.fullmatch(r"queue_drop:overload=(\d+),expired=(\d+)", d["s4_first_notification"])
+    assert m, f"上报事件格式不对: {d['s4_first_notification']}"
+    assert int(m.group(1)) > 0, "过载场景的载荷里 overload 计数为 0"
+
+
+def test_expired_drops_are_reported_with_expired_payload():
+    """过期丢弃走同一条 queue_drop 通道,但计入 expired= 而不是 overload= ——
+    两种原因诊断建议不同(过载→调生产侧;过期→查长 delay/优先级压制),
+    混在一个计数里会把"只是配了个长 delay"的用户引去调技能生产率。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    payload = d["s19c_notify_payload"]
+    m = re.fullmatch(r"queue_drop:overload=(\d+),expired=(\d+)", payload)
+    assert m, f"过期丢弃后的上报载荷格式不对: {payload}"
+    assert int(m.group(2)) == int(d["s19c_expected_expired"]) == 16, (
+        f"expired 载荷 {m.group(2)} 与实际过期丢弃数 {d['s19c_expected_expired']} 不符"
+    )
+    assert int(m.group(1)) == 0, (
+        f"纯过期场景的载荷里 overload={m.group(1)} —— 过期被误计成过载"
+    )
+
+
+def test_ahk_clock_is_gettickcount64_not_a_tickcount():
+    """回归(时钟回绕):A_TickCount 是 32 位 GetTickCount,~49.7 天回绕。
+    回绕瞬间 now - at 变成巨大负数:过期判定失效(跨回绕的旧动作照常执行)、
+    通知节流最长再压制 49.7 天、DelayUntil / MacroDueTime 比较冻结。
+    所有时刻必须走 MonotonicMs()(GetTickCount64,无回绕,同样含休眠时间)。
+
+    回绕行为无法在机器正常 uptime 下行为化复现(uptime < 49.7 天时两个时钟
+    数值相同),所以守卫是静态的:钉实现 + 禁裸用。"""
+    with open(AHK_SCRIPT, "r", encoding="utf-8") as fp:
+        src = fp.read()
+    # 1) MonotonicMs 的实现必须真的是 GetTickCount64
+    assert re.search(
+        r'MonotonicMs\(\)\s*\{\s*\n\s*return DllCall\("Kernel32\\GetTickCount64",\s*"UInt64"\)\s*\n\s*\}',
+        src,
+    ), "MonotonicMs() 的实现不再是 DllCall(GetTickCount64) —— 回绕保护失效"
+    # 2) 代码行(去注释后)不得再出现裸 A_TickCount
+    offenders = []
+    for i, line in enumerate(src.splitlines(), 1):
+        code = re.sub(r";.*$", "", line)
+        if "A_TickCount" in code:
+            offenders.append(f"  行 {i}: {line.strip()}")
+    assert not offenders, (
+        "hold_server_extended.ahk 出现裸 A_TickCount(应使用 MonotonicMs(),"
+        "否则 49.7 天回绕时年龄/节流/延迟比较全部失效):\n" + "\n".join(offenders)
     )
 
 

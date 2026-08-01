@@ -158,10 +158,20 @@ global MAX_PENDING_ATOMS := 16
 ; 判定在**出队时**做:取到的项年龄 ≥ STALE_MS 且可丢 → 丢弃换下一个。
 ; 过期决策没有价值,执行一个 500ms 前的决策比不执行更糟。
 ;
-; 时钟用 A_TickCount(**单调毫秒**,GetTickCount64,含系统休眠时间),不用"调度 tick 数":
+; 时钟用 MonotonicMs()(GetTickCount64,单调毫秒,含系统休眠时间),不用"调度 tick 数":
 ; tick 只在定时器成功触发时才走,系统休眠或 AHK 线程被长时间阻塞后恢复,
 ; 按 tick 数算,真实等了几秒的动作仍会被当成"年轻"照常执行 —— 契约是真实等待时间。
 global STALE_MS := 500
+
+; 单调毫秒时钟 —— 本文件所有时刻/时长比较的唯一来源。
+; ⚠️ 不能用 A_TickCount:它是 32 位 GetTickCount,约 49.7 天回绕。回绕瞬间
+; now - at 变成巨大负数:过期判定失效(跨回绕的旧动作被照常执行)、通知节流
+; 被压制(最长再等 49.7 天)、DelayUntil / MacroDueTime 的比较同样冻结。
+; GetTickCount64 无回绕,同样包含系统休眠时间,符合"真实等待"契约。
+; 禁止在本文件再写裸 A_TickCount(tests/test_ahk_queue_throughput.py 有静态守卫)。
+MonotonicMs() {
+    return DllCall("Kernel32\GetTickCount64", "UInt64")
+}
 
 ; 已经发出过至少一个原子的序列(剩余部分被放回队首)。与未开始的 sequence: 区分开:
 ; 未开始的可以整条丢(原子性);已经开打的**不能**丢 —— 那是连招打一半停手。
@@ -225,7 +235,7 @@ ProcessQueue() {
 
     ; 🎯 检查是否在异步延迟中
     if (DelayUntil > 0) {
-        if (A_TickCount < DelayUntil) {
+        if (MonotonicMs() < DelayUntil) {
             ; 🔧 BUG修复(#2): 只在管理按键引发的 delay 期间清空非紧急队列(保证管理键独占)
             ; 普通 sequence 内的 delay 不应清掉自己后续的项,否则 "q,delay100,w" 中 w 会丢失
             if (DelayClearOthers && (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0)) {
@@ -320,7 +330,7 @@ ProcessQueue() {
         q := QueueByName(name)
         item := q.RemoveAt(1)
         DecrementQueueCount(name)
-        if (A_TickCount - item.at >= STALE_MS && IsDroppableAction(item.action)) {
+        if (MonotonicMs() - item.at >= STALE_MS && IsDroppableAction(item.action)) {
             QueueStats["expired"] := QueueStats["expired"] + 1
             PendingOverloadNotify := true
             continue   ; 过期且可丢 → 丢弃,看下一个
@@ -448,7 +458,7 @@ MacroTick() {
     if (MacroSteps.Length = 0) {
         return
     }
-    if (MacroDueTime > 0 && A_TickCount < MacroDueTime) {
+    if (MacroDueTime > 0 && MonotonicMs() < MacroDueTime) {
         return
     }
 
@@ -467,7 +477,7 @@ MacroTick() {
     data := step.data
 
     if (stype = "delay") {
-        MacroDueTime := A_TickCount + Max(Integer(data), 1)
+        MacroDueTime := MonotonicMs() + Max(Integer(data), 1)
     } else if (stype = "down") {
         ; 同技能持键账本:被 block_mouse 吞掉时不记账,避免 ReleaseMacroHeldKeys 发出多余的 up
         if (SendDown(data)) {
@@ -1079,10 +1089,10 @@ PriorityOfQueueName(name) {
     return 0
 }
 
-; 队列项:动作字符串 + 入队时刻(单调毫秒)。年龄 = A_TickCount - at,绑在项上,
+; 队列项:动作字符串 + 入队时刻(单调毫秒)。年龄 = MonotonicMs() - at,绑在项上,
 ; 清队列/丢队首都不会让别的项"继承"或"清零"年龄。
 QueueItem(action) {
-    return {action: action, at: A_TickCount}
+    return {action: action, at: MonotonicMs()}
 }
 
 ; 下一个要执行的动作在哪条非紧急队列的队首(严格优先级:high → normal → low)。
@@ -1172,7 +1182,7 @@ DropOldestDroppableFrom(queue, queueName, protectTail, protectHead := false) {
 NotifyQueueOverload() {
     global LastOverloadNotifyAt, QueueStats, PendingOverloadNotify
 
-    now := A_TickCount
+    now := MonotonicMs()
     if (now - LastOverloadNotifyAt < 1000) {
         ; 被节流:**保留**待发标志,让下一 tick 继续尝试。
         ; (若在这里把标志清掉,一段"上一条通知刚发过 500ms"的短促丢弃就会
@@ -1211,7 +1221,7 @@ IsManagedKeyActive(key) {
     global ActiveManagedKeys, MANAGED_KEY_TIMEOUT_MS
     if (!ActiveManagedKeys.Has(key))
         return false
-    if (A_TickCount - ActiveManagedKeys[key] > MANAGED_KEY_TIMEOUT_MS) {
+    if (MonotonicMs() - ActiveManagedKeys[key] > MANAGED_KEY_TIMEOUT_MS) {
         ActiveManagedKeys.Delete(key)
         return false
     }
@@ -1221,7 +1231,7 @@ IsManagedKeyActive(key) {
 ; 标记管理按键为活跃状态
 MarkManagedKeyActive(key) {
     global ActiveManagedKeys
-    ActiveManagedKeys[key] := A_TickCount
+    ActiveManagedKeys[key] := MonotonicMs()
 }
 
 ; 清理管理按键活跃标记
@@ -1669,11 +1679,11 @@ ExecuteAction(action, priority := 2) {
     } else if (actionType = ACTION_DELAY) {
         ; 🎯 异步延迟：设置延迟结束时间，不阻塞
         ; 普通 delay 不清队列,允许同优先级的后续动作继续排队
-        DelayUntil := A_TickCount + Integer(actionData)
+        DelayUntil := MonotonicMs() + Integer(actionData)
         DelayClearOthers := false
     } else if (actionType = "delay_clear") {
         ; 🔧 管理按键专用延迟:延迟期间清空非紧急队列,保证管理键独占执行
-        DelayUntil := A_TickCount + Integer(actionData)
+        DelayUntil := MonotonicMs() + Integer(actionData)
         DelayClearOthers := true
     } else if (actionType = ACTION_NOTIFY) {
         ; 🎯 发送通知到Python

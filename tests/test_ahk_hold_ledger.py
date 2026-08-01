@@ -56,6 +56,7 @@ if pytest is not None:
 
 # 从原文抽取的被测函数(顺序无关,AHK 函数可前向引用)
 _EXTRACT = [
+    "MonotonicMs",             # 时钟封装:ExecuteAction/MacroTick 都调用它
     "IsSkillHoldSuppressed",   # 真函数:承载闸门+抑制语义,不能桩
     "SetSkillHoldKeys",
     "ReconcileSkillHoldKeys",

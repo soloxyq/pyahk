@@ -49,7 +49,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "4",
             "Priority": false,
             "Timer": 1000,
@@ -130,7 +130,7 @@
         }
     },
     "global": {
-        "sequence_enabled": false,
+        "sequence_enabled": true,
         "debug_mode": {
             "enabled": false
         },
@@ -250,38 +250,14 @@
         "macro_steps": [
             {
                 "type": "press",
-                "key": "1"
-            },
-            {
-                "type": "press",
-                "key": "2"
-            },
-            {
-                "type": "press",
-                "key": "3"
-            },
-            {
-                "type": "press",
-                "key": "4"
-            },
-            {
-                "type": "press",
-                "key": "5"
+                "key": "LButton"
             },
             {
                 "type": "press",
                 "key": "6"
-            },
-            {
-                "type": "press",
-                "key": "7"
-            },
-            {
-                "type": "press",
-                "key": "8"
             }
         ],
-        "skill_sequence": "1,2,3,4,5,6,7,8",
+        "skill_sequence": "LButton,6",
         "process_history": {
             "recent_processes": [
                 "NutstoreClient.exe",
