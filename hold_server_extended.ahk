@@ -123,7 +123,7 @@ global QueueStats := Map(
 )
 
 ; ===============================================================================
-; 队列深度上限(= 排队延迟上限)
+; 队列预算(= 排队延迟上限)
 ; ===============================================================================
 ; 吞吐是硬上限:ProcessQueue 由定时器驱动且**每 tick 最多执行一个动作**
 ; → 实测 63 动作/秒(见 QUEUE_TICK_MS 处的定时器实测表)。
@@ -133,10 +133,30 @@ global QueueStats := Map(
 ; 正在打出去的是 10 秒前决策的按键,而且随时间线性恶化。表现为"技能乱放",不报任何错。
 ; (数字来自 tests/test_ahk_queue_throughput.py 的实测,不是估算)
 ;
-; 因此给非紧急队列设深度上限:深度上限就是延迟上限 —— 16 × 15.8ms ≈ 250ms。
+; 因此给非紧急队列设**待执行原子总预算**:预算就是延迟上限 —— 16 × 15.8ms ≈ 250ms。
 ; 超限时丢**最旧**的可丢动作:ARPG 里过期的决策毫无价值,最新决策才反映当前局面。
-; 紧急队列(HP/MP 保命)不设上限,永不丢弃。
-global MAX_QUEUE_DEPTH := 16
+; 紧急队列(HP/MP 保命)不计入预算,永不丢弃。
+;
+; ⚠️ 为什么是"全局预算"而不是"每队列深度":出队是**严格优先级**的(high 空了才轮到
+; normal)。按队列各限 16,三条非紧急队列就能同时积压 48 项,低优先级要等 ~750ms ——
+; "≤250ms"只在单一优先级下成立。全局预算才让这个上限对混合优先级也成立。
+;
+; ⚠️ 为什么按"原子"而不是"队列项":sequence 作为**一个决策**只占一个队列项(见
+; EnqueueAction),但它要花 N 个 tick 才发得完。按项算的话 16 个 20 原子的序列
+; = 320 个 tick ≈ 5 秒,延迟上限就名存实亡了。按原子算 = 按真实执行时间算。
+global MAX_PENDING_ATOMS := 16
+
+; 严格优先级出队还有第二种"变陈旧"的方式:队列**不长**(预算管住了),但可以**很久轮不到**。
+; 高优先级持续生产时,低优先级那一项会一直排不上,某天高优先级一空就打出一个几十秒前的决策。
+; 预算约束不了这个(总量本来就没超)。因此给"连续排不上队"的队列计时:
+; 连续 STALE_TICKS 个 tick 没轮到自己就丢掉队首的陈旧动作并上报 —— 过期决策没有价值,
+; 丢掉比迟发好。~32 tick × 15.8ms ≈ 500ms。
+global STALE_TICKS := 32
+global QueueHeadAge := Map("high", 0, "normal", 0, "low", 0)
+
+; 已经发出过至少一个原子的序列(剩余部分被放回队首)。与未开始的 sequence: 区分开:
+; 未开始的可以整条丢(原子性);已经开打的**不能**丢 —— 那是连招打一半停手。
+global ACTION_SEQ_RUNNING := "seqrun"
 global LastOverloadNotifyAt := 0     ; 过载通知节流(避免刷屏)
 ; 丢弃发生在 EnqueueAction 里,而它常在 WM_COPYDATA 处理中执行 —— 此刻 Python 正阻塞在
 ; SendMessageW 里等这条消息返回。在那里回发消息会把两边的消息处理嵌套起来,没必要冒这个险。
@@ -172,7 +192,7 @@ hWnd := gui1.Hwnd
 OnMessage(0x4A, WM_COPYDATA)
 
 ; ===============================================================================
-; 队列处理器 (20ms定时器)
+; 队列处理器 (由 QUEUE_TICK_MS 驱动,每 tick 最多执行一个动作)
 ; ===============================================================================
 ProcessQueue() {
     ; 🔧 BUG修复(AHK v2 作用域): 必须显式声明所有用到的全局变量
@@ -214,7 +234,7 @@ ProcessQueue() {
                     if (IsEmergencyAction(EmergencyQueue[A_Index])) {
                         action := EmergencyQueue.RemoveAt(A_Index)
                         DecrementQueueCount("emergency")
-                        ExecuteAction(action)
+                        ExecuteAction(action, 0)
                         QueueStats["processed"] := QueueStats["processed"] + 1
                         break
                     }
@@ -232,7 +252,7 @@ ProcessQueue() {
     if (QueueCounts["emergency"] > 0) {
         action := EmergencyQueue.RemoveAt(1)
         DecrementQueueCount("emergency")
-        ExecuteAction(action)
+        ExecuteAction(action, 0)
         QueueStats["processed"] := QueueStats["processed"] + 1
         return
     }
@@ -251,7 +271,7 @@ ProcessQueue() {
             if (IsAllowedDuringPause(action)) {
                 action := HighQueue.RemoveAt(1)
                 DecrementQueueCount("high")
-                ExecuteAction(action)
+                ExecuteAction(action, 1)
                 QueueStats["processed"] := QueueStats["processed"] + 1
                 return
             }
@@ -261,7 +281,7 @@ ProcessQueue() {
             if (IsAllowedDuringPause(action)) {
                 action := NormalQueue.RemoveAt(1)
                 DecrementQueueCount("normal")
-                ExecuteAction(action)
+                ExecuteAction(action, 2)
                 QueueStats["processed"] := QueueStats["processed"] + 1
                 return
             }
@@ -271,7 +291,7 @@ ProcessQueue() {
             if (IsAllowedDuringPause(action)) {
                 action := LowQueue.RemoveAt(1)
                 DecrementQueueCount("low")
-                ExecuteAction(action)
+                ExecuteAction(action, 3)
                 QueueStats["processed"] := QueueStats["processed"] + 1
                 return
             }
@@ -280,22 +300,30 @@ ProcessQueue() {
     }
 
     ; 🚀 正常模式：按优先级处理（使用计数器）
+    executedName := ""
     if (QueueCounts["high"] > 0) {
         action := HighQueue.RemoveAt(1)
         DecrementQueueCount("high")
-        ExecuteAction(action)
+        executedName := "high"
+        ExecuteAction(action, 1)
         QueueStats["processed"] := QueueStats["processed"] + 1
     } else if (QueueCounts["normal"] > 0) {
         action := NormalQueue.RemoveAt(1)
         DecrementQueueCount("normal")
-        ExecuteAction(action)
+        executedName := "normal"
+        ExecuteAction(action, 2)
         QueueStats["processed"] := QueueStats["processed"] + 1
     } else if (QueueCounts["low"] > 0) {
         action := LowQueue.RemoveAt(1)
         DecrementQueueCount("low")
-        ExecuteAction(action)
+        executedName := "low"
+        ExecuteAction(action, 3)
         QueueStats["processed"] := QueueStats["processed"] + 1
     }
+
+    ; 只有走到这里(正常出队路径)才计龄:PAUSED / delay / 特殊键暂停期间大家本来就都不该动,
+    ; 在那些状态下计龄会把"正常等待"误判成饥饿。
+    AgeNonEmergencyQueues(executedName)
 }
 
 ; 队列调度周期。⚠️ 这个数字不能凭直觉挑,它决定整套吞吐预算:
@@ -1000,23 +1028,134 @@ IsDroppableAction(action) {
     ; 今天它只进紧急队列(本来就不会被丢),这里补上是纵深防御。
     if (InStr(action, "delay_clear:") = 1)
         return false
+    ; 已经发出过至少一个原子的连招:丢掉 = 打一半停手。未开始的 sequence: 仍可整条丢。
+    if (InStr(action, "seqrun:") = 1)
+        return false
     return true
 }
 
 ; 队列超深时丢弃**最旧**的一个可丢动作。找不到可丢项就不丢(宁可暂时超深,
 ; 也绝不丢 release/cleanup 造成卡键)。返回是否真的丢掉了一项。
-; ⚠️ 只在**队尾之前**找可丢项。若整个队头都是不可丢动作,唯一"可丢"的就是刚push
-; 进来的那一个 —— 那样策略就从"丢最旧"退化成"丢最新",与"最新决策才反映当前局面"
-; 完全相反(实测:队列里 30 个 release: 之后,后续每个 press 都会在到达时被丢掉,
-; 30 个全军覆没)。宁可暂时超深,也不牺牲最新到达的动作。
-DropOldestDroppable(queue, queueName) {
+; 一个动作占多少个"执行位":sequence 有几个原子就要几个 tick 才发得完,其余动作算 1。
+; 预算按原子算(= 真实执行时间),丢弃按整项算(= 保住序列的因果完整性)。
+AtomCount(action) {
+    if (InStr(action, "sequence:") = 1) {
+        return StrSplit(SubStr(action, 10), ",").Length
+    }
+    if (InStr(action, "seqrun:") = 1) {
+        return StrSplit(SubStr(action, 8), ",").Length
+    }
+    return 1
+}
+
+QueueByName(name) {
+    global EmergencyQueue, HighQueue, NormalQueue, LowQueue
+
+    switch name {
+        case "high":
+            return HighQueue
+        case "normal":
+            return NormalQueue
+        case "low":
+            return LowQueue
+    }
+    return EmergencyQueue
+}
+
+; 给这一 tick 没轮到执行的非紧急队列计龄;连续排不上 STALE_TICKS 次就丢掉队首陈旧动作。
+; 只在**正常出队**路径上调用 —— PAUSED / delay / 特殊键暂停期间大家本来就都不该动,
+; 在那些状态下计龄会把正常等待误判成饥饿。
+AgeNonEmergencyQueues(executedName) {
+    global QueueCounts, QueueHeadAge, STALE_TICKS, QueueStats, PendingOverloadNotify
+
+    for i, name in ["high", "normal", "low"] {
+        if (name = executedName || QueueCounts[name] = 0) {
+            QueueHeadAge[name] := 0
+            continue
+        }
+        QueueHeadAge[name] := QueueHeadAge[name] + 1
+        if (QueueHeadAge[name] < STALE_TICKS) {
+            continue
+        }
+        QueueHeadAge[name] := 0
+        q := QueueByName(name)
+        ; 队首不可丢(release/cleanup/已开打的连招)时就留着 —— 卡键和半截连招比迟发更糟
+        if (q.Length > 0 && IsDroppableAction(q[1])) {
+            q.RemoveAt(1)
+            DecrementQueueCount(name)
+            QueueStats["dropped"] := QueueStats["dropped"] + 1
+            PendingOverloadNotify := true
+        }
+    }
+}
+
+; 下一个要执行的动作在哪条非紧急队列的队首(严格优先级:high → normal → low)。
+; 无非紧急动作时返回 ""。
+NextToExecuteQueueName() {
+    global QueueCounts
+
+    if (QueueCounts["high"] > 0) {
+        return "high"
+    }
+    if (QueueCounts["normal"] > 0) {
+        return "normal"
+    }
+    if (QueueCounts["low"] > 0) {
+        return "low"
+    }
+    return ""
+}
+
+; 排在"当前正要执行的那个决策"**后面**、还等着发的原子总数。紧急队列不计入。
+;
+; ⚠️ 为什么要扣掉队首那一项:预算约束的是"排队等待",而不是"一个决策本身有多长"。
+; 一条 20 键连招本来就要 20 个 tick 才发得完 —— 那是用户自己的配置,我们既不能
+; 让它更快,把它算进预算又会让它一遇到别的动作就被整条丢掉(它一项就超了整个预算),
+; 结果就是"配了长连招却永远放不出来"。扣掉队首后,实际上界 =
+; 预算 + 最长的单个决策,仍然有界;而队首那项正在执行中,丢它就是打一半停手。
+PendingAtomCount() {
+    global HighQueue, NormalQueue, LowQueue
+
+    total := 0
+    for i, a in HighQueue {
+        total += AtomCount(a)
+    }
+    for i, a in NormalQueue {
+        total += AtomCount(a)
+    }
+    for i, a in LowQueue {
+        total += AtomCount(a)
+    }
+
+    headName := NextToExecuteQueueName()
+    if (headName = "high") {
+        total -= AtomCount(HighQueue[1])
+    } else if (headName = "normal") {
+        total -= AtomCount(NormalQueue[1])
+    } else if (headName = "low") {
+        total -= AtomCount(LowQueue[1])
+    }
+    return total
+}
+
+; 从指定队列丢掉**最旧**的可丢项。
+; ⚠️ protectTail:刚 push 进来的那一项不能丢。若整个队头都是不可丢动作,唯一"可丢"的
+; 就是它 —— 丢了策略就从"丢最旧"退化成"丢最新",与"最新决策才反映当前局面"完全相反
+; (实测:队列里 30 个 release: 之后,后续每个 press 都会在到达时被丢掉,30 个全军覆没)。
+DropOldestDroppableFrom(queue, queueName, protectTail, protectHead := false) {
     global QueueCounts, TotalQueueCount, QueueStats
 
-    limit := queue.Length - 1     ; 排除刚入队的队尾
+    limit := protectTail ? queue.Length - 1 : queue.Length
     if (limit < 1) {
         return false
     }
+    ; protectHead:队首正是"下一个要执行的决策"(可能是已经发了一半的连招),
+    ; 丢它就是打一半停手 —— 而且它也没算进预算,丢了也不会让预算更好看
+    start := protectHead ? 2 : 1
     loop limit {
+        if (A_Index < start) {
+            continue
+        }
         if (IsDroppableAction(queue[A_Index])) {
             queue.RemoveAt(A_Index)
             DecrementQueueCount(queueName)
@@ -1166,9 +1305,7 @@ ClearNonEmergencyQueues() {
 ; ===============================================================================
 ; 队列操作
 ; ===============================================================================
-; fromSequence: 本次入队是 sequence 展开出来的原子动作 —— 跳过深度上限,
-; 由展开的调用方整体豁免(见下面 sequence 分支的说明)。
-EnqueueAction(priority, action, fromSequence := false) {
+EnqueueAction(priority, action) {
     ; 🔧 防御性 global 声明:虽然函数内当前只有 .Push() 方法调用(不会触发 local 化),
     ; 但显式声明可防止未来误改导致的隐式作用域问题
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue, QueueStats
@@ -1180,11 +1317,22 @@ EnqueueAction(priority, action, fromSequence := false) {
         return
     }
 
-    ; 🔧 BUG修复(B5+B16): 拦截 sequence 类型,展开为多个原子动作进入同一优先级队列
-    ; 这样可复用 DelayUntil 异步机制,避免 ExecuteSequence 中的同步 Sleep 阻塞所有队列
+    ; 🔧 BUG修复(B5+B16): 拦截 sequence 类型,规范化成原子动作串
+    ; 复用 DelayUntil 异步机制,避免 ExecuteSequence 中的同步 Sleep 阻塞所有队列。
+    ;
+    ; ⚠️ 这里**只规范化,不展开成多个队列项**。一次 sequence 是**一个决策**,
+    ; 原子之间有因果关系,必须同生共死:
+    ;   - 展开成 N 项时,后续任何普通入队都会按"丢最旧"从中间裁掉连招的前半段
+    ;     (实测:20 步序列入队后再来一个普通动作,队头就从 k1 变成了 k6);
+    ;   - 展开还会让"整个展开在同一次 WM_COPYDATA 里完成、ProcessQueue 一个也排不出去"
+    ;     的长连招在**零过载**时自己吃掉自己。
+    ; 作为单个队列项,它要么整体被丢,要么按序走完 —— 由 ExecuteAction 每 tick 推进
+    ; 一个原子并把剩余部分放回队首(见 ACTION_SEQUENCE 分支)。
+    ; 预算仍按原子计(见 AtomCount),所以延迟上限不会因为"一项 = N 个 tick"而失效。
     if (InStr(action, "sequence:") = 1) {
         sequenceData := SubStr(action, 10)
         parts := CachedStrSplit(sequenceData, ",")
+        atoms := []
         for index, part in parts {
             part := Trim(part)
             if (part = "")
@@ -1195,21 +1343,24 @@ EnqueueAction(priority, action, fromSequence := false) {
                 numStr := SubStr(part, 6)
                 if (numStr = "" || !IsInteger(numStr))
                     continue
-                ms := Integer(numStr)
-                EnqueueAction(priority, "delay:" ms, true)
+                atoms.Push("delay:" Integer(numStr))
             } else {
-                EnqueueAction(priority, "press:" part, true)
+                atoms.Push("press:" part)
             }
         }
-        ; ⚠️ 展开**整体豁免深度上限**(fromSequence=true)。
-        ; 一次 sequence 是**一个决策**,原子之间有因果关系,不能各自为战地被裁剪:
-        ; 整个展开在同一个 WM_COPYDATA 调用里完成,ProcessQueue 中途一个也排不出去,
-        ; 所以逐项限深会让超过 16 个原子的连招"自己吃掉自己的前半段" ——
-        ; 队列全空、完全没有过载时也会发生(实测 20 键连招丢掉前 4 键,
-        ; "delay50,1,delay100,2,..." 这种带间隔的 9 键连招会丢掉第一个按键)。
-        ; 因此这里只允许**临时超深**(超出量 = 一条序列的长度,由用户配置决定,可控),
-        ; 后续任何非序列入队仍会照常把队列修剪回上限。
-        return
+        if (atoms.Length = 0) {
+            return
+        }
+        if (atoms.Length = 1) {
+            action := atoms[1]        ; 单原子退化成普通动作,省掉一层解释
+        } else {
+            joined := ""
+            for i, a in atoms {
+                joined .= (i > 1 ? "," : "") a
+            }
+            action := "sequence:" joined
+        }
+        ; 落到下面的 switch 正常入队(占一个队列项)
     }
 
     switch priority {
@@ -1222,42 +1373,75 @@ EnqueueAction(priority, action, fromSequence := false) {
             HighQueue.Push(action)
             IncrementQueueCount("high")
             QueueStats["high"] := QueueStats["high"] + 1
-            if (!fromSequence)
-                EnforceQueueDepth(HighQueue, "high")
+            EnforceQueueBudget("high")
         case 2:
             NormalQueue.Push(action)
             IncrementQueueCount("normal")
             QueueStats["normal"] := QueueStats["normal"] + 1
-            if (!fromSequence)
-                EnforceQueueDepth(NormalQueue, "normal")
+            EnforceQueueBudget("normal")
         case 3:
             LowQueue.Push(action)
             IncrementQueueCount("low")
             QueueStats["low"] := QueueStats["low"] + 1
-            if (!fromSequence)
-                EnforceQueueDepth(LowQueue, "low")
+            EnforceQueueBudget("low")
     }
 }
 
-; 深度上限 = 排队延迟上限(MAX_QUEUE_DEPTH × 20ms tick)。超限就丢最旧的可丢动作:
+; 全局原子预算 = 排队延迟上限(MAX_PENDING_ATOMS × 实际 tick)。超预算就丢最旧的可丢动作:
 ; 生产快于执行上限时,不丢的代价是延迟无限增长(实测 10 秒过载 → 打出去的是 10 秒前的决策)。
-EnforceQueueDepth(queue, queueName) {
+;
+; pushedName:本次入队落到哪条队列 —— 只有那条队列的队尾需要保护(它是最新到达的)。
+EnforceQueueBudget(pushedName) {
     ; ⚠️ AHK v2 作用域:PendingOverloadNotify 在本函数内被赋值,必须声明 global,
     ; 否则只会写进一个同名局部变量,通知永远发不出去(参见 AGENTS.md 4.3)
-    global QueueCounts, MAX_QUEUE_DEPTH, PendingOverloadNotify
+    global HighQueue, NormalQueue, LowQueue, MAX_PENDING_ATOMS, PendingOverloadNotify
 
-    if (QueueCounts[queueName] <= MAX_QUEUE_DEPTH) {
+    if (PendingAtomCount() <= MAX_PENDING_ATOMS) {
         return
     }
     dropped := false
-    while (QueueCounts[queueName] > MAX_QUEUE_DEPTH) {
-        if (!DropOldestDroppable(queue, queueName)) {
-            break   ; 整条队列都是 release/cleanup —— 不丢,宁可暂时超深
+    ; 上界只是防御性的:正常一次入队最多引发几次丢弃
+    loop 256 {
+        if (PendingAtomCount() <= MAX_PENDING_ATOMS) {
+            break
         }
-        dropped := true
+        headName := NextToExecuteQueueName()
+        ; 先丢最低优先级:严格优先级出队下它们本来就排在最后,等得最久、最先过期。
+        ; (持续的高优先级生产会把低优先级挤掉 —— 这是严格优先级的既定语义,
+        ;  区别在于现在它变成"被丢弃并上报",而不是"无限期变陈旧后才发出去"。)
+        if (DropOldestDroppableFrom(LowQueue, "low", pushedName = "low", headName = "low")) {
+            dropped := true
+        } else if (DropOldestDroppableFrom(NormalQueue, "normal", pushedName = "normal", headName = "normal")) {
+            dropped := true
+        } else if (DropOldestDroppableFrom(HighQueue, "high", pushedName = "high", headName = "high")) {
+            dropped := true
+        } else {
+            break   ; 没有可丢的了(全是 release/cleanup、正在执行的队首、或最新到达的那一项)
+        }
     }
     if (dropped) {
         PendingOverloadNotify := true   ; 实际通知推迟到 ProcessQueue,见该全局的说明
+    }
+}
+
+; 把动作放回队首(序列推进时用)。这是"已经被接受的工作"回到队列,
+; 不走闸门也不走预算 —— 它并没有新增待执行原子。
+PushFrontAction(priority, action) {
+    global EmergencyQueue, HighQueue, NormalQueue, LowQueue
+
+    switch priority {
+        case 0:
+            EmergencyQueue.InsertAt(1, action)
+            IncrementQueueCount("emergency")
+        case 1:
+            HighQueue.InsertAt(1, action)
+            IncrementQueueCount("high")
+        case 3:
+            LowQueue.InsertAt(1, action)
+            IncrementQueueCount("low")
+        default:
+            NormalQueue.InsertAt(1, action)
+            IncrementQueueCount("normal")
     }
 }
 
@@ -1398,10 +1582,12 @@ CachedStrLower(str) {
 ; ===============================================================================
 ; 动作执行
 ; ===============================================================================
-ExecuteAction(action) {
+; priority: 本动作是从哪条优先级队列取出来的 —— 序列推进时要把剩余部分放回同一条队列。
+ExecuteAction(action, priority := 2) {
     ; 🔧 BUG修复(AHK v2 作用域): 把分散的 global 声明统一到函数顶部,
     ; 避免在 if 分支内零散声明导致维护困难
     global ACTION_CLEANUP, ACTION_PRESS, ACTION_SEQUENCE, ACTION_HOLD, ACTION_RELEASE, ACTION_MOUSE_CLICK, ACTION_DELAY, ACTION_NOTIFY
+    global ACTION_SEQ_RUNNING
     global DelayUntil, DelayClearOthers
     global SkillHeldKeys, SkillHeldOrder, ManagedHoldTargets
 
@@ -1428,8 +1614,28 @@ ExecuteAction(action) {
     actionType := parts[1]
     actionData := parts[2]
 
+    ; 序列推进:取出第一个原子执行,剩余部分原样放回**队首**。
+    ; 序列作为一个队列项排队(见 EnqueueAction),因此它要么整体被丢,要么按序走完 ——
+    ; 后续入队的普通动作不可能从中间把它裁断。
+    if (actionType = ACTION_SEQUENCE || actionType = ACTION_SEQ_RUNNING) {
+        atoms := CachedStrSplit(actionData, ",")
+        if (atoms.Length = 0) {
+            return
+        }
+        first := atoms.RemoveAt(1)
+        if (atoms.Length > 0) {
+            rest := ""
+            for i, a in atoms {
+                rest .= (i > 1 ? "," : "") a
+            }
+            ; 放回时改成 seqrun: —— 标记"已经开打",此后不再可丢(见 IsDroppableAction)
+            PushFrontAction(priority, ACTION_SEQ_RUNNING ":" rest)
+        }
+        ExecuteAction(first, priority)
+        return
+    }
+
     ; 🚀 执行动作（直接常量比较，无函数调用开销）
-    ; 注意: sequence 已在 EnqueueAction 入口展开为多个原子动作,此处不再处理
     ; ⚠️ 队列动作是技能持键账本之外的**第二个物理写者**:管理键 hold_ms 会生成
     ; hold:target / release:target,hold_ms=0 生成 press:target(down+up)。若 target
     ; 与某个 TriggerMode=2 持久持键同名,这些动作会把持键物理抬起。必须同步账本,

@@ -70,10 +70,16 @@ _EXTRACT = [
     "ClearNonEmergencyQueues",
     "ClearQueue",
     "IsAllowedDuringPause",
-    "EnforceQueueDepth",
-    "DropOldestDroppable",
+    "EnforceQueueBudget",
+    "DropOldestDroppableFrom",
     "IsDroppableAction",
     "NotifyQueueOverload",
+    "AtomCount",
+    "PendingAtomCount",
+    "NextToExecuteQueueName",
+    "PushFrontAction",
+    "AgeNonEmergencyQueues",
+    "QueueByName",
 ]
 
 
@@ -111,7 +117,7 @@ global LowQueue := []
 global QueueCounts := Map("emergency", 0, "high", 0, "normal", 0, "low", 0)
 global TotalQueueCount := 0
 global QueueStats := Map("emergency", 0, "high", 0, "normal", 0, "low", 0, "processed", 0, "dropped", 0)
-global MAX_QUEUE_DEPTH := __MAX_QUEUE_DEPTH__
+global MAX_PENDING_ATOMS := __MAX_PENDING_ATOMS__
 global LastOverloadNotifyAt := 0
 global PendingOverloadNotify := false
 global OverloadNotifications := []
@@ -132,6 +138,9 @@ global ACTION_CLEANUP := "cleanup"
 global ACTION_MOUSE_CLICK := "click"
 global ACTION_DELAY := "delay"
 global ACTION_NOTIFY := "notify"
+global ACTION_SEQ_RUNNING := "seqrun"
+global STALE_TICKS := __STALE_TICKS__
+global QueueHeadAge := Map("high", 0, "normal", 0, "low", 0)
 
 ; ---- 计量:执行记录(动作名 + 执行时所在的 tick 序号)----
 global ExecLog := []            ; ["<action>@<tick>", ...]
@@ -200,11 +209,13 @@ ResetAll() {
     global QueueStats, IsPaused, SpecialKeysPaused, RuntimeAcceptingActions
     global DelayUntil, DelayClearOthers, ExecLog, CurrentTick
     global PendingOverloadNotify, LastOverloadNotifyAt, OverloadNotifications
-    global MAX_QUEUE_DEPTH
+    global MAX_PENDING_ATOMS, QueueHeadAge, STALE_TICKS
+    QueueHeadAge := Map("high", 0, "normal", 0, "low", 0)
+    STALE_TICKS := __STALE_TICKS__
     PendingOverloadNotify := false
     LastOverloadNotifyAt := 0
     OverloadNotifications := []
-    MAX_QUEUE_DEPTH := __MAX_QUEUE_DEPTH__   ; 取自实现;个别场景会显式抬高以测基线行为
+    MAX_PENDING_ATOMS := __MAX_PENDING_ATOMS__   ; 取自实现;个别场景会显式抬高以测基线行为
     EmergencyQueue := []
     HighQueue := []
     NormalQueue := []
@@ -226,6 +237,22 @@ Record(name, value) {
     global Results
     Results[name] := value
 }
+; 测试侧辅助:队列里**全部**待发原子(含队首)。PendingAtomCount 是预算口径
+; (扣掉正在执行的队首决策),这里要的是绝对总量,用来断言"总量仍然有界"。
+TotalPendingAtoms() {
+    global HighQueue, NormalQueue, LowQueue
+    total := 0
+    for i, a in HighQueue {
+        total += AtomCount(a)
+    }
+    for i, a in NormalQueue {
+        total += AtomCount(a)
+    }
+    for i, a in LowQueue {
+        total += AtomCount(a)
+    }
+    return total
+}
 JoinLog() {
     global ExecLog
     out := ""
@@ -242,7 +269,7 @@ _SCENARIOS = r"""
 ; S1 吞吐上限:每 tick 最多执行一个动作
 ; =====================================================================
 ResetAll()
-MAX_QUEUE_DEPTH := 1000000   ; 测的是排空速率本身,先让深度上限不参与
+MAX_PENDING_ATOMS := 1000000   ; 测的是排空速率本身,先让预算不参与
 loop 100 {
     EnqueueAction(2, "press:k" A_Index)
 }
@@ -259,14 +286,23 @@ Record("s1_ticks_to_drain", ticksUsed)
 Record("s1_executed", ExecLog.Length)
 
 ; =====================================================================
-; S2 序列放大:一次 send_sequence 展开成 N 个队列项,各占一个 tick
+; S2 序列放大:占 1 个队列项(一个决策),但要 N 个 tick 才发得完(N 个原子)
 ; =====================================================================
 ResetAll()
 EnqueueAction(2, "sequence:q,w,e")
 Record("s2_items_for_3key_sequence", TotalQueueCount)
+Record("s2_atoms_for_3key_sequence", AtomCount(NormalQueue[1]))
 ResetAll()
 EnqueueAction(2, "sequence:q,delay100,w")
 Record("s2_items_with_delay", TotalQueueCount)
+Record("s2_atoms_with_delay", AtomCount(NormalQueue[1]))
+; 按序走完:每 tick 推进一个原子,剩余部分回到队首
+ResetAll()
+EnqueueAction(2, "sequence:q,w,e")
+loop 5 {
+    Tick()
+}
+Record("s2_exec_order", JoinLog())
 
 ; =====================================================================
 ; S3 delay 是**全局**队头阻塞:低优先级的 delay 会压住高优先级动作
@@ -359,8 +395,7 @@ Record("s10_all_release_backlog", QueueCounts["normal"])
 Record("s10_dropped", QueueStats["dropped"])
 
 ; =====================================================================
-; S12 长连招不得被深度上限"自己吃掉自己":一次 sequence 是一个决策,
-;     整个展开在同一次调用里完成,ProcessQueue 中途一个也排不出去。
+; S12 长连招:作为**一个**队列决策排队,原子同生共死
 ; =====================================================================
 ResetAll()
 seq := "sequence:k1"
@@ -369,10 +404,40 @@ loop 19 {
 }
 EnqueueAction(2, seq)                       ; 20 键连招,空队列,零过载
 Record("s12_items", QueueCounts["normal"])
+Record("s12_atoms", AtomCount(NormalQueue[1]))
 Record("s12_dropped", QueueStats["dropped"])
-Record("s12_head", NormalQueue.Length > 0 ? NormalQueue[1] : "")
 
-; 带间隔的连招(delay 也算原子):"delay50,1,delay100,2,..." 形态
+; 关键回归:随后再入队普通动作,不得从中间裁断连招
+loop 5 {
+    EnqueueAction(2, "press:later" A_Index)
+}
+Record("s12_after_more_dropped", QueueStats["dropped"])
+laterLeft := 0
+for i, a in NormalQueue {
+    if (InStr(a, "press:later") = 1) {
+        laterLeft += 1
+    }
+}
+Record("s12_later_survived", laterLeft)
+seqLeft := ""
+for i, a in NormalQueue {
+    if (InStr(a, "sequence:") = 1) {
+        seqLeft := a
+    }
+}
+Record("s12_sequence_items_left", seqLeft = "" ? 0 : 1)
+Record("s12_sequence_atoms_left", seqLeft = "" ? 0 : AtomCount(seqLeft))
+Record("s12_sequence_head", seqLeft = "" ? "<dropped>" : StrSplit(SubStr(seqLeft, 10), ",")[1])
+
+; 执行顺序必须是完整的 k1..k20
+ResetAll()
+EnqueueAction(2, seq)
+loop 25 {
+    Tick()
+}
+Record("s12_exec_order", JoinLog())
+
+; 带间隔的连招(delay 也算原子):"1,delay100,2,..." 形态
 ResetAll()
 seq2 := "sequence:1"
 loop 8 {
@@ -380,8 +445,8 @@ loop 8 {
 }
 EnqueueAction(2, seq2)
 Record("s12b_items", QueueCounts["normal"])
+Record("s12b_atoms", AtomCount(NormalQueue[1]))
 Record("s12b_dropped", QueueStats["dropped"])
-Record("s12b_head", NormalQueue.Length > 0 ? NormalQueue[1] : "")
 
 ; =====================================================================
 ; S13 队头全是不可丢动作时,不得退化成"丢最新":刚到达的动作最该活下来
@@ -402,12 +467,89 @@ for i, a in NormalQueue {
 Record("s13_press_survived", survived)
 Record("s13_releases_kept", QueueCounts["normal"])
 
+; =====================================================================
+; S14 混合优先级:预算是**全局**的。按队列各限 16 的话三条队列能同时积压 48 项,
+;     而出队是严格优先级的 —— 低优先级要等全部 48 项,延迟上限名存实亡。
+; =====================================================================
+ResetAll()
+loop 40 {
+    EnqueueAction(1, "press:h" A_Index)
+    EnqueueAction(2, "press:n" A_Index)
+    EnqueueAction(3, "press:l" A_Index)
+}
+Record("s14_total_nonemergency", QueueCounts["high"] + QueueCounts["normal"] + QueueCounts["low"])
+Record("s14_atoms", PendingAtomCount())
+Record("s14_total_atoms", TotalPendingAtoms())
+Record("s14_high", QueueCounts["high"])
+Record("s14_normal", QueueCounts["normal"])
+Record("s14_low", QueueCounts["low"])
+
+; =====================================================================
+; S15 持续的高优先级生产:低优先级动作应被**丢弃并上报**,
+;     而不是无限期留在队列里越变越陈旧(严格优先级下它永远排不上)
+; =====================================================================
+ResetAll()
+EnqueueAction(3, "press:low_stale")
+loop 100 {
+    EnqueueAction(1, "press:h" A_Index)
+    Tick()
+}
+Record("s15_low_backlog", QueueCounts["low"])
+Record("s15_atoms", PendingAtomCount())
+Record("s15_total_atoms", TotalPendingAtoms())
+Record("s15_dropped", QueueStats["dropped"])
+
+; =====================================================================
+; S16 序列在过载下整体被丢,不留半截(丢一半 = 打出前三个键就停手)
+; =====================================================================
+ResetAll()
+EnqueueAction(2, "sequence:a1,a2,a3,a4,a5,a6,a7,a8")
+loop 30 {
+    EnqueueAction(2, "press:flood" A_Index)
+}
+partial := 0
+for i, a in NormalQueue {
+    if (InStr(a, "sequence:") = 1) {
+        partial += 1
+    }
+}
+Record("s16_sequence_items_left", partial)
+Record("s16_atoms", PendingAtomCount())
+Record("s16_total_atoms", TotalPendingAtoms())
+
+; =====================================================================
+; S17 已经开打的连招不得被"饥饿丢弃"抹掉后半段
+;     (高优先级持续生产 → normal 长期排不上 → 计龄会丢队首;
+;      但队首是 seqrun: 已开打的连招,丢它 = 打一半停手)
+; =====================================================================
+ResetAll()
+EnqueueAction(2, "sequence:c1,c2,c3,c4")
+Tick()                          ; 发出 c1,剩余变成 seqrun:
+Record("s17_head_after_first", NormalQueue.Length > 0 ? SubStr(NormalQueue[1], 1, 7) : "")
+loop 120 {                      ; 远超 STALE_TICKS,持续高优先级生产
+    EnqueueAction(1, "press:hp" A_Index)
+    Tick()
+}
+seqrunLeft := 0
+for i, a in NormalQueue {
+    if (InStr(a, "seqrun:") = 1) {
+        seqrunLeft += 1
+    }
+}
+Record("s17_seqrun_survived", seqrunLeft)
+Record("s17_dropped_something", QueueStats["dropped"] > 0 ? 1 : 0)
+; 高优先级停产后,连招必须把剩下的原子按序打完
+loop 20 {
+    Tick()
+}
+Record("s17_exec_tail", JoinLog())
+
 
 ; =====================================================================
 ; S5 紧急动作不被积压饿死(救命药剂必须插队)
 ; =====================================================================
 ResetAll()
-MAX_QUEUE_DEPTH := 1000000   ; 要的是"深积压"场景,先让深度上限不参与
+MAX_PENDING_ATOMS := 1000000   ; 要的是"深积压"场景,先让预算不参与
 loop 200 {
     EnqueueAction(2, "press:filler" A_Index)
 }
@@ -419,7 +561,7 @@ Record("s5_first_exec_with_200_backlog", JoinLog())
 ; S6 单次 tick 的动作预算(静态断言的行为面):即便队列很深也只出一个
 ; =====================================================================
 ResetAll()
-MAX_QUEUE_DEPTH := 1000000
+MAX_PENDING_ATOMS := 1000000
 loop 50 {
     EnqueueAction(1, "press:h" A_Index)
 }
@@ -442,7 +584,8 @@ def _build_and_run():
         src_lines = fp.read().splitlines()
 
     # 常量注入:桩里必须用**实现里的实际值**,抄一份会让常量变异测不出来
-    parts = [_STUBS.replace("__MAX_QUEUE_DEPTH__", str(MAX_QUEUE_DEPTH))]
+    parts = [_STUBS.replace("__MAX_PENDING_ATOMS__", str(MAX_PENDING_ATOMS))
+                   .replace("__STALE_TICKS__", str(STALE_TICKS))]
     for name in _EXTRACT:
         parts.append(f"\n; ===== 原文抽取: {name} =====")
         parts.append(_extract_function(src_lines, name))
@@ -493,7 +636,7 @@ def _ahk_constant(name):
     """从 hold_server_extended.ahk 读取常量的**实际**值。
 
     不要在测试里抄一份常量:抄了之后改实现的常量,行为测试仍按抄来的值跑,
-    永远绿。(这里就踩过:硬编码 MAX_QUEUE_DEPTH=16 的桩让"取消深度上限"
+    永远绿。(这里就踩过:硬编码 MAX_PENDING_ATOMS=16 的桩让"取消预算"
     这个变异完全没被发现。)
     """
     with open(AHK_SCRIPT, "r", encoding="utf-8") as fp:
@@ -504,21 +647,22 @@ def _ahk_constant(name):
 
 
 TICK_MS = _ahk_constant("QUEUE_TICK_MS")
-MAX_QUEUE_DEPTH = _ahk_constant("MAX_QUEUE_DEPTH")
+MAX_PENDING_ATOMS = _ahk_constant("MAX_PENDING_ATOMS")
+STALE_TICKS = _ahk_constant("STALE_TICKS")
 # Windows 时钟粒度 ~15.6ms,请求 15ms 落在 1 个系统 tick 上 → 实测 ~15.8ms ≈ 63/s。
 # (请求 20ms 会被凑成 2 个系统 tick = 31.6ms,只有一半吞吐 —— 这正是本次改动的原因。)
 # 低于这个下限说明定时器被拖慢,队列会长期过载。
 MIN_ACCEPTABLE_RATE = 45.0
 
 # 绝对预算(**不**跟随上面两个常量):这才是用户真正拿到的保证。
-# 相对断言(backlog <= MAX_QUEUE_DEPTH)在"有人把上限调到 100 万"时照样成立,
-# 测不出"深度上限被取消"这件事 —— 所以必须另有一条绝对上界。
-ABSOLUTE_BACKLOG_CEILING = 32          # 2 × 文档里的深度上限
+# 相对断言(backlog <= MAX_PENDING_ATOMS)在"有人把上限调到 100 万"时照样成立,
+# 测不出"预算被取消"这件事 —— 所以必须另有一条绝对上界。
+ABSOLUTE_BACKLOG_CEILING = 32          # 2 × 文档里的预算
 ABSOLUTE_LAG_CEILING_MS = 500          # 修复前是 10000ms 且随时间线性增长
 
 # SetTimer 走 Windows 消息定时器,分辨率受系统时钟粒度(默认 ~15.6ms)限制:
-# SetTimer(..., 20) 实际会被凑到 2 个系统 tick ≈ 31.2ms,而不是 20ms。
-# 别的进程把全局定时器分辨率调高时又会靠近 20ms。所以吞吐上限是一个**区间**,
+# SetTimer(..., 20) 会被凑到 2 个系统 tick ≈ 31.2ms;请求 15ms 才落在 1 个 tick 上。
+# 别的进程把全局定时器分辨率调高时数值还会变。所以吞吐上限是一个**区间**,
 # 必须真量,不能拿常数算 —— 这正是"需压力测试"的地方。
 _TIMER_PROBE = r"""
 #Requires AutoHotkey v2.0
@@ -619,10 +763,10 @@ def test_real_timer_period_and_throughput_ceiling():
         f"实测吞吐 {per_sec:.1f}/s 过低(应 ≈63/s),队列会长期过载 —— "
         f"检查 QUEUE_TICK_MS 是否被改回了 20"
     )
-    latency_budget = MAX_QUEUE_DEPTH * period
+    latency_budget = MAX_PENDING_ATOMS * period
     print(f"  [实测] SetTimer({TICK_MS}) 真实周期 {period:.1f}ms → 吞吐上限 "
           f"{per_sec:.1f} 动作/秒(改动前:请求 20ms → 31.6ms → 31.7/s)")
-    print(f"  [实测] 深度上限 {MAX_QUEUE_DEPTH} 项 → 最坏排队延迟 {latency_budget:.0f}ms")
+    print(f"  [实测] 预算 {MAX_PENDING_ATOMS} 原子 → 最坏排队延迟 {latency_budget:.0f}ms")
 
 
 def test_single_tick_emits_at_most_one_action():
@@ -635,17 +779,25 @@ def test_single_tick_emits_at_most_one_action():
     )
 
 
-def test_sequence_amplifies_into_one_item_per_key():
-    """一次 send_sequence 在入队处展开:3 键序列 = 3 个队列项 = 3 个 tick = 60ms。
-    生产侧按"一个技能一次调度"计费,消费侧按"一个动作一个 tick"计费 ——
+def test_sequence_is_one_decision_but_many_atoms():
+    """一次 send_sequence 占**一个队列项**(一个决策),但要 N 个 tick 才发得完。
+    预算之所以按原子算正是因为这个落差 —— 按项算的话 16 个 20 原子的序列
+    = 320 个 tick ≈ 5 秒,延迟上限名存实亡。
+    生产侧按"一个技能一次调度"计费,消费侧按"一个原子一个 tick"计费,
     这个放大系数是过载最容易被忽视的来源。"""
     if AHK_EXE is None:
         print("SKIP: 未找到 AutoHotkey v2")
         return
     d = _measure()
-    assert int(d["s2_items_for_3key_sequence"]) == 3
-    assert int(d["s2_items_with_delay"]) == 3
-    print(f"  [实测] 'q,w,e' 展开为 3 项 → 至少 {3 * TICK_MS}ms 才能发完")
+    assert int(d["s2_items_for_3key_sequence"]) == 1, "序列被展开成多个队列项了"
+    assert int(d["s2_atoms_for_3key_sequence"]) == 3
+    assert int(d["s2_items_with_delay"]) == 1
+    assert int(d["s2_atoms_with_delay"]) == 3
+    # 每 tick 推进一个原子,顺序不变
+    assert d["s2_exec_order"] == "press:q@1,press:w@2,press:e@3", (
+        f"序列执行顺序不对: {d['s2_exec_order']}"
+    )
+    print(f"  [实测] 'q,w,e' = 1 个决策 / 3 个原子 → 至少 {3 * TICK_MS}ms 才能发完")
 
 
 def test_low_priority_delay_blocks_high_priority():
@@ -679,8 +831,8 @@ def test_emergency_still_preempts_deep_backlog():
 def test_queue_budget_constants_are_the_expected_values():
     """预算跳闸线:这两个常量一起决定"最坏排队延迟"和"能否跟上生产速率"。
     改动它们是重大决定,必须连带重算 wiki/02 的吞吐表,所以在这里钉死。"""
-    assert MAX_QUEUE_DEPTH == 16, (
-        f"MAX_QUEUE_DEPTH 变成了 {MAX_QUEUE_DEPTH};延迟上限 = 深度 × 实测周期,请重算文档"
+    assert MAX_PENDING_ATOMS == 16, (
+        f"MAX_PENDING_ATOMS 变成了 {MAX_PENDING_ATOMS};延迟上限 = 深度 × 实测周期,请重算文档"
     )
     assert TICK_MS == 15, (
         f"QUEUE_TICK_MS 变成了 {TICK_MS};注意 20 会被 Windows 凑成 31.6ms、吞吐腰斩"
@@ -692,7 +844,7 @@ def test_overload_backlog_stays_bounded():
 
     修复前:队列无上界 → 积压 500 项,正在打出去的是 10 秒前决策的按键,
             而且随时间线性恶化,不报任何错(表现为"技能乱放")。
-    修复后:深度上限把积压钉在 16 项以内 → 排队延迟恒 ≤250ms,
+    修复后:全局预算把积压钉在 16 原子以内 → 排队延迟恒 ≤250ms,
             超出的最旧动作被丢弃并上报,过载变成可见的。
     """
     if AHK_EXE is None:
@@ -706,11 +858,11 @@ def test_overload_backlog_stays_bounded():
 
     assert produced == 1000
     assert executed == 500, f"每 tick 一个动作,500 个 tick 只能执行 {executed} 个"
-    assert backlog <= MAX_QUEUE_DEPTH, f"积压 {backlog} 项,超过深度上限"
+    assert backlog <= MAX_PENDING_ATOMS + 1, f"积压 {backlog} 项,超过预算"
     # ⚠️ 绝对上界,不跟着常量走:上面那条断言在"有人把上限调到 100 万"时同样成立
     # (相对断言测不出"上限被取消"),而用户真正拿到的保证是绝对的毫秒数。
     assert backlog <= ABSOLUTE_BACKLOG_CEILING, (
-        f"积压 {backlog} 项 —— 深度上限形同虚设(队列又变回无界了?)"
+        f"积压 {backlog} 项 —— 预算形同虚设(队列又变回无界了?)"
     )
     assert produced == executed + backlog + dropped, (
         f"动作账不平: 生产 {produced} != 执行 {executed} + 积压 {backlog} + 丢弃 {dropped}"
@@ -720,14 +872,17 @@ def test_overload_backlog_stays_bounded():
     last = d["s4_last_executed"]          # 形如 "press:a984@500"
     idx = int(re.search(r"press:a(\d+)@", last).group(1))
     lag_ms = (produced - 1 - idx) * TICK_MS
-    assert lag_ms <= MAX_QUEUE_DEPTH * TICK_MS, (
-        f"排队延迟 {lag_ms}ms 超过深度上限对应的 {MAX_QUEUE_DEPTH * TICK_MS}ms"
+    # 上界是"预算 + 正在执行的那个决策"(队首不计入预算,见 PendingAtomCount 的说明)。
+    # 这里全是单原子动作,所以 +1。
+    budget_ms = (MAX_PENDING_ATOMS + 1) * TICK_MS
+    assert lag_ms <= budget_ms, (
+        f"排队延迟 {lag_ms}ms 超过预算对应的 {budget_ms}ms"
     )
     assert lag_ms <= ABSOLUTE_LAG_CEILING_MS, (
         f"排队延迟 {lag_ms}ms 超过绝对预算 {ABSOLUTE_LAG_CEILING_MS}ms —— "
         f"这才是用户拿到的保证(修复前是 10000ms 且持续增长)"
     )
-    print(f"  [实测] 10 秒过载后:积压 {backlog} 项(上限 {MAX_QUEUE_DEPTH}),"
+    print(f"  [实测] 10 秒过载后:积压 {backlog} 项(上限 {MAX_PENDING_ATOMS}),"
           f"丢弃 {dropped} 项,排队延迟 {lag_ms}ms(修复前是 10000ms 且持续增长)")
 
 
@@ -765,7 +920,7 @@ def test_release_actions_are_never_dropped():
         return
     d = _measure()
     assert int(d["s7_release_survived"]) == 1, "过载丢掉了 release: —— 会造成游戏内卡键"
-    assert int(d["s7_backlog"]) <= MAX_QUEUE_DEPTH + 1
+    assert int(d["s7_backlog"]) <= MAX_PENDING_ATOMS + 1
 
 
 def test_cleanup_actions_are_never_dropped():
@@ -787,26 +942,124 @@ def test_emergency_queue_is_never_capped():
     assert int(d["s9_dropped"]) == 0, "丢弃了紧急动作"
 
 
-def test_long_sequence_is_not_truncated_by_depth_cap():
-    """回归:一次 sequence 是**一个决策**,其原子有因果关系。整个展开在同一个
-    WM_COPYDATA 调用里完成,ProcessQueue 中途一个也排不出去 —— 所以逐项限深会让
-    超过 16 个原子的连招在**队列全空、零过载**时就自己吃掉自己的前半段。"""
+def test_long_sequence_survives_as_one_atomic_decision():
+    """回归:一次 sequence 是**一个决策**,其原子有因果关系,必须同生共死。
+
+    展开成 N 个队列项时有两个失效面,都实测过:
+      1. 零过载也会自伤:整个展开在同一次 WM_COPYDATA 里完成,ProcessQueue 一个也
+         排不出去,>16 原子的连招会自己吃掉前半段(20 键连招丢掉前 4 键)。
+      2. 后续动作从中间裁断:20 步序列入队后再来一个普通动作,队头就从 k1 变成 k6。
+    作为单个队列项则不可能出现半截连招。
+    """
     if AHK_EXE is None:
         print("SKIP: 未找到 AutoHotkey v2")
         return
     d = _measure()
-    assert int(d["s12_items"]) == 20, (
-        f"20 键连招只剩 {d['s12_items']} 项 —— 被深度上限截断了"
-    )
+    assert int(d["s12_items"]) == 1, "20 键连招没有作为单个决策入队"
+    assert int(d["s12_atoms"]) == 20
     assert int(d["s12_dropped"]) == 0
-    assert d["s12_head"] == "press:k1", f"连招首键被丢: 队头是 {d['s12_head']}"
 
-    # 带间隔的连招:1 + 8×(delay + key) = 17 个原子
-    assert int(d["s12b_items"]) == 17
-    assert int(d["s12b_dropped"]) == 0
-    assert d["s12b_head"] == "press:1", (
-        f"带间隔连招的首键被丢,队头成了孤立的 delay: {d['s12b_head']}"
+    # 队首那条连招不计入预算 → 排在它后面的少量动作不该被误伤
+    # (把队首算进预算的话,20 原子的连招会让预算永远显示超标,后面的动作全被丢掉)
+    assert int(d["s12_later_survived"]) == 5, (
+        f"排在长连招后面的 5 个动作只剩 {d['s12_later_survived']} 个 —— "
+        f"队首被计入预算了,正常动作被误伤"
     )
+    assert int(d["s12_after_more_dropped"]) == 0
+
+    # 关键回归:后续普通动作不得裁断连招
+    assert int(d["s12_sequence_items_left"]) == 1, "连招被后续入队动作整条丢掉了"
+    assert int(d["s12_sequence_atoms_left"]) == 20, (
+        f"连招被裁断,只剩 {d['s12_sequence_atoms_left']} 个原子"
+    )
+    assert d["s12_sequence_head"] == "press:k1", (
+        f"连招首键被丢,队头原子成了 {d['s12_sequence_head']}"
+    )
+
+    # 执行顺序必须是完整的 k1..k20
+    order = [e.split("@")[0] for e in d["s12_exec_order"].split(",") if e]
+    assert order == [f"press:k{i}" for i in range(1, 21)], (
+        f"连招执行顺序被打断: {order}"
+    )
+
+    # 带间隔的连招:1 + 8×(delay + key) = 17 个原子,同样是 1 个决策
+    assert int(d["s12b_items"]) == 1
+    assert int(d["s12b_atoms"]) == 17
+    assert int(d["s12b_dropped"]) == 0
+
+
+def test_global_budget_bounds_mixed_priority_backlog():
+    """回归:出队是**严格优先级**的(high 空了才轮到 normal)。按队列各限 16,
+    三条非紧急队列能同时积压 48 项,低优先级要等 ~750ms —— "≤250ms" 只在
+    单一优先级下成立。预算必须是全局的。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    total = int(d["s14_total_nonemergency"])
+    atoms = int(d["s14_atoms"])
+    total_atoms = int(d["s14_total_atoms"])
+    assert atoms <= MAX_PENDING_ATOMS, f"排队等待的原子 {atoms} 超过全局预算"
+    assert total <= ABSOLUTE_BACKLOG_CEILING, (
+        f"三条非紧急队列共积压 {total} 项 —— 预算又变成按队列各算了"
+        f"(high={d['s14_high']} normal={d['s14_normal']} low={d['s14_low']})"
+    )
+    # 绝对总量 = 预算 + 正在执行的那个决策(这里都是单原子动作,所以 +1)
+    assert total_atoms <= MAX_PENDING_ATOMS + 1
+    print(f"  [实测] 混合优先级积压 {total} 项 / 待发 {total_atoms} 原子 "
+          f"(按队列各限 16 时是 48 项 ≈ 750ms)")
+
+
+def test_starved_low_priority_is_dropped_not_left_to_rot():
+    """严格优先级下,持续的高优先级生产会让低优先级永远排不上。
+    既定语义不变(高优先级就是该赢),但低优先级动作应当被**丢弃并上报**,
+    而不是无限期留在队列里越变越陈旧、某天突然打出一个几十秒前的决策。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    assert int(d["s15_atoms"]) <= MAX_PENDING_ATOMS
+    assert int(d["s15_total_atoms"]) <= MAX_PENDING_ATOMS + 1
+    assert int(d["s15_low_backlog"]) == 0, (
+        f"被饿死的低优先级动作还留在队列里({d['s15_low_backlog']} 项),会越来越陈旧"
+    )
+    assert int(d["s15_dropped"]) > 0, "发生了饥饿却没有任何丢弃上报"
+
+
+def test_started_sequence_survives_starvation():
+    """已经开打的连招不能被"饥饿丢弃"抹掉后半段 —— 打出前两个键就停手,
+    比迟发整条更糟。未开始的 sequence: 仍可整条丢(原子性),
+    开打后变成 seqrun: 就进入不可丢集合。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    assert d["s17_head_after_first"] == "seqrun:", (
+        f"连招开打后没有标记成 seqrun:,而是 {d['s17_head_after_first']}"
+    )
+    assert int(d["s17_seqrun_survived"]) == 1, "已开打的连招在饥饿中被丢掉了后半段"
+    # 队列里唯一的项就是那条已开打的连招,它不可丢 → 计龄不该误伤任何东西
+    assert int(d["s17_dropped_something"]) == 0, (
+        "饥饿计龄丢掉了不可丢的队首(已开打的连招)"
+    )
+    tail = [e.split("@")[0] for e in d["s17_exec_tail"].split(",") if e]
+    assert tail[:1] == ["press:c1"], f"连招首键不对: {tail[:1]}"
+    assert tail[-3:] == ["press:c2", "press:c3", "press:c4"], (
+        f"高优先级停产后连招没有按序打完: {tail[-3:]}"
+    )
+
+
+def test_sequence_is_dropped_whole_under_overload():
+    """过载时序列整体被丢,不留半截 —— 打出连招的前三个键就停手比不打更糟。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    left = int(d["s16_sequence_items_left"])
+    assert left in (0, 1), f"队列里出现了 {left} 个序列项(半截连招?)"
+    assert int(d["s16_atoms"]) <= MAX_PENDING_ATOMS
+    # 总量上界 = 预算 + 最长的单个决策(这里是 8 原子的连招)
+    assert int(d["s16_total_atoms"]) <= MAX_PENDING_ATOMS + 8
 
 
 def test_newest_arrival_is_never_the_one_dropped():
@@ -832,7 +1085,7 @@ def test_newest_arrival_is_never_the_one_dropped():
 
 def test_all_undroppable_queue_exceeds_depth_rather_than_stick_keys():
     """整条队列都是不可丢动作时,宁可暂时超深也不丢 ——
-    不能为了满足深度上限去制造卡键。"""
+    不能为了满足预算去制造卡键。"""
     if AHK_EXE is None:
         print("SKIP: 未找到 AutoHotkey v2")
         return

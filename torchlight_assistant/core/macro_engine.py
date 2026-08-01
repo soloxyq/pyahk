@@ -178,7 +178,7 @@ class MacroEngine:
         # AHK 子进程意外退出 → 强制停机 + 告警。由 AHKInputHandler 在命令发送失败时探测到进程
         # 已退出后,经 ahk_signal_bridge 切回 GUI 线程发布本事件(故本 handler 已在主线程)。
         event_bus.subscribe("ahk_process_died", self._on_ahk_process_died)
-        # AHK 队列过载(生产快于 50 动作/秒的执行上限,已丢弃最旧的待发动作)
+        # AHK 队列过载(生产快于约 63 动作/秒的执行上限,已丢弃最旧的待发动作)
         event_bus.subscribe("queue_overload", self._on_queue_overload)
 
     def _on_queue_overload(self, key: str = ""):

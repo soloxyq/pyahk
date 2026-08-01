@@ -810,11 +810,29 @@ class ResourceManagementWidget(QWidget):
         # 如果无法获取，返回默认值
         return 5000 if cooldown_type == "hp" else 8000
 
+    def _get_existing_resource_config(self, prefix: str) -> Dict[str, Any]:
+        """取当前已加载的该资源配置,作为构建的基底。
+
+        UI 只覆盖它认识的字段;ocr_model / ocr_device 这类没有控件的用户设置
+        必须原样带过去,否则保存或 F8 同步会把它们静默抹回默认值。
+        """
+        try:
+            if self.main_window and hasattr(self.main_window, "_global_config"):
+                return (
+                    self.main_window._global_config
+                    .get("resource_management", {})
+                    .get(f"{prefix}_config", {})
+                ) or {}
+        except Exception as e:
+            LOG_INFO(f"[资源配置] 读取现有配置失败,将从空配置构建: {e}")
+        return {}
+
     def _build_hp_config(self) -> Dict[str, Any]:
         """构建HP配置 - 使用ResourceConfigManager"""
         timing_manager = getattr(self.main_window, 'timing_settings', None)
         return ResourceConfigManager.build_resource_config(
-            "hp", self.hp_widgets, self.hp_detection_mode, self.hp_circle_config, timing_manager
+            "hp", self.hp_widgets, self.hp_detection_mode, self.hp_circle_config, timing_manager,
+            existing_config=self._get_existing_resource_config("hp"),
         )
 
 
@@ -822,7 +840,8 @@ class ResourceManagementWidget(QWidget):
         """构建MP配置 - 使用ResourceConfigManager"""
         timing_manager = getattr(self.main_window, 'timing_settings', None)
         return ResourceConfigManager.build_resource_config(
-            "mp", self.mp_widgets, self.mp_detection_mode, self.mp_circle_config, timing_manager
+            "mp", self.mp_widgets, self.mp_detection_mode, self.mp_circle_config, timing_manager,
+            existing_config=self._get_existing_resource_config("mp"),
         )
 
     def get_config(self) -> Dict[str, Any]:

@@ -133,6 +133,7 @@ global ACTION_CLEANUP := "cleanup"
 global ACTION_MOUSE_CLICK := "click"
 global ACTION_DELAY := "delay"
 global ACTION_NOTIFY := "notify"
+global ACTION_SEQ_RUNNING := "seqrun"
 
 ; ---- 桩函数(IsSkillHoldSuppressed 是真函数,从原文抽取,不在此列)----
 ShouldBlockMouseInStationary(key) {
@@ -175,6 +176,12 @@ IsEmergencyAction(action) {
     return EmergencySim
 }
 ExecuteMouseClick(data) {
+}
+; 序列推进会把剩余部分放回队首;本文件只测持键账本,不测队列,故记录即可
+global PushedBack := []
+PushFrontAction(priority, action) {
+    global PushedBack
+    PushedBack.Push(priority ":" action)
 }
 SendEventToPython(data) {
 }

@@ -30,6 +30,7 @@ class ResourceConfigManager:
         detection_mode: str,
         circle_config: Dict[str, Any],
         timing_manager=None,
+        existing_config: Dict[str, Any] = None,
     ) -> Dict[str, Any]:
         """
         统一的资源配置构建方法，消除HP/MP重复逻辑
@@ -40,16 +41,24 @@ class ResourceConfigManager:
             detection_mode: 检测模式
             circle_config: 圆形配置缓存
             timing_manager: 时间管理器（用于获取冷却时间）
+            existing_config: 当前已加载的该资源配置。**必须传**，否则 UI 没有暴露的字段
+                （ocr_model / ocr_device 等）会在保存或 F8 同步时被静默抹掉。
         """
-        # 基础配置
-        config = {
+        # ⚠️ 从已加载的配置开始合并，而不是从空字典重建。
+        # 这个函数只知道 UI 上有哪些控件；JSON 里还有一批**没有对应控件**的字段
+        # (ocr_model / ocr_device 是文档化的用户设置，见 wiki/04)。从零重建的话，
+        # 手工配好 GPU 或 medium 模型的用户，一按 F8 或点保存就被静默退回默认值，
+        # 而且没有任何提示 —— 表现为"我明明配了 GPU，怎么还是 CPU 在跑"。
+        # 合并是安全的:UI 拥有的字段在下面全部会被覆盖写一遍。
+        config = dict(existing_config) if existing_config else {}
+        config.update({
             "enabled": widgets["enabled"].isChecked(),
             "key": widgets["key"].text().strip(),
             "threshold": widgets["threshold"].value(),
             "cooldown": ResourceConfigManager._get_cooldown_from_timing(
                 resource_type, timing_manager
             ),
-        }
+        })
 
         # 添加容差配置
         tolerance_h, tolerance_s, tolerance_v = (
@@ -133,6 +142,10 @@ class ResourceConfigManager:
         if ocr_combo:
             ocr_engine = ocr_combo.currentData() or "template"
 
+        # match_threshold 是**用户可调**的识别置信度门槛(会传给 recognize_and_parse
+        # 的 min_score,见 wiki/04)。UI 上没有这个控件,写死 0.70 等于每次保存都把
+        # 用户调过的阈值改回默认值。已有值优先。
+        rect_default = ResourceConfigManager.DEFAULT_COORDS[resource_type]["rectangle"]
         config.update(
             {
                 "detection_mode": "text_ocr",
@@ -141,20 +154,12 @@ class ResourceConfigManager:
                 "text_x2": text_x2,
                 "text_y2": text_y2,
                 "ocr_engine": ocr_engine,
-                "match_threshold": 0.70,
-                # 保留矩形配置作为备份
-                "region_x1": ResourceConfigManager.DEFAULT_COORDS[resource_type][
-                    "rectangle"
-                ][0],
-                "region_y1": ResourceConfigManager.DEFAULT_COORDS[resource_type][
-                    "rectangle"
-                ][1],
-                "region_x2": ResourceConfigManager.DEFAULT_COORDS[resource_type][
-                    "rectangle"
-                ][2],
-                "region_y2": ResourceConfigManager.DEFAULT_COORDS[resource_type][
-                    "rectangle"
-                ][3],
+                "match_threshold": config.get("match_threshold", 0.70),
+                # 保留矩形配置作为备份:优先沿用用户自己框过的矩形,没有才用默认值
+                "region_x1": config.get("region_x1", rect_default[0]),
+                "region_y1": config.get("region_y1", rect_default[1]),
+                "region_x2": config.get("region_x2", rect_default[2]),
+                "region_y2": config.get("region_y2", rect_default[3]),
             }
         )
 
