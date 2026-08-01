@@ -78,8 +78,10 @@ _EXTRACT = [
     "PendingAtomCount",
     "NextToExecuteQueueName",
     "PushFrontAction",
-    "AgeNonEmergencyQueues",
     "QueueByName",
+    "QueueItem",
+    "PriorityOfQueueName",
+    "CachedStrSplit",
 ]
 
 
@@ -140,7 +142,11 @@ global ACTION_DELAY := "delay"
 global ACTION_NOTIFY := "notify"
 global ACTION_SEQ_RUNNING := "seqrun"
 global STALE_TICKS := __STALE_TICKS__
-global QueueHeadAge := Map("high", 0, "normal", 0, "low", 0)
+global QueueTickCount := 0
+; 真实 CachedStrSplit 的缓存(必须用真实现:此前的"每次新建数组"桩掩盖了
+; ExecuteAction 原地修改共享缓存数组、重复执行同一序列逐轮丢键的 HIGH 级 BUG)
+global StringSplitCache := Map()
+global MaxCacheSize := 100
 
 ; ---- 计量:执行记录(动作名 + 执行时所在的 tick 序号)----
 global ExecLog := []            ; ["<action>@<tick>", ...]
@@ -185,12 +191,6 @@ IsEmergencyAction(action) {
     ; 与实现一致的判定形态:emergency 队列里的 press:hp/mp 属于救命动作
     return InStr(action, "press:hp") = 1 || InStr(action, "press:mp") = 1
 }
-CachedStrSplit(str, delim, omit := "", max := -1) {
-    if (max > 0) {
-        return StrSplit(str, delim, omit, max)
-    }
-    return StrSplit(str, delim, omit)
-}
 
 ReleaseAllSkillHoldKeys() {
 }
@@ -209,8 +209,9 @@ ResetAll() {
     global QueueStats, IsPaused, SpecialKeysPaused, RuntimeAcceptingActions
     global DelayUntil, DelayClearOthers, ExecLog, CurrentTick
     global PendingOverloadNotify, LastOverloadNotifyAt, OverloadNotifications
-    global MAX_PENDING_ATOMS, QueueHeadAge, STALE_TICKS
-    QueueHeadAge := Map("high", 0, "normal", 0, "low", 0)
+    global MAX_PENDING_ATOMS, STALE_TICKS, QueueTickCount, StringSplitCache
+    QueueTickCount := 0
+    StringSplitCache := Map()
     STALE_TICKS := __STALE_TICKS__
     PendingOverloadNotify := false
     LastOverloadNotifyAt := 0
@@ -243,13 +244,13 @@ TotalPendingAtoms() {
     global HighQueue, NormalQueue, LowQueue
     total := 0
     for i, a in HighQueue {
-        total += AtomCount(a)
+        total += AtomCount(a.action)
     }
     for i, a in NormalQueue {
-        total += AtomCount(a)
+        total += AtomCount(a.action)
     }
     for i, a in LowQueue {
-        total += AtomCount(a)
+        total += AtomCount(a.action)
     }
     return total
 }
@@ -270,6 +271,7 @@ _SCENARIOS = r"""
 ; =====================================================================
 ResetAll()
 MAX_PENDING_ATOMS := 1000000   ; 测的是排空速率本身,先让预算不参与
+STALE_TICKS := 1000000         ; 预加载 100 项后半段年龄必然 >32 tick,这里只测速率
 loop 100 {
     EnqueueAction(2, "press:k" A_Index)
 }
@@ -291,11 +293,11 @@ Record("s1_executed", ExecLog.Length)
 ResetAll()
 EnqueueAction(2, "sequence:q,w,e")
 Record("s2_items_for_3key_sequence", TotalQueueCount)
-Record("s2_atoms_for_3key_sequence", AtomCount(NormalQueue[1]))
+Record("s2_atoms_for_3key_sequence", AtomCount(NormalQueue[1].action))
 ResetAll()
 EnqueueAction(2, "sequence:q,delay100,w")
 Record("s2_items_with_delay", TotalQueueCount)
-Record("s2_atoms_with_delay", AtomCount(NormalQueue[1]))
+Record("s2_atoms_with_delay", AtomCount(NormalQueue[1].action))
 ; 按序走完:每 tick 推进一个原子,剩余部分回到队首
 ResetAll()
 EnqueueAction(2, "sequence:q,w,e")
@@ -351,7 +353,7 @@ loop 100 {
 }
 releasesLeft := 0
 for i, a in NormalQueue {
-    if (InStr(a, "release:") = 1) {
+    if (InStr(a.action, "release:") = 1) {
         releasesLeft += 1
     }
 }
@@ -368,7 +370,7 @@ loop 100 {
 }
 cleanupsLeft := 0
 for i, a in NormalQueue {
-    if (InStr(a, "cleanup:") = 1) {
+    if (InStr(a.action, "cleanup:") = 1) {
         cleanupsLeft += 1
     }
 }
@@ -404,7 +406,7 @@ loop 19 {
 }
 EnqueueAction(2, seq)                       ; 20 键连招,空队列,零过载
 Record("s12_items", QueueCounts["normal"])
-Record("s12_atoms", AtomCount(NormalQueue[1]))
+Record("s12_atoms", AtomCount(NormalQueue[1].action))
 Record("s12_dropped", QueueStats["dropped"])
 
 ; 关键回归:随后再入队普通动作,不得从中间裁断连招
@@ -414,15 +416,15 @@ loop 5 {
 Record("s12_after_more_dropped", QueueStats["dropped"])
 laterLeft := 0
 for i, a in NormalQueue {
-    if (InStr(a, "press:later") = 1) {
+    if (InStr(a.action, "press:later") = 1) {
         laterLeft += 1
     }
 }
 Record("s12_later_survived", laterLeft)
 seqLeft := ""
 for i, a in NormalQueue {
-    if (InStr(a, "sequence:") = 1) {
-        seqLeft := a
+    if (InStr(a.action, "sequence:") = 1) {
+        seqLeft := a.action
     }
 }
 Record("s12_sequence_items_left", seqLeft = "" ? 0 : 1)
@@ -445,7 +447,7 @@ loop 8 {
 }
 EnqueueAction(2, seq2)
 Record("s12b_items", QueueCounts["normal"])
-Record("s12b_atoms", AtomCount(NormalQueue[1]))
+Record("s12b_atoms", AtomCount(NormalQueue[1].action))
 Record("s12b_dropped", QueueStats["dropped"])
 
 ; =====================================================================
@@ -460,8 +462,8 @@ loop 30 {
 }
 survived := ""
 for i, a in NormalQueue {
-    if (InStr(a, "press:") = 1) {
-        survived .= (survived = "" ? "" : ",") a
+    if (InStr(a.action, "press:") = 1) {
+        survived .= (survived = "" ? "" : ",") a.action
     }
 }
 Record("s13_press_survived", survived)
@@ -494,10 +496,113 @@ loop 100 {
     EnqueueAction(1, "press:h" A_Index)
     Tick()
 }
+; 懒判定:没轮到它之前留在队列里(预算没超,占位无害)
+Record("s15_low_backlog_during", QueueCounts["low"])
+; 高优先级停产 → 下一 tick 轮到它,但已等 100 tick → 丢弃,不执行
+Tick()
 Record("s15_low_backlog", QueueCounts["low"])
 Record("s15_atoms", PendingAtomCount())
 Record("s15_total_atoms", TotalPendingAtoms())
 Record("s15_dropped", QueueStats["dropped"])
+Record("s15_low_executed", InStr(JoinLog(), "low_stale") ? 1 : 0)
+
+; =====================================================================
+; S18 年龄绑定在项上:清队列后新入队的动作不得"继承"旧年龄
+;     (旧的每队列计数不清零:等了 31 tick → PAUSED 清队 → 新动作 1 tick 就被丢)
+; =====================================================================
+ResetAll()
+EnqueueAction(3, "press:old_low")
+loop 31 {
+    EnqueueAction(1, "press:h" A_Index)
+    Tick()
+}
+ClearQueue(-1)                       ; PAUSED 语义:全清
+EnqueueAction(3, "press:fresh_low")
+Tick()
+Record("s18_fresh_executed", InStr(JoinLog(), "fresh_low") ? 1 : 0)
+Record("s18_old_executed", InStr(JoinLog(), "old_low") ? 1 : 0)
+
+; =====================================================================
+; S19 排在队首后面、等了同样久的项也按自己的年龄判(旧计数只描述队首:
+;     丢了前两个后计数清零,等了 64 tick 的第 3 个照样被执行)
+; =====================================================================
+ResetAll()
+loop 16 {
+    EnqueueAction(3, "press:stale" A_Index)
+}
+loop 64 {
+    EnqueueAction(1, "press:h" A_Index)
+    Tick()
+}
+Tick()                               ; 高停产:16 个全部年龄 ≥64,应全部丢弃
+staleExec := 0
+loop 16 {
+    if (InStr(JoinLog(), "press:stale" A_Index "@")) {
+        staleExec += 1
+    }
+}
+Record("s19_stale_executed", staleExec)
+Record("s19_low_backlog", QueueCounts["low"])
+Record("s19_dropped", QueueStats["dropped"])
+
+; =====================================================================
+; S20 重复执行同一序列必须每轮完整(真实 CachedStrSplit 下的回归:
+;     ExecuteAction 原地 RemoveAt 缓存共享数组 → 第二次只剩 w、第三次全空)
+; =====================================================================
+ResetAll()
+loop 3 {
+    EnqueueAction(2, "sequence:q,w")
+    Tick()
+    Tick()
+    Record("s20_run" A_Index, JoinLog())
+    ExecLog := []
+}
+
+; =====================================================================
+; S21 不同优先级各有一条已开打序列(seqrun)时,预算必须收敛
+;     (只豁免全局队首的话,被抢占的 normal seqrun 把预算永久顶爆,
+;      两条都不可丢,此后所有新动作一到就被丢)
+; =====================================================================
+ResetAll()
+seqN := "sequence:n1"
+loop 39 {
+    seqN .= ",n" (A_Index + 1)
+}
+EnqueueAction(2, seqN)
+Tick()                               ; n1 发出,normal 队首变 seqrun(剩 39)
+seqH := "sequence:h1"
+loop 39 {
+    seqH .= ",h" (A_Index + 1)
+}
+EnqueueAction(1, seqH)
+Tick()                               ; h1 发出,high 队首变 seqrun(剩 39)
+Record("s21_budget_with_two_seqruns", PendingAtomCount())
+loop 5 {
+    EnqueueAction(2, "press:extra" A_Index)
+}
+Record("s21_dropped_at_enqueue", QueueStats["dropped"])
+extraLeft := 0
+for i, a in NormalQueue {
+    if (InStr(a.action, "press:extra") = 1) {
+        extraLeft += 1
+    }
+}
+Record("s21_extra_survived", extraLeft)
+loop 200 {
+    Tick()
+}
+hDone := 0
+nDone := 0
+loop 40 {
+    if (InStr(JoinLog(), "press:h" A_Index "@")) {
+        hDone += 1
+    }
+    if (InStr(JoinLog(), "press:n" A_Index "@")) {
+        nDone += 1
+    }
+}
+Record("s21_h_completed", hDone)
+Record("s21_n_completed", nDone)
 
 ; =====================================================================
 ; S16 序列在过载下整体被丢,不留半截(丢一半 = 打出前三个键就停手)
@@ -509,7 +614,7 @@ loop 30 {
 }
 partial := 0
 for i, a in NormalQueue {
-    if (InStr(a, "sequence:") = 1) {
+    if (InStr(a.action, "sequence:") = 1) {
         partial += 1
     }
 }
@@ -525,14 +630,14 @@ Record("s16_total_atoms", TotalPendingAtoms())
 ResetAll()
 EnqueueAction(2, "sequence:c1,c2,c3,c4")
 Tick()                          ; 发出 c1,剩余变成 seqrun:
-Record("s17_head_after_first", NormalQueue.Length > 0 ? SubStr(NormalQueue[1], 1, 7) : "")
+Record("s17_head_after_first", NormalQueue.Length > 0 ? SubStr(NormalQueue[1].action, 1, 7) : "")
 loop 120 {                      ; 远超 STALE_TICKS,持续高优先级生产
     EnqueueAction(1, "press:hp" A_Index)
     Tick()
 }
 seqrunLeft := 0
 for i, a in NormalQueue {
-    if (InStr(a, "seqrun:") = 1) {
+    if (InStr(a.action, "seqrun:") = 1) {
         seqrunLeft += 1
     }
 }
@@ -1012,18 +1117,79 @@ def test_global_budget_bounds_mixed_priority_backlog():
 
 def test_starved_low_priority_is_dropped_not_left_to_rot():
     """严格优先级下,持续的高优先级生产会让低优先级永远排不上。
-    既定语义不变(高优先级就是该赢),但低优先级动作应当被**丢弃并上报**,
-    而不是无限期留在队列里越变越陈旧、某天突然打出一个几十秒前的决策。"""
+    既定语义不变(高优先级就是该赢),但等了 100 tick 的低优先级动作在终于
+    轮到它时必须**被丢弃并上报**,而不是执行一个 1.5 秒前的决策。
+    判定在出队时做(懒判定):没轮到之前留在队列里,预算没超、占位无害。"""
     if AHK_EXE is None:
         print("SKIP: 未找到 AutoHotkey v2")
         return
     d = _measure()
-    assert int(d["s15_atoms"]) <= MAX_PENDING_ATOMS
-    assert int(d["s15_total_atoms"]) <= MAX_PENDING_ATOMS + 1
-    assert int(d["s15_low_backlog"]) == 0, (
-        f"被饿死的低优先级动作还留在队列里({d['s15_low_backlog']} 项),会越来越陈旧"
+    assert int(d["s15_low_backlog_during"]) == 1, "懒判定下饥饿期间不该动它"
+    assert int(d["s15_low_executed"]) == 0, (
+        "等了 100 tick(≈1.6 秒)的低优先级动作被执行了 —— 过期决策打了出去"
     )
-    assert int(d["s15_dropped"]) > 0, "发生了饥饿却没有任何丢弃上报"
+    assert int(d["s15_low_backlog"]) == 0
+    assert int(d["s15_dropped"]) > 0, "发生了饥饿丢弃却没有任何上报"
+    assert int(d["s15_atoms"]) <= MAX_PENDING_ATOMS
+
+
+def test_age_is_bound_to_items_not_queues():
+    """回归(计龄状态未绑定决策的两个实际错误):
+
+    (a) 旧的每队列计数在清队列后不重置 —— low 等 31 tick → PAUSED 清队 →
+        新 low 只等 1 tick 就"继承"旧年龄被丢。年龄绑在项上后,新项从 0 起算。
+    (b) 旧计数只描述队首 —— 丢掉前两个后清零,排在后面、等了 64 tick 的
+        第 3 个照样被执行。按项判后,16 个 stale 全部被丢,一个都不执行。
+    """
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    # (a) 清队列后新入队的动作正常执行,不继承旧年龄
+    assert int(d["s18_fresh_executed"]) == 1, "清队列后的新动作继承了旧年龄被丢"
+    assert int(d["s18_old_executed"]) == 0   # 旧动作已被 ClearQueue(-1) 清掉
+    # (b) 等了 ≥64 tick 的 16 个动作全部按自己的年龄被丢,零执行
+    assert int(d["s19_stale_executed"]) == 0, (
+        f"{d['s19_stale_executed']} 个等了 64+ tick 的动作仍被执行 —— 年龄没绑在项上"
+    )
+    assert int(d["s19_low_backlog"]) == 0
+    assert int(d["s19_dropped"]) >= 16
+
+
+def test_repeated_sequence_is_complete_every_run():
+    """HIGH 回归:ExecuteAction 曾对 CachedStrSplit 返回的**共享缓存数组**原地
+    RemoveAt —— 同一条序列第二次执行拿到残骸:第一次 q,w、第二次只剩 w、
+    第三次什么都不发。本测试用**真实** CachedStrSplit(旧桩每次新建数组,
+    正好把这个 BUG 挡在了测试之外)。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    for run in (1, 2, 3):
+        actions = [e.split("@")[0] for e in d[f"s20_run{run}"].split(",") if e]
+        assert actions == ["press:q", "press:w"], (
+            f"第 {run} 次执行 sequence:q,w 发出的是 {actions} —— 共享缓存数组被啃了"
+        )
+
+
+def test_budget_converges_with_multiple_inflight_seqruns():
+    """回归:seqrun 恒不可丢,而不同优先级可以**同时**各有一条在飞
+    (normal 长序列开打后被 high 序列抢占)。只豁免全局队首的话,被抢占那条的
+    剩余原子把预算永久顶爆 —— 两条都不可丢、无法收敛,所有新动作一到就被丢。
+    每条队列队首的 seqrun 都要豁免(结构上每队列最多一条,豁免总量有界)。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    assert int(d["s21_budget_with_two_seqruns"]) == 0, (
+        f"两条在飞 seqrun 下预算口径 = {d['s21_budget_with_two_seqruns']},"
+        f"被抢占序列的剩余原子仍被计入 —— 预算无法收敛"
+    )
+    assert int(d["s21_dropped_at_enqueue"]) == 0, "预算顶爆导致新动作一到就被丢"
+    assert int(d["s21_extra_survived"]) == 5
+    # 两条序列都必须完整走完(seqrun 不可丢 + 各在自己队列推进)
+    assert int(d["s21_h_completed"]) == 40, f"high 序列只完成 {d['s21_h_completed']}/40"
+    assert int(d["s21_n_completed"]) == 40, f"normal 序列只完成 {d['s21_n_completed']}/40"
 
 
 def test_started_sequence_survives_starvation():

@@ -186,7 +186,8 @@ class MacroEngine:
 
         必须让用户看得见:否则表现只是"某些技能偶尔不触发",用户会一直去调技能配置,
         而真正的原因是入队速度超过了执行上限(实测约 63 动作/秒,见 hold_server_extended.ahk
-        中 QUEUE_TICK_MS 与 MAX_QUEUE_DEPTH 的说明)。AHK 端已按每秒最多一条节流。
+        中 QUEUE_TICK_MS 与 MAX_PENDING_ATOMS 的说明);也可能是动作在队列里等待过期
+        (真实年龄 ≥ STALE_TICKS)被丢弃。AHK 端已按每秒最多一条节流。
         """
         LOG_ERROR(
             f"[队列过载] 入队速度超过执行上限(约 63 动作/秒),已丢弃最旧的待发动作 "
