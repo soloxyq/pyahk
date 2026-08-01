@@ -118,8 +118,30 @@ global QueueStats := Map(
     "high", 0,
     "normal", 0,
     "low", 0,
-    "processed", 0
+    "processed", 0,
+    "dropped", 0
 )
+
+; ===============================================================================
+; 队列深度上限(= 排队延迟上限)
+; ===============================================================================
+; 吞吐是硬上限:ProcessQueue 由定时器驱动且**每 tick 最多执行一个动作**
+; → 实测 63 动作/秒(见 QUEUE_TICK_MS 处的定时器实测表)。
+; 而生产侧没有任何背压:check_cooldowns 每 100ms 对每个"图标就绪"的冷却技能各入队一次,
+; 8 个这样的技能就是 80/s;逗号序列 "q,w,e" 还会 1 变 3。
+; 一旦生产 > 上限,旧实现的队列会无限增长 —— 实测生产 100/s 跑 10 秒后积压 500 项、
+; 正在打出去的是 10 秒前决策的按键,而且随时间线性恶化。表现为"技能乱放",不报任何错。
+; (数字来自 tests/test_ahk_queue_throughput.py 的实测,不是估算)
+;
+; 因此给非紧急队列设深度上限:深度上限就是延迟上限 —— 16 × 15.8ms ≈ 250ms。
+; 超限时丢**最旧**的可丢动作:ARPG 里过期的决策毫无价值,最新决策才反映当前局面。
+; 紧急队列(HP/MP 保命)不设上限,永不丢弃。
+global MAX_QUEUE_DEPTH := 16
+global LastOverloadNotifyAt := 0     ; 过载通知节流(避免刷屏)
+; 丢弃发生在 EnqueueAction 里,而它常在 WM_COPYDATA 处理中执行 —— 此刻 Python 正阻塞在
+; SendMessageW 里等这条消息返回。在那里回发消息会把两边的消息处理嵌套起来,没必要冒这个险。
+; 因此只置标志,由 ProcessQueue(定时器上下文)在下一 tick 发出通知。
+global PendingOverloadNotify := false
 
 
 ; 🚀 性能优化：字符串缓存池，减少频繁的字符串操作
@@ -158,6 +180,14 @@ ProcessQueue() {
     global DelayUntil, DelayClearOthers, TotalQueueCount, QueueCounts
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
     global QueueStats, IsPaused, SpecialKeysPaused
+    global PendingOverloadNotify
+
+    ; 过载通知:丢弃发生在 WM_COPYDATA 上下文,通知推迟到这里(定时器上下文)发出。
+    ; 放在快速返回**之前** —— 队列刚被清空(如 PAUSED)时这条通知也不该丢。
+    ; 标志由 NotifyQueueOverload 在**真正发出**时才清除(被节流时保留,下一 tick 重试)。
+    if (PendingOverloadNotify) {
+        NotifyQueueOverload()
+    }
 
     ; 🚀 性能优化：快速检查 - 如果没有任何任务且不在延迟中，直接返回
     if (TotalQueueCount = 0 && DelayUntil = 0) {
@@ -268,8 +298,20 @@ ProcessQueue() {
     }
 }
 
-; 启动定时器（固定20ms，简单高效）
-SetTimer(ProcessQueue, 20)
+; 队列调度周期。⚠️ 这个数字不能凭直觉挑,它决定整套吞吐预算:
+; Windows 消息定时器的粒度是 ~15.6ms,SetTimer 会**向上凑到整数个系统 tick**。
+; 实测(tests/test_ahk_queue_throughput.py 的墙钟探针):
+;     请求 20ms → 实际 31.6ms → 31.7 动作/秒   ← 凑成了 2 个系统 tick,白白浪费一半
+;     请求 16ms → 实际 25.0ms → 40.0 动作/秒
+;     请求 15ms → 实际 15.8ms → 63.3 动作/秒   ← 1 个系统 tick
+;     请求 10/5/1ms → 实际 ~15.9ms → ~63 动作/秒(触底,再小也没用)
+; 原来的 20 落在最差的位置上:比 15 慢一倍,却什么都没换来。
+; 31.7/s 的上限连仓库里的现成配置都跑不住(last.json 37.3/s、d4灵巫.json 55.9/s
+; 都超了 → 永久过载、持续丢动作)。改成 15 后上限 63/s,现有配置全部有余量。
+; 注意这里仍是**每 tick 最多一个动作**,按键间距只是从 31.6ms 变成 15.8ms,
+; 单次仍是独立的 SendInput,不会出现"同一毫秒连发两个键"。
+global QUEUE_TICK_MS := 15
+SetTimer(ProcessQueue, QUEUE_TICK_MS)
 
 ; 宏解释器独立 tick:只推进 AHK 端宏状态机,不占用全局 DelayUntil/队列
 SetTimer(MacroTick, MACRO_TICK_MS)
@@ -939,6 +981,68 @@ IsAllowedDuringPause(action) {
     return false
 }
 
+; 过载时该动作可否被丢弃。
+; 可丢:press / hold / click / delay —— 它们只是"想产生一次输入",过期即无意义。
+; 不可丢:release: 和 cleanup: —— 它们是**状态恢复**动作,丢掉的后果是持久性的:
+;   - 丢 release:key → 该键在游戏里一直按住(stuck key),用户只能重启客户端
+;   - 丢 cleanup:key → ActiveManagedKeys 锁残留 → 该管理键此后永远点不出来
+; notify: 同理不丢(Python 侧状态机依赖它)。
+; 方向性安全:丢 hold: 而保留其 release: 只会多发一次无害的 SendUp;反过来则卡键。
+IsDroppableAction(action) {
+    if (InStr(action, "release:") = 1)
+        return false
+    if (InStr(action, "cleanup:") = 1)
+        return false
+    if (InStr(action, "notify:") = 1)
+        return false
+    ; delay_clear: 是管理键独占窗口的开关(ExecuteAction 里置 DelayClearOthers)。
+    ; 丢掉它,管理键的 hold 窗口就不再清理竞争队列 → 独占语义失效。
+    ; 今天它只进紧急队列(本来就不会被丢),这里补上是纵深防御。
+    if (InStr(action, "delay_clear:") = 1)
+        return false
+    return true
+}
+
+; 队列超深时丢弃**最旧**的一个可丢动作。找不到可丢项就不丢(宁可暂时超深,
+; 也绝不丢 release/cleanup 造成卡键)。返回是否真的丢掉了一项。
+; ⚠️ 只在**队尾之前**找可丢项。若整个队头都是不可丢动作,唯一"可丢"的就是刚push
+; 进来的那一个 —— 那样策略就从"丢最旧"退化成"丢最新",与"最新决策才反映当前局面"
+; 完全相反(实测:队列里 30 个 release: 之后,后续每个 press 都会在到达时被丢掉,
+; 30 个全军覆没)。宁可暂时超深,也不牺牲最新到达的动作。
+DropOldestDroppable(queue, queueName) {
+    global QueueCounts, TotalQueueCount, QueueStats
+
+    limit := queue.Length - 1     ; 排除刚入队的队尾
+    if (limit < 1) {
+        return false
+    }
+    loop limit {
+        if (IsDroppableAction(queue[A_Index])) {
+            queue.RemoveAt(A_Index)
+            DecrementQueueCount(queueName)
+            QueueStats["dropped"] := QueueStats["dropped"] + 1
+            return true
+        }
+    }
+    return false
+}
+
+; 过载可见化:静默丢弃会让用户以为"技能没触发是配置问题"。节流到每秒最多一条。
+NotifyQueueOverload() {
+    global LastOverloadNotifyAt, QueueStats, PendingOverloadNotify
+
+    now := A_TickCount
+    if (now - LastOverloadNotifyAt < 1000) {
+        ; 被节流:**保留**待发标志,让下一 tick 继续尝试。
+        ; (若在这里把标志清掉,一段"上一条通知刚发过 500ms"的短促过载就会
+        ;  永远无人知晓 —— 丢弃发生了,却一条日志都没有。)
+        return
+    }
+    LastOverloadNotifyAt := now
+    PendingOverloadNotify := false
+    SendEventToPython("queue_overload:" QueueStats["dropped"])
+}
+
 ; 判断是否为紧急动作（HP/MP等生存技能）
 IsEmergencyAction(action) {
     global CachedHpKey, CachedMpKey, ACTION_PRESS
@@ -1062,7 +1166,9 @@ ClearNonEmergencyQueues() {
 ; ===============================================================================
 ; 队列操作
 ; ===============================================================================
-EnqueueAction(priority, action) {
+; fromSequence: 本次入队是 sequence 展开出来的原子动作 —— 跳过深度上限,
+; 由展开的调用方整体豁免(见下面 sequence 分支的说明)。
+EnqueueAction(priority, action, fromSequence := false) {
     ; 🔧 防御性 global 声明:虽然函数内当前只有 .Push() 方法调用(不会触发 local 化),
     ; 但显式声明可防止未来误改导致的隐式作用域问题
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue, QueueStats
@@ -1090,16 +1196,25 @@ EnqueueAction(priority, action) {
                 if (numStr = "" || !IsInteger(numStr))
                     continue
                 ms := Integer(numStr)
-                EnqueueAction(priority, "delay:" ms)
+                EnqueueAction(priority, "delay:" ms, true)
             } else {
-                EnqueueAction(priority, "press:" part)
+                EnqueueAction(priority, "press:" part, true)
             }
         }
+        ; ⚠️ 展开**整体豁免深度上限**(fromSequence=true)。
+        ; 一次 sequence 是**一个决策**,原子之间有因果关系,不能各自为战地被裁剪:
+        ; 整个展开在同一个 WM_COPYDATA 调用里完成,ProcessQueue 中途一个也排不出去,
+        ; 所以逐项限深会让超过 16 个原子的连招"自己吃掉自己的前半段" ——
+        ; 队列全空、完全没有过载时也会发生(实测 20 键连招丢掉前 4 键,
+        ; "delay50,1,delay100,2,..." 这种带间隔的 9 键连招会丢掉第一个按键)。
+        ; 因此这里只允许**临时超深**(超出量 = 一条序列的长度,由用户配置决定,可控),
+        ; 后续任何非序列入队仍会照常把队列修剪回上限。
         return
     }
 
     switch priority {
         case 0:
+            ; 紧急队列(HP/MP 保命)不设上限:宁可积压也绝不丢救命药剂
             EmergencyQueue.Push(action)
             IncrementQueueCount("emergency")
             QueueStats["emergency"] := QueueStats["emergency"] + 1
@@ -1107,14 +1222,42 @@ EnqueueAction(priority, action) {
             HighQueue.Push(action)
             IncrementQueueCount("high")
             QueueStats["high"] := QueueStats["high"] + 1
+            if (!fromSequence)
+                EnforceQueueDepth(HighQueue, "high")
         case 2:
             NormalQueue.Push(action)
             IncrementQueueCount("normal")
             QueueStats["normal"] := QueueStats["normal"] + 1
+            if (!fromSequence)
+                EnforceQueueDepth(NormalQueue, "normal")
         case 3:
             LowQueue.Push(action)
             IncrementQueueCount("low")
             QueueStats["low"] := QueueStats["low"] + 1
+            if (!fromSequence)
+                EnforceQueueDepth(LowQueue, "low")
+    }
+}
+
+; 深度上限 = 排队延迟上限(MAX_QUEUE_DEPTH × 20ms tick)。超限就丢最旧的可丢动作:
+; 生产快于执行上限时,不丢的代价是延迟无限增长(实测 10 秒过载 → 打出去的是 10 秒前的决策)。
+EnforceQueueDepth(queue, queueName) {
+    ; ⚠️ AHK v2 作用域:PendingOverloadNotify 在本函数内被赋值,必须声明 global,
+    ; 否则只会写进一个同名局部变量,通知永远发不出去(参见 AGENTS.md 4.3)
+    global QueueCounts, MAX_QUEUE_DEPTH, PendingOverloadNotify
+
+    if (QueueCounts[queueName] <= MAX_QUEUE_DEPTH) {
+        return
+    }
+    dropped := false
+    while (QueueCounts[queueName] > MAX_QUEUE_DEPTH) {
+        if (!DropOldestDroppable(queue, queueName)) {
+            break   ; 整条队列都是 release/cleanup —— 不丢,宁可暂时超深
+        }
+        dropped := true
+    }
+    if (dropped) {
+        PendingOverloadNotify := true   ; 实际通知推迟到 ProcessQueue,见该全局的说明
     }
 }
 
@@ -1787,12 +1930,13 @@ SendWMCopyDataToPython(hwnd, eventData) {
 
 SendStatsToPython() {
     ; 🚀 发送统计信息
-    stats := Format("stats:e={},h={},n={},l={},p={}",
+    stats := Format("stats:e={},h={},n={},l={},p={},d={}",
         QueueStats["emergency"],
         QueueStats["high"],
         QueueStats["normal"],
         QueueStats["low"],
-        QueueStats["processed"]
+        QueueStats["processed"],
+        QueueStats["dropped"]
     )
     SendEventToPython(stats)
 }

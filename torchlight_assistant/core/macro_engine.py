@@ -178,6 +178,21 @@ class MacroEngine:
         # AHK 子进程意外退出 → 强制停机 + 告警。由 AHKInputHandler 在命令发送失败时探测到进程
         # 已退出后,经 ahk_signal_bridge 切回 GUI 线程发布本事件(故本 handler 已在主线程)。
         event_bus.subscribe("ahk_process_died", self._on_ahk_process_died)
+        # AHK 队列过载(生产快于 50 动作/秒的执行上限,已丢弃最旧的待发动作)
+        event_bus.subscribe("queue_overload", self._on_queue_overload)
+
+    def _on_queue_overload(self, key: str = ""):
+        """AHK 队列超过深度上限,丢弃了最旧的待发动作。
+
+        必须让用户看得见:否则表现只是"某些技能偶尔不触发",用户会一直去调技能配置,
+        而真正的原因是入队速度超过了执行上限(实测约 63 动作/秒,见 hold_server_extended.ahk
+        中 QUEUE_TICK_MS 与 MAX_QUEUE_DEPTH 的说明)。AHK 端已按每秒最多一条节流。
+        """
+        LOG_ERROR(
+            f"[队列过载] 入队速度超过执行上限(约 63 动作/秒),已丢弃最旧的待发动作 "
+            f"(累计丢弃 {key})。建议:减少同时启用的冷却检测技能、"
+            f"调大技能 Timer、或缩短逗号序列长度。"
+        )
 
     def _setup_primary_hotkey(self):
         """设置永久根热键 (F8/F7/F9)

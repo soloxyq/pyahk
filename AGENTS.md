@@ -73,6 +73,8 @@ GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
 | PAUSED 状态完全停 HP/MP 检测 + 清所有队列 | **特性**:用户主动 Z 暂停 = 完全停下 |
 | F8/F7/F9 不在 RegisteredHooks 记录中 | **特性**:三个永久根热键,清理动态 Hook 时不碰它们 |
 | 同一个 key 不能同时出现在 special_keys / managed_keys | **特性**:跨类冲突会让后注册的 Hotkey 覆盖前者,Python 注册时检测重复并 LOG_ERROR 跳过后者 |
+| 过载时丢弃**最旧**的待发动作(`queue_overload` 上报) | **特性**:执行上限实测约 63 动作/秒(`QUEUE_TICK_MS=15` → 实际 15.8ms × 每 tick 1 个动作),生产侧无背压。不丢的代价是延迟无限增长(实测 10 秒过载 → 打出去的是 10 秒前的决策)。深度上限 16 ≈ 延迟上限 250ms。`release:`/`cleanup:`/`delay_clear:`、紧急队列、**最新到达的动作**和 `sequence:` 展开**永不丢弃**。见 wiki/02 "吞吐预算" |
+| `QUEUE_TICK_MS` 是 15 而不是 20 | **特性**:Windows 消息定时器粒度 ~15.6ms,`SetTimer` 向上凑整 —— 请求 20ms 实际是 31.6ms(吞吐腰斩到 31.7/s),请求 15ms 才是 15.8ms(63/s)。改回 20 会让 `last.json`/`d4灵巫.json` 等现成配置永久过载。实测表见 `hold_server_extended.ahk` 中 `QUEUE_TICK_MS` 处 |
 
 **反模式**:看到这些不要急着报 BUG,先读 `wiki/02-架构与通信.md` 的"设计意图"段。
 
@@ -108,7 +110,7 @@ ProcessQueue() {
     ; ...
 }
 ```
-**验证**:见 wiki/02 的"AHK 函数 global 完整性检查脚本"。
+**验证**:`python tests/test_ahk_global_scope.py` —— 全量扫描"赋值了全局却没声明 global"的函数(不是硬编码名单)。
 
 ### 4.4 不存在的文件 ⚠️
 
