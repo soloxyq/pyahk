@@ -13,14 +13,39 @@ from .debug_log import LOG, LOG_INFO, LOG_ERROR
 
 
 class PaddleOCRManager:
-    """Wraps the PaddleOCR instance to control its lifecycle and provide a simple interface."""
+    """Wraps the PaddleOCR instance to control its lifecycle and provide a simple interface.
+
+    线程模型(两条独立流水线,两把独立的锁):
+    - full OCR(det+rec, ``self.ocr``): 仅配置阶段使用(GUI 定位文本框/洗练),
+      构建与推理都可达秒级 —— 由 ``_full_lock`` 串行化。
+    - rec-only(``self.rec_model``): 运行时资源数字识别,由**调度线程**以 200ms 周期
+      调用 —— 由 ``_rec_lock`` 串行化。
+    拆成两把锁的原因:旧实现共用一把 ``_init_lock``,GUI 触发的 full OCR 构建/推理
+    会把调度线程的 rec-only 资源检测堵在同一把锁后面数秒 —— HP/MP 救命药剂检测
+    停摆。两条流水线是各自独立的 predictor 对象,不共享 Python 侧可变状态;
+    同一 predictor 非重入,故各自锁内仍串行 —— 即上游文档推荐的"一线程一 predictor"用法。
+    (paddle-inference 对"不同 predictor 并发 predict"的官方保证未见明文,
+    这里按上游推荐用法处理;若将来出现疑似并发崩溃,先怀疑这里。)
+
+    rec 模型按 ``(model_name, device)`` **多槽缓存**:HP 与 MP 允许配成不同模型,
+    GUI 测试按钮也可能用另一套参数;单槽实现下这些调用会互相驱逐,
+    每次调用都重建一次模型(秒级),资源检测直接停摆。
+    模型**构建在锁外**完成,只有发布与 predict 进锁 —— 否则冷启动一次构建
+    就会把调度线程的 HP/MP 检测堵住数秒(正是本次拆锁要消除的问题)。
+    """
 
     _instance: Optional["PaddleOCRManager"] = None
+    _instance_lock = threading.Lock()
 
     def __new__(cls):
+        # 双检锁:GUI 线程与调度线程可能同时首次获取单例;无锁的
+        # check-then-create 会产生两个实例或返回未完成 _init_internal 的实例
         if cls._instance is None:
-            cls._instance = super(PaddleOCRManager, cls).__new__(cls)
-            cls._instance._init_internal()
+            with cls._instance_lock:
+                if cls._instance is None:
+                    instance = super(PaddleOCRManager, cls).__new__(cls)
+                    instance._init_internal()
+                    cls._instance = instance   # 初始化完成后才发布
         return cls._instance
 
     def _init_internal(self):
@@ -30,20 +55,23 @@ class PaddleOCRManager:
         self._init_error = None
         self.ocr = None
         self._full_ocr_device = None
-        self.rec_model = None              # PP-OCRv6 rec-only 文本识别(资源数字快速识别,与上面的全流程 self.ocr 独立)
+        self.rec_model = None              # 最近一次使用的 rec-only 模型(仅供状态展示/日志)
         self._rec_model_name = None
         self._rec_device = None
-        self._init_lock = threading.Lock()
+        self._rec_models = {}              # (model_name, device) -> TextRecognition,多槽缓存不互相驱逐
+        self._full_lock = threading.Lock()   # full OCR(det+rec)构建+推理
+        self._rec_lock = threading.Lock()    # rec-only 构建+推理(运行时热路径)
+        self._state_lock = threading.Lock()  # _initializing/_initialized/_init_error(叶子锁,可嵌在 _full_lock 内)
 
         # 不自动初始化，等待用户手动触发
 
     def start_async_initialization(self):
         """开始异步初始化OCR引擎"""
-        if self._initializing or self._initialized:
-            LOG(f"[PaddleOCR] OCR引擎已在初始化中或已完成初始化")
-            return
-
-        self._initializing = True
+        with self._state_lock:
+            if self._initializing or self._initialized:
+                LOG(f"[PaddleOCR] OCR引擎已在初始化中或已完成初始化")
+                return
+            self._initializing = True
         LOG_INFO("[PaddleOCR] 开始异步初始化PaddleOCR引擎...")
 
         def _async_init():
@@ -51,13 +79,15 @@ class PaddleOCRManager:
                 LOG("[PaddleOCR] 正在初始化PaddleOCR引擎（这可能需要一些时间）...")
                 if not self.ensure_full_ocr():
                     raise RuntimeError(self._init_error or "PaddleOCR初始化失败")
-                self._initializing = False
+                with self._state_lock:
+                    self._initializing = False
                 LOG_INFO("[PaddleOCR] PaddleOCR引擎异步初始化成功！")
                 event_bus.publish("ocr:init_success")
 
             except Exception as e:
-                self._init_error = str(e)
-                self._initializing = False
+                with self._state_lock:
+                    self._init_error = str(e)
+                    self._initializing = False
                 LOG_ERROR(f"[PaddleOCR] 异步初始化PaddleOCR引擎失败: {e}")
                 event_bus.publish("ocr:init_failed", {"error": str(e)})
 
@@ -90,11 +120,13 @@ class PaddleOCRManager:
 
     def ensure_full_ocr(self, device: str = "cpu") -> bool:
         """惰性初始化完整 OCR pipeline(det+rec)，仅用于配置阶段定位文本框。"""
-        with self._init_lock:
+        with self._full_lock:
             if self.ocr is not None and self._initialized and self._full_ocr_device == device:
                 return True
             try:
-                self.ocr = PaddleOCR(
+                # 构建到局部变量,成功才替换 self.ocr:切 device 失败(如无 GPU)
+                # 不应该连原来能用的 CPU 流水线一起销毁。
+                new_ocr = PaddleOCR(
                     use_doc_orientation_classify=False,
                     use_doc_unwarping=False,
                     use_textline_orientation=False,
@@ -105,15 +137,20 @@ class PaddleOCRManager:
                     text_recognition_batch_size=6,
                     device=device,
                 )
-                self._initialized = True
-                self._init_error = None
+                self.ocr = new_ocr
                 self._full_ocr_device = device
+                # _initialized/_init_error 一律走 _state_lock(否则这里与
+                # _async_init 的失败分支分属两把锁,谁后写谁赢,状态会互相覆盖)
+                with self._state_lock:
+                    self._initialized = True
+                    self._init_error = None
                 LOG_INFO(f"[PaddleOCR] full OCR(det+rec) 已就绪 @ {device}")
                 return True
             except Exception as e:
-                self.ocr = None
-                self._initialized = False
-                self._init_error = str(e)
+                with self._state_lock:
+                    self._init_error = str(e)
+                    if self.ocr is None:
+                        self._initialized = False
                 LOG_ERROR(f"[PaddleOCR] full OCR(det+rec) 初始化失败: {e}")
                 return False
 
@@ -145,7 +182,8 @@ class PaddleOCRManager:
             # 性能优化：记录处理时间
             start_time = time.time()
             
-            with self._init_lock:
+            frame = self._ensure_writable(frame)
+            with self._full_lock:
                 # 使用新版本的predict方法
                 result = self.ocr.predict(input=frame)
             
@@ -191,6 +229,15 @@ class PaddleOCRManager:
         return result_item
 
     @staticmethod
+    def _ensure_writable(arr: Any) -> Any:
+        """第三方推理库可能对输入做原地预处理,而 BorderFrameManager 的帧快照是
+        **只读共享**的(多个消费者拿到同一个数组对象)。直接递进去要么报错,
+        要么污染别人的检测输入 —— 按需复制一次。"""
+        if isinstance(arr, np.ndarray) and not arr.flags.writeable:
+            return arr.copy()
+        return arr
+
+    @staticmethod
     def _normalize_image(image: np.ndarray) -> Optional[np.ndarray]:
         """把 BGRA/灰度输入规范成 PaddleOCR 可直接处理的 BGR ndarray。"""
         if image is None or getattr(image, "size", 0) == 0:
@@ -204,7 +251,7 @@ class PaddleOCRManager:
             return None
         elif arr.shape[2] > 3:
             arr = arr[:, :, :3]
-        return np.ascontiguousarray(arr)
+        return PaddleOCRManager._ensure_writable(np.ascontiguousarray(arr))
 
     @staticmethod
     def _box_to_rect(box: Any) -> Optional[Tuple[int, int, int, int]]:
@@ -246,7 +293,7 @@ class PaddleOCRManager:
             return None
         try:
             start_time = time.time()
-            with self._init_lock:
+            with self._full_lock:
                 result = self.ocr.predict(input=roi)
             elapsed_ms = (time.time() - start_time) * 1000
         except Exception as e:
@@ -320,23 +367,40 @@ class PaddleOCRManager:
 
     # ---- rec-only 资源数字识别(HP/MP 文本检测专用,与全流程 self.ocr 互不影响) ----
 
+    def _get_rec_model(self, model_name: str = "PP-OCRv6_small_rec", device: str = "cpu"):
+        """取(必要时构建)指定 (model_name, device) 的 rec-only 模型,失败返回 None。
+
+        调用方必须**持有返回的对象**去 predict,不要回头读 self.rec_model ——
+        期间另一线程可能已经换了那个字段(旧实现就是在 ensure→predict 之间放锁,
+        另一线程构建失败把 rec_model 置 None,调度线程随后 AttributeError,
+        资源检测被兜底成"充足"而不喝药)。
+        """
+        key = (model_name, device)
+        with self._rec_lock:
+            model = self._rec_models.get(key)
+        if model is not None:
+            return model
+
+        try:
+            from paddleocr import TextRecognition
+            # 锁外构建:冷启动可达数秒,进锁会把调度线程的 HP/MP 检测一并堵住。
+            # 并发构建同一 key 最多浪费一次构建(setdefault 保留先到者),不会出错。
+            built = TextRecognition(model_name=model_name, device=device)
+        except Exception as e:
+            LOG_ERROR(f"[PaddleOCR] rec-only 模型初始化失败({model_name}@{device}): {e}")
+            return None
+
+        with self._rec_lock:
+            model = self._rec_models.setdefault(key, built)
+            self.rec_model = model          # 兼容旧字段:最近一次使用的模型
+            self._rec_model_name = model_name
+            self._rec_device = device
+        LOG_INFO(f"[PaddleOCR] rec-only 模型已就绪: {model_name} @ {device}")
+        return model
+
     def ensure_rec_model(self, model_name: str = "PP-OCRv6_small_rec", device: str = "cpu") -> bool:
-        """惰性初始化 rec-only 文本识别模型(PP-OCRv6)。model/device 变化时会重建。"""
-        with self._init_lock:
-            if (self.rec_model is not None and self._rec_model_name == model_name
-                    and self._rec_device == device):
-                return True
-            try:
-                from paddleocr import TextRecognition
-                self.rec_model = TextRecognition(model_name=model_name, device=device)
-                self._rec_model_name = model_name
-                self._rec_device = device
-                LOG_INFO(f"[PaddleOCR] rec-only 模型已就绪: {model_name} @ {device}")
-                return True
-            except Exception as e:
-                self.rec_model = None
-                LOG_ERROR(f"[PaddleOCR] rec-only 模型初始化失败: {e}")
-                return False
+        """惰性初始化 rec-only 文本识别模型(PP-OCRv6)。保留给外部做"预热"用。"""
+        return self._get_rec_model(model_name, device) is not None
 
     @staticmethod
     def parse_number_text(text: str) -> Tuple[Optional[int], Optional[int]]:
@@ -377,11 +441,13 @@ class PaddleOCRManager:
         roi = self._normalize_image(roi)
         if roi is None:
             return None, None, None
-        if not self.ensure_rec_model(model_name, device):
+        model = self._get_rec_model(model_name, device)
+        if model is None:
             return None, None, None
         try:
-            with self._init_lock:
-                out = self.rec_model.predict(roi)
+            # 用局部引用 predict:字段可能被并发调用改掉,见 _get_rec_model 说明
+            with self._rec_lock:
+                out = model.predict(roi)
             text = ""
             score = None
             if out:
@@ -405,13 +471,10 @@ class PaddleOCRManager:
             return None, None, None
 
 
-# 全局实例，程序启动时就开始初始化
-_global_ocr_manager = None
-
-
 def get_paddle_ocr_manager() -> PaddleOCRManager:
-    """获取全局OCR管理器实例"""
-    global _global_ocr_manager
-    if _global_ocr_manager is None:
-        _global_ocr_manager = PaddleOCRManager()
-    return _global_ocr_manager
+    """获取全局OCR管理器实例。
+
+    PaddleOCRManager.__new__ 本身是双检锁单例(GUI 线程与调度线程并发
+    首次获取也只会产生一个完成初始化的实例),无需再维护模块级缓存。
+    """
+    return PaddleOCRManager()

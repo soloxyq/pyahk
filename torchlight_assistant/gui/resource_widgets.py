@@ -1491,8 +1491,11 @@ class ResourceManagementWidget(QWidget):
                     from ..utils.paddle_ocr_manager import get_paddle_ocr_manager
 
                     mgr = get_paddle_ocr_manager()
+                    # 必须用与运行时**同一套**模型/设备/阈值:写死 small@cpu 的话,
+                    # 配了 medium 的用户点一次"测试"就会与调度线程互相驱逐模型槽位
+                    model_name, device, min_score = self._get_ocr_runtime_options(prefix)
                     start_time = time.time()
-                    cur, mx, pct = mgr.recognize_and_parse(roi, "PP-OCRv6_small_rec", "cpu")
+                    cur, mx, pct = mgr.recognize_and_parse(roi, model_name, device, min_score)
                     recognition_time = (time.time() - start_time) * 1000
                     if pct is not None:
                         text = f"{cur}/{mx}"

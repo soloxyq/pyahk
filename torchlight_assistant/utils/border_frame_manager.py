@@ -30,6 +30,18 @@ class BorderFrameManager:
         self.paused = False
         self._capture_lock = threading.RLock()  # 资源锁
 
+        # 🎯 帧快照(所有权契约的核心):
+        # C++ 零拷贝视图会在"之后第二次 get_frame 调用"时被原地覆写(A/B 双缓冲,
+        # CaptureFrameData 只在 get_frame 调用内执行,无异步写线程)。消费者(调度线程
+        # 检测/OCR、GUI 预览/校准)在锁外长时间持有视图必然撕裂/混帧。
+        # 因此 get_current_frame() 一律返回**锁内复制的快照**:复制发生在 _capture_lock
+        # 内,而覆写只能发生在下一次同样要拿锁的调用里 —— 这是完全的同步保证,不是
+        # 缩小竞态窗口。快照按时间窗微缓存,同一检测 tick 内多次调用共享同一帧
+        # (顺带保证同轮决策基于同一画面)。快照对消费者是**只读共享**的,不得原地修改。
+        self._frame_snapshot: Optional[np.ndarray] = None
+        self._frame_snapshot_at: float = 0.0
+        self._snapshot_reuse_window = self._compute_reuse_window(capture_interval)
+
         # 边框区域信息
         self.border_x = 0
         self.border_y = 0
@@ -56,6 +68,19 @@ class BorderFrameManager:
         # 订阅配置更新事件，确保窗口配置总能同步
         from ..core.event_bus import event_bus
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
+
+    @staticmethod
+    def _compute_reuse_window(capture_interval: float) -> float:
+        """快照复用窗口 = 捕获间隔的一半(一个间隔内不会有新内容,重复复制纯浪费),
+        下限 10ms 防御异常配置,**且不超过捕获间隔本身**。
+
+        上限是必须的:间隔小于 20ms 时只取下限会让窗口横跨好几个捕获周期 ——
+        用户把间隔调小反而拿到更旧的帧。
+        """
+        iv = float(capture_interval or 0.0)
+        if iv <= 0:
+            return 0.010
+        return min(max(0.010, iv / 2.0), iv)
 
     def _on_config_updated(self, skills_config: Dict, global_config: Dict):
         """响应配置更新，更新窗口激活配置"""
@@ -267,6 +292,16 @@ class BorderFrameManager:
                 if self.graphics_capture and self.graphics_capture.start_capture():
                     self.running = True
                     self.paused = False
+                    # 快照复用窗口跟随**本次实际生效**的捕获间隔(即 interval_ms,
+                    # 而不是构造时的 self.capture_interval)。
+                    # 注意:实际启动路径 macro_engine._start_subsystems_based_on_mode()
+                    # 并不传 interval_ms,因此这里恒为默认 40ms —— GUI 的"捕获间隔"
+                    # 设置目前只作用于 READY 期的一次性捕获,没有接到这条循环上。
+                    self.capture_interval = max(0.0, interval_ms / 1000.0)
+                    self._snapshot_reuse_window = self._compute_reuse_window(self.capture_interval)
+                    # 新会话:作废上个会话可能残留的快照
+                    self._frame_snapshot = None
+                    self._frame_snapshot_at = 0.0
                 else:
                     if self.graphics_capture: self.graphics_capture.cleanup()
                     self.graphics_capture = None
@@ -339,12 +374,18 @@ class BorderFrameManager:
                 self.graphics_capture.cleanup()
                 self.graphics_capture = None
             self._capture_config = None
+            # 会话结束,快照作废(防止快速重启后在复用窗口内拿到上个会话的旧帧)
+            self._frame_snapshot = None
+            self._frame_snapshot_at = 0.0
 
     def pause_capture(self):
         """暂停截图循环"""
         with self._capture_lock:
             if self.running and not self.paused:
                 self.paused = True
+                # 快照作废:恢复后不得在复用窗口内返回暂停前的过期画面
+                self._frame_snapshot = None
+                self._frame_snapshot_at = 0.0
                 if self.graphics_capture: self.graphics_capture.pause_capture()
 
     def resume_capture(self):
@@ -1034,20 +1075,48 @@ class BorderFrameManager:
         LOG(f"[调试保存] 调试保存已启用，保存路径: {self.debug_save_path}")
     
     def get_current_frame(self) -> Optional[np.ndarray]:
-        """获取当前帧数据 - 高性能版本。
+        """获取当前帧的**独立快照**(BGRA, H×W×4)。
 
         帧来源策略:
         1. 实时检测（技能冷却/条件/资源）仅使用此接口提供的 Graphics Capture 最新帧。
         2. 模板或离线调试请使用一次性捕获接口，不与实时路径混用，以避免色域/延迟差异引入匹配抖动。
         3. 若返回 None，上层逻辑应跳过本轮检测，不自动 fallback 到 MSS，以保持来源一致性。
+
+        所有权契约:
+        - 返回的数组是锁内复制的快照,**不会**被后续捕获覆写,可跨线程安全持有任意时长
+          (旧行为返回 C++ 缓冲区视图,持有期间另一线程两次取帧即撕裂 —— OCR 混帧误读的根源)。
+        - 快照在时间窗内被多个调用方**只读共享**,任何消费者都不得原地修改;
+          需要可写数组时自行 .copy()。
         """
         try:
             with self._capture_lock:
-                if not self.running or not self.graphics_capture:
+                # paused 也必须拦:PAUSED = 完全停下,底层已 pause_capture 不再产出新帧,
+                # 若只看 running,复用窗口内的在途检测会继续拿到**暂停前**的旧帧,
+                # 基于过期画面做判定(如误判血量低而喝药)。
+                if not self.running or self.paused or not self.graphics_capture:
                     return None
-                    
-                # 直接从正在运行的捕获器获取最新帧
-                return self.graphics_capture.get_latest_frame()
+
+                # 微缓存:窗口内直接复用快照(不再触发 C++ 取帧,同一 tick 内帧一致)
+                now = time.monotonic()
+                if (
+                    self._frame_snapshot is not None
+                    and (now - self._frame_snapshot_at) < self._snapshot_reuse_window
+                ):
+                    return self._frame_snapshot
+
+                view = self.graphics_capture.get_latest_frame()
+                if view is None:
+                    return None
+                # 锁内复制:覆写只可能发生在下一次(也必须拿本锁的)取帧调用里,
+                # 因此这次 memcpy 期间缓冲区不可能变化 —— 完全同步,非窗口缩小。
+                snapshot = np.array(view, copy=True)
+                # 置只读:窗口内多个消费者拿到的是**同一个**数组对象,任何一方原地
+                # 修改都会污染其他人的检测输入。当前没有消费者这么做,设成只读是为了
+                # 让将来违反契约的写法当场报错,而不是变成一次静默误判。
+                snapshot.setflags(write=False)
+                self._frame_snapshot = snapshot
+                self._frame_snapshot_at = now
+                return self._frame_snapshot
         except Exception as e:
             LOG_ERROR(f"[帧获取] 获取当前帧失败: {e}")
             return None

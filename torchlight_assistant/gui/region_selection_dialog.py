@@ -2,11 +2,38 @@
 # -*- coding: utf-8 -*-
 """区域选择对话框"""
 
+import math
+
 from PySide6.QtWidgets import QDialog, QApplication
 from PySide6.QtCore import Qt, QRect, Signal as QSignal
 from PySide6.QtGui import QPainter, QPen, QColor
-from torchlight_assistant.utils.debug_log import LOG_INFO, LOG
+from torchlight_assistant.utils.debug_log import LOG_INFO, LOG, LOG_ERROR
 
+
+def logical_rect_to_physical(x1, y1, x2, y2, dpr, max_w, max_h):
+    """把 Qt 逻辑像素矩形换算为物理像素矩形,并夹紧到帧边界。
+
+    ⚠️ DPI 缩放(如 125%/150%)下,Qt 鼠标事件坐标是**逻辑像素**,而检测坐标
+    (CooldownCoord / region_x1 / 圆心半径等)最终作用在 DXGI **物理像素**帧上。
+    不换算的话,非 100% 缩放下框选的区域会整体偏移/缩小 dpr 倍 —— 这就是
+    "选区明明框对了,检测却盯着别处"的根源。100% 缩放时 dpr=1,行为不变。
+
+    起点向下取整、终点向上取整(不是四舍五入):消费者把 x2 当**开区间**端点用
+    (``frame[y1:y2, x1:x2]``、``width = x2 - x1``),round 会让物理选区比用户拖出的
+    范围少 dpr 个像素并受"银行家舍入"影响 —— 150% 下 8 逻辑像素的冷却图标
+    会缩成 10 物理像素(实际 12),检测方块比图标小一圈。floor/ceil 下误差恒为
+    1 物理像素(与 100% 时的既有开闭区间误差一致),且永远只少不多、不会越界。
+    """
+    dpr = float(dpr) if dpr else 1.0
+    px1 = int(math.floor(min(x1, x2) * dpr))
+    py1 = int(math.floor(min(y1, y2) * dpr))
+    px2 = int(math.ceil(max(x1, x2) * dpr))
+    py2 = int(math.ceil(max(y1, y2) * dpr))
+    px1 = max(0, min(px1, int(max_w)))
+    px2 = max(0, min(px2, int(max_w)))
+    py1 = max(0, min(py1, int(max_h)))
+    py2 = max(0, min(py2, int(max_h)))
+    return px1, py1, px2, py2
 
 
 class RegionSelectionDialog(QDialog):
@@ -30,9 +57,37 @@ class RegionSelectionDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.setAttribute(Qt.WA_DeleteOnClose)
 
-        # 获取屏幕截图
+        # 获取屏幕截图(grabWindow 返回**物理像素**尺寸的 pixmap)
         screen = QApplication.primaryScreen()
         self.screenshot = screen.grabWindow(0)
+
+        # DPI 适配。换算比例**从截图自身推导**(物理宽 / 逻辑屏宽),不用
+        # screen.devicePixelRatio():这个比值就是"截图原始索引空间 ↔ 鼠标逻辑空间"
+        # 的确切比例,无论 Qt 版本是否已给 pixmap 附上 DPR 元数据都成立。
+        # 用途:鼠标事件是逻辑像素,而检测坐标最终作用于 DXGI **物理**帧
+        # (截图数组 _pixmap_to_array 也是物理尺寸),故发射/分析前必须换算。
+        # 实测 PySide6 6.9.1:grabWindow 返回的 pixmap 已自带 DPR,drawPixmap 显示本就正确;
+        # 这里再 set 一次是幂等的防御(万一某 Qt 版本返回裸 pixmap,可避免只画出左上角一块)。
+        logical_w = max(1, screen.geometry().width())
+        self._dpr = float(self.screenshot.width()) / float(logical_w)
+        if self._dpr <= 0:
+            self._dpr = 1.0
+        tagged_dpr = float(self.screenshot.devicePixelRatio() or 1.0)
+        self.screenshot.setDevicePixelRatio(self._dpr)
+        LOG_INFO(
+            f"[区域选择] DPR={self._dpr}, 物理截图 "
+            f"{self.screenshot.width()}x{self.screenshot.height()}, "
+            f"逻辑屏幕 {screen.geometry().width()}x{screen.geometry().height()}"
+        )
+        # 交叉校验:pixmap 自带的 DPR 与"物理宽/逻辑宽"必须一致。不一致说明
+        # grabWindow(0) 抓的不是这块屏(例如某平台返回整个虚拟桌面),此时
+        # _dpr 会被算成屏幕数量倍,所有落盘坐标整体放大 —— 这种失效是静默的,
+        # 必须留下日志才能在用户报"检测全偏"时定位。
+        if abs(self._dpr - tagged_dpr) > 0.01:
+            LOG_ERROR(
+                f"[区域选择] DPR 交叉校验不一致: 推导={self._dpr} vs pixmap 自带={tagged_dpr}"
+                f" —— 截图可能不是单屏,框选坐标可能整体偏移/缩放"
+            )
 
         self.start_pos = None
         self.end_pos = None
@@ -94,9 +149,18 @@ class RegionSelectionDialog(QDialog):
 
             if self.start_pos and self.end_pos:
                 rect = QRect(self.start_pos, self.end_pos).normalized()
-                x1, y1, x2, y2 = rect.left(), rect.top(), rect.right(), rect.bottom()
+                # 鼠标事件坐标是逻辑像素 → 换算为物理像素后再发射/分析:
+                # 消费者(技能冷却坐标/资源区域/OCR框)全部作用在 DXGI 物理帧上,
+                # 截图数组(_pixmap_to_array)也是物理尺寸。
+                x1, y1, x2, y2 = logical_rect_to_physical(
+                    rect.left(), rect.top(), rect.right(), rect.bottom(),
+                    self._dpr, self.screenshot.width(), self.screenshot.height(),
+                )
 
-                LOG(f"[调试] 区域选择完成: ({x1},{y1}) -> ({x2},{y2})")
+                LOG(
+                    f"[调试] 区域选择完成(物理像素, DPR={self._dpr}): "
+                    f"({x1},{y1}) -> ({x2},{y2})"
+                )
 
                 # 立即发送区域选择信号
                 self.region_selected.emit(x1, y1, x2, y2)

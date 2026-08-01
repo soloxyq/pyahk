@@ -4,6 +4,7 @@
 
 import cv2
 import numpy as np
+import threading
 import time
 import os
 from typing import Tuple, Optional, Dict, Any
@@ -85,15 +86,24 @@ class TesseractOcrManager:
 
 
 _global_tesseract_manager: Optional[TesseractOcrManager] = None
+_global_tesseract_lock = threading.Lock()
 
 def get_tesseract_ocr_manager(config: Optional[Dict[str, Any]] = None) -> TesseractOcrManager:
-    """获取全局实例"""
+    """获取全局实例(线程安全:调度线程与 GUI 线程可能并发首次获取)。
+
+    识别本身每次调用都是独立的 tesseract 子进程,天然可并发;
+    这里只需保证单例创建不竞态(check-then-create 双检锁)。
+    """
     global _global_tesseract_manager
     if _global_tesseract_manager is None:
-        _global_tesseract_manager = TesseractOcrManager(config)
+        with _global_tesseract_lock:
+            if _global_tesseract_manager is None:
+                _global_tesseract_manager = TesseractOcrManager(config)
     return _global_tesseract_manager
 
 def reset_tesseract_ocr_manager():
-    """重置全局实例"""
+    """重置全局实例(同样进锁:不进锁会与并发的 get 构成丢失更新 —— get 刚赋值就被置 None,
+    下一个 get 再建一个实例并再写一次 pytesseract 全局 cmd 路径)。"""
     global _global_tesseract_manager
-    _global_tesseract_manager = None
+    with _global_tesseract_lock:
+        _global_tesseract_manager = None
