@@ -118,7 +118,7 @@ global NormalQueue := []
 global LowQueue := []
 global QueueCounts := Map("emergency", 0, "high", 0, "normal", 0, "low", 0)
 global TotalQueueCount := 0
-global QueueStats := Map("emergency", 0, "high", 0, "normal", 0, "low", 0, "processed", 0, "dropped", 0)
+global QueueStats := Map("emergency", 0, "high", 0, "normal", 0, "low", 0, "processed", 0, "dropped", 0, "expired", 0)
 global MAX_PENDING_ATOMS := __MAX_PENDING_ATOMS__
 global LastOverloadNotifyAt := 0
 global PendingOverloadNotify := false
@@ -141,8 +141,7 @@ global ACTION_MOUSE_CLICK := "click"
 global ACTION_DELAY := "delay"
 global ACTION_NOTIFY := "notify"
 global ACTION_SEQ_RUNNING := "seqrun"
-global STALE_TICKS := __STALE_TICKS__
-global QueueTickCount := 0
+global STALE_MS := __STALE_MS__
 ; 真实 CachedStrSplit 的缓存(必须用真实现:此前的"每次新建数组"桩掩盖了
 ; ExecuteAction 原地修改共享缓存数组、重复执行同一序列逐轮丢键的 HIGH 级 BUG)
 global StringSplitCache := Map()
@@ -209,10 +208,9 @@ ResetAll() {
     global QueueStats, IsPaused, SpecialKeysPaused, RuntimeAcceptingActions
     global DelayUntil, DelayClearOthers, ExecLog, CurrentTick
     global PendingOverloadNotify, LastOverloadNotifyAt, OverloadNotifications
-    global MAX_PENDING_ATOMS, STALE_TICKS, QueueTickCount, StringSplitCache
-    QueueTickCount := 0
+    global MAX_PENDING_ATOMS, STALE_MS, StringSplitCache
     StringSplitCache := Map()
-    STALE_TICKS := __STALE_TICKS__
+    STALE_MS := __STALE_MS__
     PendingOverloadNotify := false
     LastOverloadNotifyAt := 0
     OverloadNotifications := []
@@ -223,7 +221,7 @@ ResetAll() {
     LowQueue := []
     QueueCounts := Map("emergency", 0, "high", 0, "normal", 0, "low", 0)
     TotalQueueCount := 0
-    QueueStats := Map("emergency", 0, "high", 0, "normal", 0, "low", 0, "processed", 0, "dropped", 0)
+    QueueStats := Map("emergency", 0, "high", 0, "normal", 0, "low", 0, "processed", 0, "dropped", 0, "expired", 0)
     IsPaused := false
     SpecialKeysPaused := false
     RuntimeAcceptingActions := true
@@ -271,7 +269,7 @@ _SCENARIOS = r"""
 ; =====================================================================
 ResetAll()
 MAX_PENDING_ATOMS := 1000000   ; 测的是排空速率本身,先让预算不参与
-STALE_TICKS := 1000000         ; 预加载 100 项后半段年龄必然 >32 tick,这里只测速率
+STALE_MS := 1000000            ; 只测排空速率,慢机上跑满 100 tick 也不许过期
 loop 100 {
     EnqueueAction(2, "press:k" A_Index)
 }
@@ -498,12 +496,16 @@ loop 100 {
 }
 ; 懒判定:没轮到它之前留在队列里(预算没超,占位无害)
 Record("s15_low_backlog_during", QueueCounts["low"])
-; 高优先级停产 → 下一 tick 轮到它,但已等 100 tick → 丢弃,不执行
+; 年龄是**墙钟毫秒**,上面的 tick 循环瞬间跑完 —— 测试用直接改时间戳模拟真实等待
+if (LowQueue.Length > 0) {
+    LowQueue[1].at := A_TickCount - 1000
+}
+; 高优先级停产 → 下一 tick 轮到它,但真实已等 1 秒 → 丢弃,不执行
 Tick()
 Record("s15_low_backlog", QueueCounts["low"])
 Record("s15_atoms", PendingAtomCount())
 Record("s15_total_atoms", TotalPendingAtoms())
-Record("s15_dropped", QueueStats["dropped"])
+Record("s15_dropped", QueueStats["expired"])
 Record("s15_low_executed", InStr(JoinLog(), "low_stale") ? 1 : 0)
 
 ; =====================================================================
@@ -534,7 +536,11 @@ loop 64 {
     EnqueueAction(1, "press:h" A_Index)
     Tick()
 }
-Tick()                               ; 高停产:16 个全部年龄 ≥64,应全部丢弃
+; 墙钟语义:循环瞬间完成,直接改时间戳模拟 16 个都真实等了 1 秒
+for i, item in LowQueue {
+    item.at := A_TickCount - 1000
+}
+Tick()                               ; 高停产:16 个全部过期,应全部丢弃且零执行
 staleExec := 0
 loop 16 {
     if (InStr(JoinLog(), "press:stale" A_Index "@")) {
@@ -543,7 +549,11 @@ loop 16 {
 }
 Record("s19_stale_executed", staleExec)
 Record("s19_low_backlog", QueueCounts["low"])
-Record("s19_dropped", QueueStats["dropped"])
+Record("s19_dropped", QueueStats["expired"])
+; 时间戳本身必须是"现在"(强行标老的场景都覆写了 at,这里验证入队时记录的原始值)
+ResetAll()
+EnqueueAction(2, "press:probe")
+Record("s19b_at_delta", A_TickCount - NormalQueue[1].at)
 
 ; =====================================================================
 ; S20 重复执行同一序列必须每轮完整(真实 CachedStrSplit 下的回归:
@@ -631,9 +641,13 @@ ResetAll()
 EnqueueAction(2, "sequence:c1,c2,c3,c4")
 Tick()                          ; 发出 c1,剩余变成 seqrun:
 Record("s17_head_after_first", NormalQueue.Length > 0 ? SubStr(NormalQueue[1].action, 1, 7) : "")
-loop 120 {                      ; 远超 STALE_TICKS,持续高优先级生产
+loop 120 {                      ; 持续高优先级生产,normal 的 seqrun 一直排不上
     EnqueueAction(1, "press:hp" A_Index)
     Tick()
+}
+; 把在飞 seqrun 强行标老:即便真实等了 1 秒,它也必须执行而不是被过期丢弃
+if (NormalQueue.Length > 0) {
+    NormalQueue[1].at := A_TickCount - 1000
 }
 seqrunLeft := 0
 for i, a in NormalQueue {
@@ -690,7 +704,7 @@ def _build_and_run():
 
     # 常量注入:桩里必须用**实现里的实际值**,抄一份会让常量变异测不出来
     parts = [_STUBS.replace("__MAX_PENDING_ATOMS__", str(MAX_PENDING_ATOMS))
-                   .replace("__STALE_TICKS__", str(STALE_TICKS))]
+                   .replace("__STALE_MS__", str(STALE_MS))]
     for name in _EXTRACT:
         parts.append(f"\n; ===== 原文抽取: {name} =====")
         parts.append(_extract_function(src_lines, name))
@@ -753,7 +767,7 @@ def _ahk_constant(name):
 
 TICK_MS = _ahk_constant("QUEUE_TICK_MS")
 MAX_PENDING_ATOMS = _ahk_constant("MAX_PENDING_ATOMS")
-STALE_TICKS = _ahk_constant("STALE_TICKS")
+STALE_MS = _ahk_constant("STALE_MS")
 # Windows 时钟粒度 ~15.6ms,请求 15ms 落在 1 个系统 tick 上 → 实测 ~15.8ms ≈ 63/s。
 # (请求 20ms 会被凑成 2 个系统 tick = 31.6ms,只有一半吞吐 —— 这正是本次改动的原因。)
 # 低于这个下限说明定时器被拖慢,队列会长期过载。
@@ -942,6 +956,9 @@ def test_queue_budget_constants_are_the_expected_values():
     assert TICK_MS == 15, (
         f"QUEUE_TICK_MS 变成了 {TICK_MS};注意 20 会被 Windows 凑成 31.6ms、吞吐腰斩"
     )
+    assert STALE_MS == 500, (
+        f"STALE_MS 变成了 {STALE_MS};这是'过期决策'的墙钟定义,改动请同步文档与诊断文案"
+    )
 
 
 def test_overload_backlog_stays_bounded():
@@ -998,7 +1015,7 @@ def test_overload_is_reported_not_silent():
         return
     d = _measure()
     assert int(d["s4_overload_notifications"]) >= 1, "过载被静默丢弃,没有任何上报"
-    assert d["s4_first_notification"].startswith("queue_overload:"), (
+    assert d["s4_first_notification"].startswith("queue_drop:overload="), (
         f"上报事件格式不对: {d['s4_first_notification']}"
     )
 
@@ -1117,7 +1134,7 @@ def test_global_budget_bounds_mixed_priority_backlog():
 
 def test_starved_low_priority_is_dropped_not_left_to_rot():
     """严格优先级下,持续的高优先级生产会让低优先级永远排不上。
-    既定语义不变(高优先级就是该赢),但等了 100 tick 的低优先级动作在终于
+    既定语义不变(高优先级就是该赢),但真实等了 1 秒的低优先级动作在终于
     轮到它时必须**被丢弃并上报**,而不是执行一个 1.5 秒前的决策。
     判定在出队时做(懒判定):没轮到之前留在队列里,预算没超、占位无害。"""
     if AHK_EXE is None:
@@ -1126,7 +1143,7 @@ def test_starved_low_priority_is_dropped_not_left_to_rot():
     d = _measure()
     assert int(d["s15_low_backlog_during"]) == 1, "懒判定下饥饿期间不该动它"
     assert int(d["s15_low_executed"]) == 0, (
-        "等了 100 tick(≈1.6 秒)的低优先级动作被执行了 —— 过期决策打了出去"
+        "真实等了 1 秒的低优先级动作被执行了 —— 过期决策打了出去"
     )
     assert int(d["s15_low_backlog"]) == 0
     assert int(d["s15_dropped"]) > 0, "发生了饥饿丢弃却没有任何上报"
@@ -1148,12 +1165,15 @@ def test_age_is_bound_to_items_not_queues():
     # (a) 清队列后新入队的动作正常执行,不继承旧年龄
     assert int(d["s18_fresh_executed"]) == 1, "清队列后的新动作继承了旧年龄被丢"
     assert int(d["s18_old_executed"]) == 0   # 旧动作已被 ClearQueue(-1) 清掉
-    # (b) 等了 ≥64 tick 的 16 个动作全部按自己的年龄被丢,零执行
+    # (b) 真实等了 1 秒的 16 个动作全部按自己的年龄被丢,零执行
     assert int(d["s19_stale_executed"]) == 0, (
-        f"{d['s19_stale_executed']} 个等了 64+ tick 的动作仍被执行 —— 年龄没绑在项上"
+        f"{d['s19_stale_executed']} 个真实等了 1 秒的动作仍被执行 —— 年龄没绑在项上"
     )
     assert int(d["s19_low_backlog"]) == 0
     assert int(d["s19_dropped"]) >= 16
+    # 入队时记录的时间戳必须就是"现在"(否则上面的年龄判定全部建立在假数字上)
+    delta = int(d["s19b_at_delta"])
+    assert 0 <= delta < 200, f"QueueItem 记录的入队时刻偏离当前 {delta}ms"
 
 
 def test_repeated_sequence_is_complete_every_run():

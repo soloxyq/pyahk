@@ -178,22 +178,52 @@ class MacroEngine:
         # AHK 子进程意外退出 → 强制停机 + 告警。由 AHKInputHandler 在命令发送失败时探测到进程
         # 已退出后,经 ahk_signal_bridge 切回 GUI 线程发布本事件(故本 handler 已在主线程)。
         event_bus.subscribe("ahk_process_died", self._on_ahk_process_died)
-        # AHK 队列过载(生产快于约 63 动作/秒的执行上限,已丢弃最旧的待发动作)
-        event_bus.subscribe("queue_overload", self._on_queue_overload)
+        # AHK 丢弃了待发动作(过载预算裁剪 / 等待过期),data 带两个累计计数
+        event_bus.subscribe("queue_drop", self._on_queue_drop)
 
-    def _on_queue_overload(self, key: str = ""):
-        """AHK 队列超过深度上限,丢弃了最旧的待发动作。
+    def _on_queue_drop(self, key: str = ""):
+        """AHK 丢弃了待发动作。data 形如 "overload=12,expired=3"(**累计**计数)。
 
-        必须让用户看得见:否则表现只是"某些技能偶尔不触发",用户会一直去调技能配置,
-        而真正的原因是入队速度超过了执行上限(实测约 63 动作/秒,见 hold_server_extended.ahk
-        中 QUEUE_TICK_MS 与 MAX_PENDING_ATOMS 的说明);也可能是动作在队列里等待过期
-        (真实年龄 ≥ STALE_TICKS)被丢弃。AHK 端已按每秒最多一条节流。
+        必须让用户看得见,而且**两种原因要分开诊断** —— 混成一条"入队速度超上限"
+        会把"只是配了个长 delay"的用户引去调根本没问题的技能生产率:
+        - overload:入队速度超过执行上限(实测约 63 动作/秒,见 hold_server_extended.ahk
+          中 QUEUE_TICK_MS 与 MAX_PENDING_ATOMS 的说明)→ 该调生产侧。
+        - expired:动作排队等待超过 STALE_MS(约 500ms,单调时钟)→ 常见原因是
+          序列里的长 delay 或低优先级被高优先级持续压制,与生产速率无关。
+        AHK 端已按每秒最多一条节流;这里按与上次的差值报告本轮新增。
         """
-        LOG_ERROR(
-            f"[队列过载] 入队速度超过执行上限(约 63 动作/秒),已丢弃最旧的待发动作 "
-            f"(累计丢弃 {key})。建议:减少同时启用的冷却检测技能、"
-            f"调大技能 Timer、或缩短逗号序列长度。"
-        )
+        counts = {}
+        for part in key.split(","):
+            if "=" in part:
+                k, v = part.split("=", 1)
+                try:
+                    counts[k.strip()] = int(v)
+                except ValueError:
+                    pass
+        if not counts:
+            LOG_ERROR(f"[队列丢弃] AHK 报告丢弃了待发动作({key})")
+            return
+
+        over = counts.get("overload", 0)
+        expired = counts.get("expired", 0)
+        last_over, last_expired = getattr(self, "_last_queue_drop_counts", (0, 0))
+        self._last_queue_drop_counts = (over, expired)
+
+        msgs = []
+        if over > last_over:
+            msgs.append(
+                f"过载丢弃 +{over - last_over}(入队速度超过约 63 动作/秒的执行上限;"
+                f"建议减少同时启用的冷却检测技能、调大技能 Timer 或缩短逗号序列)"
+            )
+        if expired > last_expired:
+            msgs.append(
+                f"过期丢弃 +{expired - last_expired}(动作排队等待超过约 500ms;"
+                f"常见原因:序列里的长 delay 或低优先级被高优先级持续压制,与生产速率无关)"
+            )
+        if not msgs:
+            # 计数没有增长却收到通知(如 AHK 重启后计数回卷),报累计值兜底
+            msgs.append(f"累计 过载 {over} / 过期 {expired}")
+        LOG_ERROR("[队列丢弃] " + ";".join(msgs))
 
     def _setup_primary_hotkey(self):
         """设置永久根热键 (F8/F7/F9)

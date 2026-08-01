@@ -119,7 +119,8 @@ global QueueStats := Map(
     "normal", 0,
     "low", 0,
     "processed", 0,
-    "dropped", 0
+    "dropped", 0,     ; 过载丢弃(入队速度超过执行上限,预算裁剪)
+    "expired", 0      ; 过期丢弃(排队等待超过 STALE_MS,出队时判定)
 )
 
 ; ===============================================================================
@@ -150,16 +151,17 @@ global MAX_PENDING_ATOMS := 16
 ; 高优先级持续生产时,低优先级那些项会一直排不上,某天高优先级一空就打出几十秒前的决策。
 ; 预算约束不了这个(总量本来就没超)。
 ;
-; 年龄必须**绑在每个队列项上**(入队时记录 QueueTickCount),不能按队列计数:
+; 年龄必须**绑在每个队列项上**(入队时记录时刻),不能按队列计数:
 ; 每队列一个计数器有两个实测到的错误 ——
 ;   (a) 清队列不重置计数,PAUSED 后新入队的动作"继承"旧年龄,等 1 个 tick 就被丢;
 ;   (b) 计数只描述队首,队首被丢后重新从 0 数,排在后面、等了同样久的动作照样被执行。
-; 判定在**出队时**做:取到的项年龄 ≥ STALE_TICKS 且可丢 → 丢弃换下一个。
-; 过期决策没有价值,执行一个 500ms 前的决策比不执行更糟。~32 tick × 15.8ms ≈ 500ms。
-global STALE_TICKS := 32
-; 全局 tick 计数:ProcessQueue 每次触发 +1(含 PAUSED/delay 期间 —— 真实时间照样流逝,
-; 年龄语义是"真实等待了多久",不是"被跳过了几次")
-global QueueTickCount := 0
+; 判定在**出队时**做:取到的项年龄 ≥ STALE_MS 且可丢 → 丢弃换下一个。
+; 过期决策没有价值,执行一个 500ms 前的决策比不执行更糟。
+;
+; 时钟用 A_TickCount(**单调毫秒**,GetTickCount64,含系统休眠时间),不用"调度 tick 数":
+; tick 只在定时器成功触发时才走,系统休眠或 AHK 线程被长时间阻塞后恢复,
+; 按 tick 数算,真实等了几秒的动作仍会被当成"年轻"照常执行 —— 契约是真实等待时间。
+global STALE_MS := 500
 
 ; 已经发出过至少一个原子的序列(剩余部分被放回队首)。与未开始的 sequence: 区分开:
 ; 未开始的可以整条丢(原子性);已经开打的**不能**丢 —— 那是连招打一半停手。
@@ -207,10 +209,7 @@ ProcessQueue() {
     global DelayUntil, DelayClearOthers, TotalQueueCount, QueueCounts
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
     global QueueStats, IsPaused, SpecialKeysPaused
-    global PendingOverloadNotify, QueueTickCount, STALE_TICKS
-
-    ; 全局 tick 计数无条件递增(含 PAUSED/delay):队列项年龄的语义是"真实等了多久"
-    QueueTickCount := QueueTickCount + 1
+    global PendingOverloadNotify, STALE_MS
 
     ; 过载通知:丢弃发生在 WM_COPYDATA 上下文,通知推迟到这里(定时器上下文)发出。
     ; 放在快速返回**之前** —— 队列刚被清空(如 PAUSED)时这条通知也不该丢。
@@ -306,11 +305,13 @@ ProcessQueue() {
         return  ; 非安全动作在 SpecialKeysPaused 期间被过滤
     }
 
-    ; 🚀 正常模式:按优先级出队。取到的项若已过期(真实年龄 ≥ STALE_TICKS)且可丢,
+    ; 🚀 正常模式:按优先级出队。取到的项若已过期(真实等待 ≥ STALE_MS)且可丢,
     ; 直接丢弃换下一个 —— 执行一个 500ms 前的决策(如那时该放的技能)比不执行更糟。
     ; 年龄绑在项上,所以"排在被丢队首后面、等了同样久"的项也会被逐个判掉,
     ; 不会像旧的每队列计数那样重新从 0 数。一个 tick 内仍最多**执行**一个动作;
     ; 丢弃只是扔掉字符串,不发键,连丢多个不影响节奏。
+    ; ⚠️ 过期丢弃计入 expired(不是 dropped):两者原因不同,诊断建议也不同,
+    ; 混在一起会让"只是配了个长 delay"的用户收到"入队速度超上限"的错误诊断。
     loop 64 {   ; 防御上界(预算约束下积压有限,正常一次最多丢十几个)
         name := NextToExecuteQueueName()
         if (name = "") {
@@ -319,8 +320,8 @@ ProcessQueue() {
         q := QueueByName(name)
         item := q.RemoveAt(1)
         DecrementQueueCount(name)
-        if (QueueTickCount - item.tick >= STALE_TICKS && IsDroppableAction(item.action)) {
-            QueueStats["dropped"] := QueueStats["dropped"] + 1
+        if (A_TickCount - item.at >= STALE_MS && IsDroppableAction(item.action)) {
+            QueueStats["expired"] := QueueStats["expired"] + 1
             PendingOverloadNotify := true
             continue   ; 过期且可丢 → 丢弃,看下一个
         }
@@ -1078,11 +1079,10 @@ PriorityOfQueueName(name) {
     return 0
 }
 
-; 队列项:动作字符串 + 入队时刻。年龄 = QueueTickCount - tick,绑在项上,
+; 队列项:动作字符串 + 入队时刻(单调毫秒)。年龄 = A_TickCount - at,绑在项上,
 ; 清队列/丢队首都不会让别的项"继承"或"清零"年龄。
 QueueItem(action) {
-    global QueueTickCount
-    return {action: action, tick: QueueTickCount}
+    return {action: action, at: A_TickCount}
 }
 
 ; 下一个要执行的动作在哪条非紧急队列的队首(严格优先级:high → normal → low)。
@@ -1165,20 +1165,23 @@ DropOldestDroppableFrom(queue, queueName, protectTail, protectHead := false) {
     return false
 }
 
-; 过载可见化:静默丢弃会让用户以为"技能没触发是配置问题"。节流到每秒最多一条。
+; 丢弃可见化:静默丢弃会让用户以为"技能没触发是配置问题"。节流到每秒最多一条。
+; 事件带两个**累计**计数:overload(预算裁剪)与 expired(等待过期)。
+; 原因必须分开:混成一条"入队速度超上限"会让"只是配了个长 delay"的用户
+; 收到错误诊断,去调根本没问题的技能生产率。
 NotifyQueueOverload() {
     global LastOverloadNotifyAt, QueueStats, PendingOverloadNotify
 
     now := A_TickCount
     if (now - LastOverloadNotifyAt < 1000) {
         ; 被节流:**保留**待发标志,让下一 tick 继续尝试。
-        ; (若在这里把标志清掉,一段"上一条通知刚发过 500ms"的短促过载就会
+        ; (若在这里把标志清掉,一段"上一条通知刚发过 500ms"的短促丢弃就会
         ;  永远无人知晓 —— 丢弃发生了,却一条日志都没有。)
         return
     }
     LastOverloadNotifyAt := now
     PendingOverloadNotify := false
-    SendEventToPython("queue_overload:" QueueStats["dropped"])
+    SendEventToPython("queue_drop:overload=" QueueStats["dropped"] ",expired=" QueueStats["expired"])
 }
 
 ; 判断是否为紧急动作（HP/MP等生存技能）
@@ -1428,7 +1431,7 @@ EnforceQueueBudget(pushedName) {
 PushFrontAction(priority, action) {
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
 
-    ; tick 取当前值:seqrun 正在执行中,不参与年龄丢弃(不可丢),取值只为字段完整
+    ; at 取当前时刻:seqrun 正在执行中,不参与年龄丢弃(不可丢),取值只为字段完整
     switch priority {
         case 0:
             EmergencyQueue.InsertAt(1, QueueItem(action))
@@ -2140,13 +2143,14 @@ SendWMCopyDataToPython(hwnd, eventData) {
 
 SendStatsToPython() {
     ; 🚀 发送统计信息
-    stats := Format("stats:e={},h={},n={},l={},p={},d={}",
+    stats := Format("stats:e={},h={},n={},l={},p={},d={},x={}",
         QueueStats["emergency"],
         QueueStats["high"],
         QueueStats["normal"],
         QueueStats["low"],
         QueueStats["processed"],
-        QueueStats["dropped"]
+        QueueStats["dropped"],
+        QueueStats["expired"]
     )
     SendEventToPython(stats)
 }
