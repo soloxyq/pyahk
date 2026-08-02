@@ -1907,6 +1907,15 @@ IsMouseButtonKey(key) {
     return (lower = "lbutton") || (lower = "rbutton") || (lower = "left") || (lower = "right")
 }
 
+; 滚轮"键":没有 up 边沿(实测 "$WheelUp up" 可注册但永远不触发),也没有键盘
+; 自动重复 —— 每个刻度都是独立的用户动作。intercept 去重与 up 配对都必须跳过它,
+; 否则 up 永远不来,连续滚动会被 1.1s 兜底窗口吞掉(BOSS 键/原地键配滚轮时)。
+IsWheelKey(key) {
+    lower := CachedStrLower(key)
+    return (lower = "wheelup") || (lower = "wheeldown")
+        || (lower = "wheelleft") || (lower = "wheelright")
+}
+
 ; ExecuteSequence 已废弃: sequence 现在在 EnqueueAction 入口规范化为单个队列项,
 ; 由 ExecuteAction 每 tick 推进一个原子;序列内 delay 走按队列 notBefore,无同步执行
 
@@ -1938,8 +1947,11 @@ RegisterHook(key, mode) {
         switch mode {
             case "intercept":
                 Hotkey("$" key, (*) => HandleInterceptKey(key), "On")
-                ; up 配对:提供自动重复去重的复位边沿,并拦掉孤儿 up(down 已被吞)
-                Hotkey("$" key " up", (*) => HandleInterceptKeyUp(key), "On")
+                ; up 配对:提供自动重复去重的复位边沿,并拦掉孤儿 up(down 已被吞)。
+                ; 滚轮键跳过:up 变体注册不报错但永远不触发(实测),配了也没意义。
+                if (!IsWheelKey(key)) {
+                    Hotkey("$" key " up", (*) => HandleInterceptKeyUp(key), "On")
+                }
 
             case "priority":
                 Hotkey("$" key, (*) => HandleManagedKey(key), "On")
@@ -1982,7 +1994,9 @@ UnregisterHook(key) {
         switch mode {
             case "intercept":
                 Hotkey("$" key, "Off")
-                Hotkey("$" key " up", "Off")
+                if (!IsWheelKey(key)) {
+                    Hotkey("$" key " up", "Off")
+                }
 
             case "priority", "block":
                 Hotkey("$" key, "Off")
@@ -2068,13 +2082,16 @@ HandleInterceptKey(key) {
     ; 键盘自动重复去重:up 之前的重复 down 只承认第一次(special 键在
     ; HandleSpecialKeyDown 有同型去重;intercept 此前没配 up 边沿,无法判断)。
     ; 窗口滚动刷新:按住期间每次重复推进时间戳;若 up 边沿丢失,1.1 秒后自愈。
-    now := MonotonicMs()
-    if (InterceptKeysPressed.Has(key)
-        && now - InterceptKeysPressed[key] < INTERCEPT_REPEAT_WINDOW_MS) {
+    ; 滚轮键跳过:无 up 边沿也无自动重复,参与去重只会吞掉连续滚动(见 IsWheelKey)。
+    if (!IsWheelKey(key)) {
+        now := MonotonicMs()
+        if (InterceptKeysPressed.Has(key)
+            && now - InterceptKeysPressed[key] < INTERCEPT_REPEAT_WINDOW_MS) {
+            InterceptKeysPressed[key] := now
+            return
+        }
         InterceptKeysPressed[key] := now
-        return
     }
-    InterceptKeysPressed[key] := now
 
     ; 所有拦截按键都完全拦截，只通知Python
     ; 人手热键是 F8/Z/F7/F9 的唯一通路,不能被 stats/状态事件的共享退避门丢掉。

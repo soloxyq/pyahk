@@ -94,6 +94,9 @@ MonotonicMs() {
     global FakeNow
     return FakeNow
 }
+CachedStrLower(s) {
+    return StrLower(s)
+}
 SendWMCopyDataToPython(hwnd, eventData) {
     global SendSucceeds, SendAttempts, SentEvents
     SendAttempts += 1
@@ -278,6 +281,16 @@ FakeNow := 150
 HandleInterceptKey("z")
 Expect("s11-repress-after-reregister", SendAttempts, 2)
 
+; 滚轮 intercept 键(如 BOSS 键配 WheelUp):up 变体永远不触发(实测),
+; 且滚轮无键盘自动重复 —— 每个刻度都必须发出,不参与去重。
+ResetAll()
+SendSucceeds := true
+HandleInterceptKey("WheelUp")
+FakeNow := 130                       ; 快速连滚两格,间隔 30ms
+HandleInterceptKey("WheelUp")
+Expect("s12-wheel-notches-both-fire", SendAttempts, 2)
+Expect("s12-wheel-not-tracked", InterceptKeysPressed.Count, 0)
+
 report := "CHECKS=" Checks "`nRESULT=" (Failures.Length ? "FAIL" : "OK") "`n"
 for index, failure in Failures {
     report .= "FAIL " failure "`n"
@@ -299,6 +312,7 @@ def _build_harness():
         _extract_function(lines, "ClearAllConfigurableHooks"),
         _extract_function(lines, "HandleInterceptKey"),
         _extract_function(lines, "HandleInterceptKeyUp"),
+        _extract_function(lines, "IsWheelKey"),
     ]
     return "\n".join([_STUBS, _SCENARIOS, *functions])
 
