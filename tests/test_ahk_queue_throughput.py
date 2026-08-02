@@ -83,6 +83,9 @@ _EXTRACT = [
     "PriorityOfQueueName",
     "CachedStrSplit",
     "MonotonicMs",
+    "PushFrontWait",
+    "PushFrontItem",
+    "SendStatsToPython",
 ]
 
 
@@ -127,8 +130,7 @@ global OverloadNotifications := []
 global IsPaused := false
 global SpecialKeysPaused := false
 global RuntimeAcceptingActions := true
-global DelayUntil := 0
-global DelayClearOthers := false
+global ManagedDelayUntil := 0
 global ActiveManagedKeys := Map()
 global SkillHeldKeys := Map()
 global SkillHeldOrder := []
@@ -183,7 +185,7 @@ ClearManagedKeyMark(key) {
 }
 ExecuteMouseClick(data) {
 }
-SendEventToPython(data) {
+SendEventToPython(data, bypassBackoff := false, armBackoff := true) {
     global OverloadNotifications
     OverloadNotifications.Push(data)
 }
@@ -207,7 +209,7 @@ Tick() {
 ResetAll() {
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue, QueueCounts, TotalQueueCount
     global QueueStats, IsPaused, SpecialKeysPaused, RuntimeAcceptingActions
-    global DelayUntil, DelayClearOthers, ExecLog, CurrentTick
+    global ManagedDelayUntil, ExecLog, CurrentTick
     global PendingOverloadNotify, LastOverloadNotifyAt, OverloadNotifications
     global MAX_PENDING_ATOMS, STALE_MS, StringSplitCache
     StringSplitCache := Map()
@@ -226,8 +228,7 @@ ResetAll() {
     IsPaused := false
     SpecialKeysPaused := false
     RuntimeAcceptingActions := true
-    DelayUntil := 0
-    DelayClearOthers := false
+    ManagedDelayUntil := 0
     ExecLog := []
     CurrentTick := 0
 }
@@ -306,18 +307,97 @@ loop 5 {
 Record("s2_exec_order", JoinLog())
 
 ; =====================================================================
-; S3 delay 是**全局**队头阻塞:低优先级的 delay 会压住高优先级动作
+; S3 按队列延时:低优先级的 delay 只挡自己的队列,高优先级照常执行
+;     (裸 delay:N 转成本队列等待哨兵,到期出队即完成,不重置延时)
 ; =====================================================================
 ResetAll()
-EnqueueAction(3, "delay:100")        ; low 优先级的一个 delay
-Tick()                                ; 取出 delay,设定全局 DelayUntil
+EnqueueAction(3, "delay:100")        ; low 优先级的一个裸 delay
+Tick()                                ; 取出 delay → low 队首变等待哨兵(notBefore=+100)
 EnqueueAction(1, "press:high_skill") ; 之后到达的 high 优先级技能
-Tick()                                ; 仍在 delay 窗口内 → 被压住
-Record("s3_exec_during_delay", JoinLog())
-Record("s3_high_blocked_by_low_delay", ExecLog.Length = 0 ? 1 : 0)
-Sleep(120)                            ; delay 过期
+Tick()                                ; low 在等,high **照常执行**
+Record("s3_high_ran_during_low_delay", InStr(JoinLog(), "press:high_skill@") ? 1 : 0)
+; low 自己仍被挡住
+EnqueueAction(3, "press:low_after")
+Tick()
+Record("s3_low_blocked_while_waiting", InStr(JoinLog(), "press:low_after@") ? 1 : 0)
+Record("s3_low_sentinel_present", LowQueue.Length > 0 && InStr(LowQueue[1].action, "seqrun:") = 1 ? 1 : 0)
+; 到期(测试拨快时钟):哨兵出队消化一个 tick,随后 low 恢复执行
+if (LowQueue.Length > 0) {
+    LowQueue[1].notBefore := MonotonicMs() - 1
+}
+Tick()
 Tick()
 Record("s3_after_delay", JoinLog())
+Record("s3_low_after_ran", InStr(JoinLog(), "press:low_after@") ? 1 : 0)
+; 哨兵不得重置延时:到期消化后队列里不应再有 seqrun 残留
+s3SentinelLeft := 0
+for i, it in LowQueue {
+    if (InStr(it.action, "seqrun:") = 1) {
+        s3SentinelLeft += 1
+    }
+}
+Record("s3_sentinel_gone", s3SentinelLeft = 0 ? 1 : 0)
+
+; =====================================================================
+; S22 尾部 delay 不消失:"q,delay100" 发完 q 后必须留空哨兵占住队首
+;     (否则序列末尾的间隔语义直接蒸发,后续动作提前打出)
+; =====================================================================
+ResetAll()
+EnqueueAction(2, "sequence:q,delay100")
+EnqueueAction(2, "press:w")           ; 排在序列后面,应等满间隔再执行
+Tick()                                ; 发 q
+Tick()                                ; delay 原子 → 空哨兵占队首(notBefore=+100)
+Record("s22_head_is_sentinel", NormalQueue.Length > 0 && InStr(NormalQueue[1].action, "seqrun:") = 1 ? 1 : 0)
+Record("s22_sentinel_wait_ms", NormalQueue.Length > 0 ? NormalQueue[1].notBefore - MonotonicMs() : -99999)
+; 等待期间探**两个** tick:只探一个的话,"忽略 notBefore 提前消化哨兵"的回归
+; 恰好用哨兵的空转吃掉那个 tick,w 看起来仍被挡住 —— 两个 tick 就会露馅
+Tick()
+Tick()
+Record("s22_w_blocked_during_wait", InStr(JoinLog(), "press:w@") ? 1 : 0)
+NormalQueue[1].notBefore := MonotonicMs() - 1
+Tick()                                ; 哨兵出队消化
+Tick()                                ; w 执行
+Record("s22_w_ran_after", InStr(JoinLog(), "press:w@") ? 1 : 0)
+s22SentinelLeft := 0
+for i, it in NormalQueue {
+    if (InStr(it.action, "seqrun:") = 1) {
+        s22SentinelLeft += 1
+    }
+}
+Record("s22_sentinel_gone", s22SentinelLeft = 0 ? 1 : 0)
+
+; =====================================================================
+; S23 序列中段 delay:挡自己队列的同时,别的队列照常;到期后按序完成
+; =====================================================================
+ResetAll()
+EnqueueAction(2, "sequence:q,delay100,w")
+Tick()                                ; 发 q
+Tick()                                ; delay → seqrun:press:w 带 notBefore
+EnqueueAction(1, "press:hi")
+Tick()                                ; normal 在等,high 执行
+Record("s23_high_ran_during_normal_delay", InStr(JoinLog(), "press:hi@") ? 1 : 0)
+Record("s23_w_not_yet", InStr(JoinLog(), "press:w@") ? 0 : 1)
+if (NormalQueue.Length > 0) {
+    NormalQueue[1].notBefore := MonotonicMs() - 1
+}
+Tick()                                ; seqrun:press:w 到期 → 发 w
+Record("s23_exec", JoinLog())
+
+; =====================================================================
+; S25 delay_clear 保持全局独占(管理键专利):窗口内清空非紧急队列,
+;     只放行 HP/MP 救命药剂
+; =====================================================================
+ResetAll()
+EnqueueAction(2, "press:will_be_cleared")
+EnqueueAction(0, "delay_clear:100")
+EnqueueAction(0, "press:hp")          ; 排在 delay_clear 后面的救命药剂
+EnqueueAction(1, "press:hi_blocked")
+Tick()                                ; emergency 取出 delay_clear → 设 ManagedDelayUntil
+Record("s25_managed_delay_active", ManagedDelayUntil > 0 ? 1 : 0)
+Tick()                                ; 窗口内:清空非紧急 + 放行 press:hp
+Record("s25_nonemergency_cleared", QueueCounts["normal"] = 0 && QueueCounts["high"] = 0 ? 1 : 0)
+Record("s25_hp_ran", InStr(JoinLog(), "press:hp@") ? 1 : 0)
+Record("s25_blocked_never_ran", (InStr(JoinLog(), "hi_blocked") || InStr(JoinLog(), "will_be_cleared")) ? 0 : 1)
 
 ; =====================================================================
 ; S4 过载:生产速率 = 消费速率的 2 倍(每 tick 入队 2 个,只执行 1 个)
@@ -695,6 +775,27 @@ loop 50 {
 Tick()
 Record("s6_exec_in_one_tick", ExecLog.Length)
 
+; =====================================================================
+; S26 stats 推送:e/h/n/l 必须是**实时**队列深度(累计入队数只涨不落,
+;     看不出当前积压);p/d/x 是累计 处理/过载丢弃/等待过期
+; =====================================================================
+ResetAll()
+EnqueueAction(0, "press:hp")
+loop 3 {
+    EnqueueAction(2, "press:s" A_Index)
+}
+EnqueueAction(1, "press:hs")
+Tick()                               ; hp(emergency 优先)
+Tick()                               ; hs(high)
+Tick()                               ; s1(normal)
+SendStatsToPython()
+Record("s26_stats_payload", OverloadNotifications.Length > 0 ? OverloadNotifications[OverloadNotifications.Length] : "(none)")
+Record("s26_depth_e", QueueCounts["emergency"])
+Record("s26_depth_h", QueueCounts["high"])
+Record("s26_depth_n", QueueCounts["normal"])
+Record("s26_depth_l", QueueCounts["low"])
+Record("s26_processed", QueueStats["processed"])
+
 ; ---- 输出 ----
 out := ""
 for k, v in Results {
@@ -927,21 +1028,108 @@ def test_sequence_is_one_decision_but_many_atoms():
     print(f"  [实测] 'q,w,e' = 1 个决策 / 3 个原子 → 至少 {3 * TICK_MS}ms 才能发完")
 
 
-def test_low_priority_delay_blocks_high_priority():
-    """已知的队头阻塞:DelayUntil 是**全局**的,一个低优先级 delay 会把
-    之后的高优先级技能一起压住(紧急队列除外)。优先级在 delay 面前不成立。"""
+def test_low_priority_delay_no_longer_blocks_high_priority():
+    """按队列延时(修复了旧的全局 DelayUntil 队头阻塞):low 的 delay 只挡
+    low 自己的队列,high 技能照常执行 —— 优先级在 delay 面前恢复成立。
+    裸 delay:N 转成本队列等待哨兵:到期出队即完成,不重置延时。"""
     if AHK_EXE is None:
         print("SKIP: 未找到 AutoHotkey v2")
         return
     d = _measure()
-    assert d["s3_high_blocked_by_low_delay"] == "1", (
-        f"delay 期间执行了动作: {d['s3_exec_during_delay']}"
+    assert d["s3_high_ran_during_low_delay"] == "1", (
+        "low 的 delay 又把 high 压住了 —— 回归到全局队头阻塞"
     )
-    # 只是被推迟,不是被丢弃 —— delay 过期后仍会执行
-    assert d["s3_after_delay"].startswith("press:high_skill@"), (
-        f"delay 过期后 high 动作没有恢复执行: {d['s3_after_delay']}"
+    assert d["s3_low_blocked_while_waiting"] == "0", (
+        "delay 没有挡住自己所在的 low 队列"
     )
-    print("  [实测] low 优先级的 delay:100 会阻塞 high 优先级技能约 100ms")
+    assert d["s3_low_sentinel_present"] == "1", "等待哨兵没有占住 low 队首"
+    assert d["s3_low_after_ran"] == "1", (
+        f"delay 到期后 low 动作没有恢复执行: {d['s3_after_delay']}"
+    )
+    assert d["s3_sentinel_gone"] == "1", "等待哨兵到期后重置了延时(残留在队列里)"
+    print("  [实测] low 的 delay:100 只挡 low 队列,high 技能照常执行")
+
+
+def test_trailing_delay_keeps_a_wait_sentinel():
+    """尾部 delay 不消失:"q,delay100" 发完 q 后留**空 seqrun: 哨兵**占住队首,
+    排在后面的动作等满间隔才执行;哨兵到期出队即完成,不残留、不重置。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    assert d["s22_head_is_sentinel"] == "1", "尾部 delay 没有留下等待哨兵(延时蒸发)"
+    wait = int(d["s22_sentinel_wait_ms"])
+    assert 0 < wait <= 100, f"哨兵等待时长 {wait}ms,应在 (0,100] 内"
+    assert d["s22_w_blocked_during_wait"] == "0", "等待期间后续动作提前打出"
+    assert d["s22_w_ran_after"] == "1", "到期后后续动作没有执行"
+    assert d["s22_sentinel_gone"] == "1", "哨兵到期后没有消失"
+
+
+def test_sequence_delay_blocks_only_its_own_queue():
+    """序列中段 delay:挡自己队列的同时,别的队列照常执行;
+    到期后序列按序走完(因果完整)。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    assert d["s23_high_ran_during_normal_delay"] == "1", (
+        "normal 序列的 delay 把 high 队列也压住了"
+    )
+    assert d["s23_w_not_yet"] == "1", "delay 未到期,序列后半段就打出去了"
+    order = [e.split("@")[0] for e in d["s23_exec"].split(",") if e]
+    assert order == ["press:q", "press:hi", "press:w"], (
+        f"执行顺序不对(应 q → hi(插队) → w): {order}"
+    )
+
+
+def test_stats_push_reports_realtime_depths_not_cumulative():
+    """队列观测(P3):stats 载荷的 e/h/n/l 必须是**实时**深度(QueueCounts),
+    不是累计入队数(QueueStats 的 per-priority 计数只涨不落,OSD 上看不出
+    "现在积压多少")。p/d/x 是累计 处理/过载丢弃/等待过期。
+    场景里执行过 3 个动作后两种口径必然不同:实时 (0,0,2,0) vs 累计 (1,1,3,0)。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    payload = d["s26_stats_payload"]
+    m = re.fullmatch(
+        r"stats:e=(\d+),h=(\d+),n=(\d+),l=(\d+),p=(\d+),d=(\d+),x=(\d+)", payload
+    )
+    assert m, f"stats 载荷格式不对: {payload}"
+    got = tuple(int(g) for g in m.groups())
+    want = (
+        int(d["s26_depth_e"]),
+        int(d["s26_depth_h"]),
+        int(d["s26_depth_n"]),
+        int(d["s26_depth_l"]),
+        int(d["s26_processed"]),
+        0,
+        0,
+    )
+    assert got == want, f"stats 载荷 {got} 与队列真实状态 {want} 不符"
+    assert got[:4] == (0, 0, 2, 0), (
+        f"实时深度应为 (0,0,2,0),载荷给的是 {got[:4]} —— e/h/n/l 用了累计入队数?"
+    )
+    # 推送必须由 AHK 端定时器驱动(每秒一次,不加轮询命令)
+    with open(AHK_SCRIPT, "r", encoding="utf-8") as fp:
+        src = fp.read()
+    # ^ 行首锚定:被注释掉的 "; SetTimer(...)" 不能算数
+    assert re.search(r"^SetTimer\(SendStatsToPython,\s*1000\)", src, re.M), (
+        "缺少每秒一次的 stats 推送定时器 —— 观测通道又变回死代码"
+    )
+
+
+def test_managed_delay_clear_remains_global_exclusive():
+    """delay_clear 保持全局独占(管理键专利,故意不改):窗口内清空非紧急队列,
+    只放行 HP/MP 救命药剂 —— E 键闪避/强力技的独占语义。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    assert d["s25_managed_delay_active"] == "1", "delay_clear 没有设置管理键独占窗口"
+    assert d["s25_nonemergency_cleared"] == "1", "独占窗口没有清空非紧急队列"
+    assert d["s25_hp_ran"] == "1", "独占窗口把救命药剂也压住了"
+    assert d["s25_blocked_never_ran"] == "1", "被清掉的动作又被执行了"
 
 
 def test_emergency_still_preempts_deep_backlog():

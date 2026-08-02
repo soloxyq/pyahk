@@ -21,7 +21,7 @@ GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
 │         ▼                       ▼                │    │                │
 │  HSV 模板匹配 ──► SkillManager / ResourceManager │    │ 5 种 Hook 模式 │
 │                              │                  │    │ 4 级优先队列   │
-│                              ▼                  │    │ 异步 DelayUntil│
+│                              ▼                  │    │ 队列 notBefore │
 │                        MacroEngine (状态机)     │    │ SendInput      │
 │                              │                  │    │                │
 │         ┌───── EventBus(单例,递归保护) ─┐       │    │                │
@@ -77,7 +77,7 @@ GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
 |------|------|
 | 强制移动键(默认 A)按住时,队列按键默认替换为 `f`,但 `force_move_passthrough_keys` 白名单键与 HP/MP 紧急药剂正常发送 | **特性**:边跑边互动(D4/PoE2 拾取/对话技巧),同时不阻止位移和救命药剂 |
 | 管理键(如 E)按下时清空非紧急队列 | **特性**:保证管理键独占执行(E 通常映射闪避/强力技) |
-| 特殊键(如 Space)激活时丢弃非紧急入队,但 HP/MP 紧急药剂与 `release:*` 释放动作仍然放行 | **特性**:闪避期间不发新技能,但救命药剂照常,且 TriggerMode=2 按住模式的 release 不会被 Space/managed delay 卡死 |
+| 特殊键(如 Space)激活时丢弃非紧急入队,但 HP/MP 紧急药剂与 `release:*` 释放动作仍然放行;松开后可由 `special_key_resume_delay_ms` 延迟自动输入恢复 | **特性**:物理 key-up/`special_key_up` 始终立即透传/回发,只延迟 `special_key_pause:end` 与宏/队列/持键恢复;闪避期间救命药剂照常,release 不会被卡死 |
 | PAUSED 状态完全停 HP/MP 检测 + 清所有队列 | **特性**:用户主动 Z 暂停 = 完全停下 |
 | F8/F7/F9 不在 RegisteredHooks 记录中 | **特性**:三个永久根热键,清理动态 Hook 时不碰它们 |
 | 同一个 key 不能同时出现在 special_keys / managed_keys | **特性**:跨类冲突会让后注册的 Hotkey 覆盖前者,Python 注册时检测重复并 LOG_ERROR 跳过后者 |
@@ -85,6 +85,7 @@ GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
 | 等待超过 500ms 的动作被丢弃(而不是迟发) | **特性**:年龄绑在每个队列项上(入队记录 `MonotonicMs()` 单调毫秒 = GetTickCount64,含系统休眠;**不是** `A_TickCount`,那是 32 位、~49.7 天回绕),**出队时**判定:真实等待 ≥ `STALE_MS`(500ms)且可丢 → 丢弃并按 `expired` 计数上报(与过载 `overload` 分开诊断)。过期决策没有价值,执行一个 500ms 前的决策比不执行更糟。不可丢动作(release/cleanup/seqrun)再老也照常执行 |
 | `sequence:` 不再展开成多个队列项 | **特性**:一次序列是**一个决策**,原子有因果关系。展开后会被后续入队从中间裁断(实测 20 步序列再来一个普通动作,队头就从 k1 变成 k6)。作为单项则要么整条被丢、要么按序走完;开打后标记 `seqrun:` 进入不可丢集合,且**每条队列队首的 seqrun 豁免预算**(被抢占的在飞序列不该把预算顶爆) |
 | `QUEUE_TICK_MS` 是 15 而不是 20 | **特性**:Windows 消息定时器粒度 ~15.6ms,`SetTimer` 向上凑整 —— 请求 20ms 实际是 31.6ms(吞吐腰斩到 31.7/s),请求 15ms 才是 15.8ms(63/s)。改回 20 会让 `last.json`/`d4灵巫.json` 等现成配置永久过载。实测表见 `hold_server_extended.ahk` 中 `QUEUE_TICK_MS` 处 |
+| 普通 delay 只挡自己所在的优先级队列;序列间隙里其他队列可以插入动作 | **特性**(2026-08 重构):delay 转成本队列队首的 `seqrun:` 等待项(`notBefore`),low 的 `delay:100` 不再压住 high 技能。尾部 delay 留空哨兵防止间隔蒸发。需要间隙**独占**用管理键 —— `delay_clear:` 仍是全局闸门(`ManagedDelayUntil`),窗口内清非紧急队列、只放行 HP/MP。emergency 队列不支持普通 delay(救命动作永不等待) |
 
 **反模式**:看到这些不要急着报 BUG,先读 `wiki/02-架构与通信.md` 的"设计意图"段。
 
@@ -114,7 +115,7 @@ with open(f, 'wb') as fp: fp.write(data.replace(b'\r\n', b'\n'))
 **修复方法**:任何函数对全局变量赋值时,函数顶部必须列出 global 声明:
 ```ahk
 ProcessQueue() {
-    global DelayUntil, DelayClearOthers, TotalQueueCount, QueueCounts
+    global ManagedDelayUntil, TotalQueueCount, QueueCounts
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
     global QueueStats, IsPaused, SpecialKeysPaused
     ; ...

@@ -43,6 +43,20 @@ global RegisteredHooks := Map()
 global SpecialKeysPressed := Map()  ; 跟踪特殊按键的按住状态
 global SpecialKeysPaused := false   ; 特殊按键是否导致系统暂停
 
+; 🎯 intercept 键自动重复去重:key → 最近一次 down 的 MonotonicMs()。
+; 事件发送改为微秒级返回(QueuedConnection + 短超时)后,热键伪线程立即结束,
+; MaxThreadsPerHotkey=1 不再能吸收键盘自动重复 —— 按住 F8 会连发 intercept_key_down,
+; Python 端每条都执行一次完整状态转换。配对注册 $key up 复位按下状态;
+; 时间窗口是 up 边沿丢失时的自愈兜底(见 INTERCEPT_REPEAT_WINDOW_MS)。
+global InterceptKeysPressed := Map()
+; 判定自动重复的滚动窗口:Windows 最慢的重复初始延迟约 1000ms,取 1100 覆盖。
+; 正常路径靠 up 边沿删除按下状态,窗口只在 up 丢失(如安全桌面吞掉钩子)时兜底 ——
+; 键至多"死"1.1 秒,不会永久失效。
+global INTERCEPT_REPEAT_WINDOW_MS := 1100
+; 特殊键松开后只延迟**自动输入恢复**,物理 key-up 与 special_key_up 事件仍立即透传/回发。
+; 0 = 旧行为(立即恢复);D4 序列模式可配 50ms,避免宏复位后的 LButton 抢占闪避输入。
+global SpecialKeyResumeDelayMs := 0
+
 ; 🎯 新增：管理按键配置存储
 global ManagedKeysConfig := Map()   ; 存储管理按键的延迟和映射配置
 global TargetWin := "" ; 目标窗口标识符
@@ -70,8 +84,11 @@ global ForceMovePassthroughKeys := Map()  ; 强制移动期间不被替换的白
 global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控件发送(ControlSend)
 
 ; 🎯 异步延迟机制
-global DelayUntil := 0  ; 延迟到什么时间（毫秒），0表示没有延迟
-global DelayClearOthers := false  ; 当前 delay 期间是否需要清空非紧急队列(管理按键专用)
+; 管理键独占延迟(delay_clear:)的结束时刻(单调毫秒),0 = 无。
+; ⚠️ 这是**唯一**的全局延迟闸门,只服务管理键的独占窗口(期间清空非紧急队列)。
+; 普通 delay(序列内或裸 delay:N)已改为**按队列** notBefore:只挡住自己所在的
+; 优先级队列,别的队列照常执行 —— 低优先级的 delay 不再压住高优先级技能。
+global ManagedDelayUntil := 0
 
 ; 🎯 AHK 端通用宏解释器:Python 只下发步骤,AHK 保证顺序、循环和中止释放
 global MacroSteps := []
@@ -107,10 +124,26 @@ global ManagedHoldTargets := Map()
 ; 以及 IsSkillHoldSuppressed(压住 Reconcile 的补按环节)。
 ; 清队列/停宏/释放持键/空持键声明等安全清理命令永远放行,释放(up)永不被闸门拦截。
 global RuntimeAcceptingActions := true
+; WM_COPYDATA 返回值:0 留给未处理/默认窗口过程,业务拒绝必须返回非零专用值。
+; Python 据此区分“AHK 明确拒绝”与“没有取得协议层结果”。
+global AHK_RESULT_REJECTED := 2
 
 ; 🎯 基于F8状态的智能窗口句柄缓存
 global CurrentPythonWindow := "TorchLightAssistant_MainWindow_12345"  ; 启动时默认主窗口
 global CachedPythonHwnd := 0  ; 缓存的Python窗口句柄
+; AHK→Python 事件不能用命令通道的 500ms 预算:单次卡住 500ms 会直接饿死
+; ProcessQueue/MacroTick/HP 药剂。Python 原生窗口过程只 emit Qt 队列信号,业务 handler
+; 不在接收栈内执行,因此 50ms 对正常接收仍有充足余量。状态事件失败后退避 1 秒;
+; 人手 intercept 绕过退避,stats 失败不武装退避(见 SendEventToPython 调用点)。
+; 刻意不使用 SMTO_BLOCK,允许双向同步 WM_COPYDATA 在等待期间互相泵浦消息。
+global PYTHON_SEND_TIMEOUT_MS := 50
+global PYTHON_SEND_BACKOFF_MS := 1000
+global PythonSendBackoffUntil := 0
+; 状态类事件保留**最新状态**并由 timer 重试:monitor up 丢失会让强制移动永久卡 true;
+; special pause:end 丢失会让 Python 继续丢弃非紧急生产。普通观察事件允许丢失。
+global PendingPythonStateEvents := Map()
+global SMTO_ABORTIFHUNG := 0x0002
+global SMTO_ERRORONEXIT := 0x0020
 
 ; 统计信息
 global QueueStats := Map(
@@ -166,7 +199,7 @@ global STALE_MS := 500
 ; 单调毫秒时钟 —— 本文件所有时刻/时长比较的唯一来源。
 ; ⚠️ 不能用 A_TickCount:它是 32 位 GetTickCount,约 49.7 天回绕。回绕瞬间
 ; now - at 变成巨大负数:过期判定失效(跨回绕的旧动作被照常执行)、通知节流
-; 被压制(最长再等 49.7 天)、DelayUntil / MacroDueTime 的比较同样冻结。
+; 被压制(最长再等 49.7 天)、ManagedDelayUntil / MacroDueTime 的比较同样冻结。
 ; GetTickCount64 无回绕,同样包含系统休眠时间,符合"真实等待"契约。
 ; 禁止在本文件再写裸 A_TickCount(tests/test_ahk_queue_throughput.py 有静态守卫)。
 MonotonicMs() {
@@ -177,8 +210,9 @@ MonotonicMs() {
 ; 未开始的可以整条丢(原子性);已经开打的**不能**丢 —— 那是连招打一半停手。
 global ACTION_SEQ_RUNNING := "seqrun"
 global LastOverloadNotifyAt := 0     ; 过载通知节流(避免刷屏)
-; 丢弃发生在 EnqueueAction 里,而它常在 WM_COPYDATA 处理中执行 —— 此刻 Python 正阻塞在
-; SendMessageW 里等这条消息返回。在那里回发消息会把两边的消息处理嵌套起来,没必要冒这个险。
+; 丢弃发生在 EnqueueAction 里,而它常在 WM_COPYDATA 处理中执行 —— 此刻 Python 正在
+; SendMessageTimeoutW 里等这条消息返回。虽然双向发送现允许消息泵重入,这里仍推迟到
+; ProcessQueue 再上报,避免在命令处理栈内引入不必要的嵌套事件。
 ; 因此只置标志,由 ProcessQueue(定时器上下文)在下一 tick 发出通知。
 global PendingOverloadNotify := false
 
@@ -216,7 +250,7 @@ OnMessage(0x4A, WM_COPYDATA)
 ProcessQueue() {
     ; 🔧 BUG修复(AHK v2 作用域): 必须显式声明所有用到的全局变量
     ; 否则函数内对其赋值会创建局部变量,读取也会读到未初始化的局部变量
-    global DelayUntil, DelayClearOthers, TotalQueueCount, QueueCounts
+    global ManagedDelayUntil, TotalQueueCount, QueueCounts
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
     global QueueStats, IsPaused, SpecialKeysPaused
     global PendingOverloadNotify, STALE_MS
@@ -228,21 +262,23 @@ ProcessQueue() {
         NotifyQueueOverload()
     }
 
-    ; 🚀 性能优化：快速检查 - 如果没有任何任务且不在延迟中，直接返回
-    if (TotalQueueCount = 0 && DelayUntil = 0) {
+    ; 🚀 性能优化：快速检查 - 如果没有任何任务且不在管理键独占延迟中，直接返回
+    if (TotalQueueCount = 0 && ManagedDelayUntil = 0) {
         return
     }
 
-    ; 🎯 检查是否在异步延迟中
-    if (DelayUntil > 0) {
-        if (MonotonicMs() < DelayUntil) {
-            ; 🔧 BUG修复(#2): 只在管理按键引发的 delay 期间清空非紧急队列(保证管理键独占)
-            ; 普通 sequence 内的 delay 不应清掉自己后续的项,否则 "q,delay100,w" 中 w 会丢失
-            if (DelayClearOthers && (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0)) {
+    ; 🎯 管理键独占延迟窗口(delay_clear:)。⚠️ 只有管理键走这里 ——
+    ; 普通 delay(序列内/裸 delay:N)是按队列的 notBefore(见 NextToExecuteQueueName),
+    ; 只挡自己的优先级队列,不会再把高优先级技能一起压住。
+    if (ManagedDelayUntil > 0) {
+        if (MonotonicMs() < ManagedDelayUntil) {
+            ; 管理键独占:延迟期间清空非紧急队列(E 键闪避/强力技的独占语义)
+            if (QueueCounts["high"] > 0 || QueueCounts["normal"] > 0 || QueueCounts["low"] > 0) {
                 ClearNonEmergencyQueues()
             }
-            ; 🔧 BUG修复: 延迟期间放行 HP/MP 救命药剂。本延迟检查在 emergency 取队之前 return,
-            ; 用户技能序列里的大 delay(如 delay500)会把救命药剂整段压住 → 血量危急时漏吃药。
+            ; 🔧 BUG修复: 独占延迟期间放行 HP/MP 救命药剂。本延迟检查在 emergency 取队之前
+            ; return,管理键较长的独占窗口(前 delay + hold_ms + 后 delay)会把救命药剂
+            ; 整段压住 → 血量危急时漏吃药。
             ; 按索引扫描出第一个 IsEmergencyAction(press:hp/mp 键)执行,保持其余项顺序不变。
             ; ⚠️ 故意【不】放行 release:* —— 管理键 hold 模式自己的 release:target 也排在 emergency
             ; 队列里(见 HandleManagedKey),按字符串无法与 TriggerMode=2 的保命 release 区分,若提前
@@ -262,8 +298,7 @@ ProcessQueue() {
             return  ; 还在延迟中,非紧急队列不处理
         } else {
             ; 延迟结束，重置
-            DelayUntil := 0
-            DelayClearOthers := false
+            ManagedDelayUntil := 0
         }
     }
 
@@ -356,8 +391,13 @@ ProcessQueue() {
 global QUEUE_TICK_MS := 15
 SetTimer(ProcessQueue, QUEUE_TICK_MS)
 
-; 宏解释器独立 tick:只推进 AHK 端宏状态机,不占用全局 DelayUntil/队列
+; 宏解释器独立 tick:只推进 AHK 端宏状态机,不占用队列与任何延迟闸门
 SetTimer(MacroTick, MACRO_TICK_MS)
+
+; 队列观测:每秒把实时深度 + 累计丢弃计数推给 Python(OSD 展示)。
+; 主动推送,不加轮询命令 —— Python 端 get_stats 请求路径已删除。
+SetTimer(SendStatsToPython, 1000)
+SetTimer(FlushPendingPythonStateEvents, 100)
 
 ; 进程退出兜底:仅覆盖**正常退出路径**(ExitApp / CMD_SHUTDOWN / 用户手动关脚本)。
 ; ⚠️ Windows 的 TerminateProcess(Python Popen.terminate/kill)不会触发 OnExit ——
@@ -740,7 +780,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
     ; ⚠️ AHK v2 作用域:被本函数**赋值**的全局必须在这里声明(super-global 也一样),
     ; 且声明必须出现在第一次使用之前 —— RuntimeAcceptingActions 在 CMD_ENQUEUE 分支
     ; 里就要被读取,所以统一提到函数顶部,不能放在后面的 case 里。
-    global RuntimeAcceptingActions
+    global RuntimeAcceptingActions, AHK_RESULT_REJECTED
 
     ; 解析COPYDATASTRUCT
     ; dwData = 命令ID
@@ -770,19 +810,15 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             return 1
 
         case CMD_ACTIVATE:
-            ; ACTIVATE - 激活目标窗口
+            ; ACTIVATE - 异步激活目标窗口。WinActivate 受默认 SetWinDelay(100ms)影响,
+            ; 不能放在同步 WM_COPYDATA 处理栈内,否则无意义地占用命令超时预算。
             global TargetWin
 
-            if (TargetWin != "") {
-                if WinExist(TargetWin) {
-                    WinActivate(TargetWin)
-                    return 1
-                } else {
-                    return 0
-                }
-            } else {
-                return 0
+            if (TargetWin != "" && WinExist(TargetWin)) {
+                SetTimer(ActivateTargetWindow, -1)
+                return 1
             }
+            return AHK_RESULT_REJECTED
 
         case CMD_ENQUEUE:
             ; ENQUEUE - 添加到队列
@@ -790,7 +826,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 闸门关闭(Python 已进入 STOPPED)时拒绝入队:这是"按了 F8 绝不再有键打进游戏"
             ; 的最后一道防线,覆盖 join 超时后仍在跑的在飞回调。
             if (!RuntimeAcceptingActions) {
-                return 0
+                return AHK_RESULT_REJECTED
             }
             parts := CachedStrSplit(param, ":", , 2)
             if (parts.Length >= 2) {
@@ -799,7 +835,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 EnqueueAction(priority, action)
                 return 1
             }
-            return 0
+            return AHK_RESULT_REJECTED
 
         case CMD_SET_ACCEPTING_ACTIONS:
             ; SET_ACCEPTING_ACTIONS - 运行时闸门开关,参数 "true" / "false"
@@ -825,7 +861,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             RuntimeAcceptingActions := false
             ClearQueue(-1)
             ; 不在消息处理函数里直接 ExitApp:先让本次 SendMessage 正常返回 1,
-            ; 再由一次性定时器退出,避免 Python 阻塞在无超时的 SendMessageW 上。
+            ; 再由一次性定时器退出,先让 Python 的 SendMessageTimeoutW 正常返回。
             SetTimer(AhkShutdownNow, -1)
             return 1
 
@@ -852,7 +888,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 RegisterHook(parts[1], parts[2])
                 return 1
             }
-            return 0
+            return AHK_RESULT_REJECTED
 
         case CMD_HOOK_UNREGISTER:
             ; HOOK_UNREGISTER - 取消Hook
@@ -878,7 +914,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 ReconcileSkillHoldKeys()
                 return 1
             }
-            return 0
+            return AHK_RESULT_REJECTED
 
         case CMD_SET_FORCE_MOVE_KEY:
             ; SET_FORCE_MOVE_KEY - 设置强制移动键
@@ -890,7 +926,14 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         case CMD_SET_FORCE_MOVE_STATE:
             ; SET_FORCE_MOVE_STATE - 设置强制移动状态
             ; 参数格式: "true" 或 "false"
+            ; 闸门关闭(STOPPED/PAUSED)时拒绝 true:QueuedConnection 下迟到的激活
+            ; 不得在 monitor Hook 已注销后复活按键替换(配对的 up 永远不会再来)。
+            ; false 是安全方向(只会关闭替换),始终放行。PAUSED 期间被拒的合法 true
+            ; 由 RUNNING 开闸后的重对齐补上(macro_engine._on_state_enter RUNNING 分支)。
             global ForceMoveActive
+            if (param = "true" && !RuntimeAcceptingActions) {
+                return AHK_RESULT_REJECTED
+            }
             ForceMoveActive := (param = "true")
             return 1
 
@@ -907,7 +950,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 ManagedKeysConfig[key] := { target: target, delay: delay, hold_ms: hold_ms }
                 return 1
             }
-            return 0
+            return AHK_RESULT_REJECTED
 
         case CMD_CLEAR_HOOKS:
             ; CLEAR_HOOKS - 清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）
@@ -952,7 +995,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; START_MACRO - 从第 1 步启动/重启通用宏循环
             ; 闸门关闭时拒绝:STOPPED/PAUSED 期间迟到的启动命令不得让 MacroTick 复活
             if (!RuntimeAcceptingActions) {
-                return 0
+                return AHK_RESULT_REJECTED
             }
             StartMacro()
             return 1
@@ -969,7 +1012,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 非空集合会按下按键,闸门关闭时**拒绝而非推迟**:若只记入 desired,
             ; 下次开闸的 Reconcile 会把它按下,但那已不是 Python 当时的最新意图。
             if (param != "" && !RuntimeAcceptingActions) {
-                return 0
+                return AHK_RESULT_REJECTED
             }
             SetSkillHoldKeys(param)
             return 1
@@ -1001,11 +1044,11 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
                 SendKeyMode := param
                 return 1
             }
-            return 0
+            return AHK_RESULT_REJECTED
     }
 
     ; 未识别的命令
-    return 0
+    return AHK_RESULT_REJECTED
 }
 
 ; ===============================================================================
@@ -1038,7 +1081,7 @@ IsDroppableAction(action) {
         return false
     if (InStr(action, "notify:") = 1)
         return false
-    ; delay_clear: 是管理键独占窗口的开关(ExecuteAction 里置 DelayClearOthers)。
+    ; delay_clear: 是管理键独占窗口的开关(ExecuteAction 里置 ManagedDelayUntil)。
     ; 丢掉它,管理键的 hold 窗口就不再清理竞争队列 → 独占语义失效。
     ; 今天它只进紧急队列(本来就不会被丢),这里补上是纵深防御。
     if (InStr(action, "delay_clear:") = 1)
@@ -1089,24 +1132,29 @@ PriorityOfQueueName(name) {
     return 0
 }
 
-; 队列项:动作字符串 + 入队时刻(单调毫秒)。年龄 = MonotonicMs() - at,绑在项上,
-; 清队列/丢队首都不会让别的项"继承"或"清零"年龄。
+; 队列项:动作字符串 + 入队时刻 + 最早可执行时刻(都是单调毫秒)。
+; 年龄 = MonotonicMs() - at,绑在项上,清队列/丢队首都不会让别的项"继承"或"清零"年龄。
+; notBefore > 0 表示"在此之前本队列不出队"(delay 只挡自己所在的优先级队列):
+; 只有序列推进/裸 delay 转出的 seqrun: 等待项会带非零 notBefore,普通入队恒为 0。
 QueueItem(action) {
-    return {action: action, at: MonotonicMs()}
+    return {action: action, at: MonotonicMs(), notBefore: 0}
 }
 
 ; 下一个要执行的动作在哪条非紧急队列的队首(严格优先级:high → normal → low)。
-; 无非紧急动作时返回 ""。
+; 队首"未到期"(notBefore 还没到)的队列**整条跳过** —— 这就是按队列延时:
+; normal 序列里的 delay 只挡 normal,high/low 照常轮到(优先级不再被 delay 打破)。
+; 无可执行动作时返回 ""。
 NextToExecuteQueueName() {
-    global QueueCounts
+    global QueueCounts, HighQueue, NormalQueue, LowQueue
 
-    if (QueueCounts["high"] > 0) {
+    now := MonotonicMs()
+    if (QueueCounts["high"] > 0 && HighQueue[1].notBefore <= now) {
         return "high"
     }
-    if (QueueCounts["normal"] > 0) {
+    if (QueueCounts["normal"] > 0 && NormalQueue[1].notBefore <= now) {
         return "normal"
     }
-    if (QueueCounts["low"] > 0) {
+    if (QueueCounts["low"] > 0 && LowQueue[1].notBefore <= now) {
         return "low"
     }
     return ""
@@ -1251,7 +1299,7 @@ ClearManagedKeyMark(key) {
 
 ; 批量配置更新函数（Master方案学习）
 UpdateBatchConfig(configString) {
-    global CachedHpKey, CachedMpKey, StationaryModeType
+    global CachedHpKey, CachedMpKey, StationaryModeType, SpecialKeyResumeDelayMs
 
     if (configString = "") {
         return
@@ -1272,7 +1320,10 @@ UpdateBatchConfig(configString) {
                     CachedMpKey := CachedStrLower(value)
                 case "stationary_type":
                     StationaryModeType := value
-                    ; 可扩展更多配置项...
+                case "special_key_resume_delay_ms":
+                    if (IsInteger(value)) {
+                        SpecialKeyResumeDelayMs := Min(Max(Integer(value), 0), 1000)
+                    }
             }
         }
     }
@@ -1330,7 +1381,7 @@ EnqueueAction(priority, action) {
     }
 
     ; 🔧 BUG修复(B5+B16): 拦截 sequence 类型,规范化成原子动作串
-    ; 复用 DelayUntil 异步机制,避免 ExecuteSequence 中的同步 Sleep 阻塞所有队列。
+    ; (序列内 delay 由 ExecuteAction 转成按队列 notBefore 等待,无同步 Sleep)。
     ;
     ; ⚠️ 这里**只规范化,不展开成多个队列项**。一次 sequence 是**一个决策**,
     ; 原子之间有因果关系,必须同生共死:
@@ -1439,21 +1490,35 @@ EnforceQueueBudget(pushedName) {
 ; 把动作放回队首(序列推进时用)。这是"已经被接受的工作"回到队列,
 ; 不走闸门也不走预算 —— 它并没有新增待执行原子。
 PushFrontAction(priority, action) {
+    PushFrontItem(priority, QueueItem(action))
+}
+
+; 把等待中的项放回队首:notBefore 之前本队列不出队(只挡自己,不挡别的队列)。
+; 序列里的 delay 原子与裸 delay:N 都经此转成 seqrun: 等待项 —— 剩余原子可为空
+; (尾部 delay,如 "q,delay100"),空 seqrun: 就是纯等待哨兵,到期出队即完成,
+; **不会**再次重置延时(notBefore 只在这里设一次)。
+PushFrontWait(priority, action, waitMs) {
+    item := QueueItem(action)
+    item.notBefore := MonotonicMs() + waitMs
+    PushFrontItem(priority, item)
+}
+
+PushFrontItem(priority, item) {
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
 
     ; at 取当前时刻:seqrun 正在执行中,不参与年龄丢弃(不可丢),取值只为字段完整
     switch priority {
         case 0:
-            EmergencyQueue.InsertAt(1, QueueItem(action))
+            EmergencyQueue.InsertAt(1, item)
             IncrementQueueCount("emergency")
         case 1:
-            HighQueue.InsertAt(1, QueueItem(action))
+            HighQueue.InsertAt(1, item)
             IncrementQueueCount("high")
         case 3:
-            LowQueue.InsertAt(1, QueueItem(action))
+            LowQueue.InsertAt(1, item)
             IncrementQueueCount("low")
         default:
-            NormalQueue.InsertAt(1, QueueItem(action))
+            NormalQueue.InsertAt(1, item)
             IncrementQueueCount("normal")
     }
 }
@@ -1466,7 +1531,7 @@ ClearQueue(priority) {
     global QueueCounts, TotalQueueCount
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
     global ActiveManagedKeys
-    global DelayUntil, DelayClearOthers
+    global ManagedDelayUntil
 
     switch priority {
         case 0:
@@ -1506,10 +1571,9 @@ ClearQueue(priority) {
             ; cleanup:key 动作随 emergency 一起被清,managed_key 锁需同步重置,
             ; 否则 PAUSED → RESUME 后该 key 会因为锁残留而永远点不出来
             ActiveManagedKeys := Map()
-            ; 队列已全空,继续保留 delay 状态语义不干净,且 DelayClearOthers
-            ; 在下次入队前还会清掉非紧急(包括 hold 模式 resume 时的 hold:N)
-            DelayUntil := 0
-            DelayClearOthers := false
+            ; 队列已全空,继续保留管理键独占延迟语义不干净:窗口残留会在下次入队前
+            ; 继续清掉非紧急队列(包括 hold 模式 resume 时的 hold:N)
+            ManagedDelayUntil := 0
             StopMacro()
             ; 先释放队列级临时持键:被丢弃的 release:target 不会再执行,只有这里能补 up。
             ; 这里刻意**不**补按持久持键 —— 紧随其后的 ReleaseAllSkillHoldKeys() 就要全部释放。
@@ -1601,7 +1665,7 @@ ExecuteAction(action, priority := 2) {
     ; 避免在 if 分支内零散声明导致维护困难
     global ACTION_CLEANUP, ACTION_PRESS, ACTION_SEQUENCE, ACTION_HOLD, ACTION_RELEASE, ACTION_MOUSE_CLICK, ACTION_DELAY, ACTION_NOTIFY
     global ACTION_SEQ_RUNNING
-    global DelayUntil, DelayClearOthers
+    global ManagedDelayUntil
     global SkillHeldKeys, SkillHeldOrder, ManagedHoldTargets
 
     ; 🚀 处理清理标记（使用常量比较）
@@ -1637,14 +1701,31 @@ ExecuteAction(action, priority := 2) {
         ; 第二次只剩 w、第三次什么都不发)。缓存结果一律只读,要改就自己 split。
         atoms := StrSplit(actionData, ",")
         if (atoms.Length = 0) {
-            return
+            return   ; 空 seqrun: = 纯等待哨兵(尾部 delay),到期出队即完成,无键可发
         }
         first := atoms.RemoveAt(1)
-        if (atoms.Length > 0) {
-            rest := ""
-            for i, a in atoms {
-                rest .= (i > 1 ? "," : "") a
+        rest := ""
+        for i, a in atoms {
+            rest .= (i > 1 ? "," : "") a
+        }
+        ; delay 原子:把剩余部分(可为空哨兵)带 notBefore 放回队首 —— 只挡本队列,
+        ; 其他优先级照常执行。**不**设全局闸门(那是 delay_clear 的管理键独占专利)。
+        ; 尾部 delay(rest 为空)也要放哨兵占住队首,否则 "q,delay100" 的延时直接消失。
+        if (InStr(first, "delay:") = 1) {
+            waitStr := SubStr(first, 7)
+            waitMs := IsInteger(waitStr) ? Integer(waitStr) : 0
+            if (priority > 0 && waitMs > 0) {
+                PushFrontWait(priority, ACTION_SEQ_RUNNING ":" rest, waitMs)
+                return
             }
+            ; emergency 队列不支持延时(救命动作不等待);0/畸形 delay 原子直接跳过,
+            ; 剩余原子放回队首下一 tick 继续
+            if (rest != "") {
+                PushFrontAction(priority, ACTION_SEQ_RUNNING ":" rest)
+            }
+            return
+        }
+        if (atoms.Length > 0) {
             ; 放回时改成 seqrun: —— 标记"已经开打",此后不再可丢(见 IsDroppableAction)
             PushFrontAction(priority, ACTION_SEQ_RUNNING ":" rest)
         }
@@ -1677,14 +1758,17 @@ ExecuteAction(action, priority := 2) {
     } else if (actionType = ACTION_MOUSE_CLICK) {
         ExecuteMouseClick(actionData)
     } else if (actionType = ACTION_DELAY) {
-        ; 🎯 异步延迟：设置延迟结束时间，不阻塞
-        ; 普通 delay 不清队列,允许同优先级的后续动作继续排队
-        DelayUntil := MonotonicMs() + Integer(actionData)
-        DelayClearOthers := false
+        ; 兼容路径:裸 delay:N 队列项(非序列内)。转成本队列的等待哨兵:
+        ; 只挡自己所在的优先级队列,到期后哨兵出队即完成,不会再次重置延时。
+        ; emergency(priority 0)不支持延时 —— 救命动作永不等待,直接忽略。
+        waitMs := IsInteger(actionData) ? Integer(actionData) : 0
+        if (priority > 0 && waitMs > 0) {
+            PushFrontWait(priority, ACTION_SEQ_RUNNING ":", waitMs)
+        }
     } else if (actionType = "delay_clear") {
-        ; 🔧 管理按键专用延迟:延迟期间清空非紧急队列,保证管理键独占执行
-        DelayUntil := MonotonicMs() + Integer(actionData)
-        DelayClearOthers := true
+        ; 🔧 管理按键专用延迟:唯一的全局延迟闸门。延迟期间清空非紧急队列,
+        ; 保证管理键独占执行(仍放行 HP/MP 救命药剂,见 ProcessQueue)
+        ManagedDelayUntil := MonotonicMs() + Integer(actionData)
     } else if (actionType = ACTION_NOTIFY) {
         ; 🎯 发送通知到Python
         SendEventToPython(actionData)
@@ -1823,8 +1907,8 @@ IsMouseButtonKey(key) {
     return (lower = "lbutton") || (lower = "rbutton") || (lower = "left") || (lower = "right")
 }
 
-; ExecuteSequence 已废弃: sequence 现在在 EnqueueAction 入口直接展开为
-; 多个原子动作进入同优先级队列,复用 DelayUntil 异步机制,不再需要同步执行
+; ExecuteSequence 已废弃: sequence 现在在 EnqueueAction 入口规范化为单个队列项,
+; 由 ExecuteAction 每 tick 推进一个原子;序列内 delay 走按队列 notBefore,无同步执行
 
 ExecuteMouseClick(data) {
     ; 鼠标点击: "left" 或 "right" 或 "middle"
@@ -1854,6 +1938,8 @@ RegisterHook(key, mode) {
         switch mode {
             case "intercept":
                 Hotkey("$" key, (*) => HandleInterceptKey(key), "On")
+                ; up 配对:提供自动重复去重的复位边沿,并拦掉孤儿 up(down 已被吞)
+                Hotkey("$" key " up", (*) => HandleInterceptKeyUp(key), "On")
 
             case "priority":
                 Hotkey("$" key, (*) => HandleManagedKey(key), "On")
@@ -1878,6 +1964,8 @@ UnregisterHook(key) {
     ; 🔧 AHK v2 作用域:函数内对全局变量赋值会自动 local 化,顶部统一 global 声明
     global RegisteredHooks, SpecialKeysPressed, SpecialKeysPaused
     global ManagedKeysConfig, ActiveManagedKeys
+    global MonitorKeysState, ForceMoveKey, ForceMoveActive
+    global PendingPythonStateEvents, InterceptKeysPressed
 
     ; 简化版本：直接取消，不需要重复注销
 
@@ -1892,7 +1980,11 @@ UnregisterHook(key) {
     ; 取消Hotkey
     try {
         switch mode {
-            case "intercept", "priority", "block":
+            case "intercept":
+                Hotkey("$" key, "Off")
+                Hotkey("$" key " up", "Off")
+
+            case "priority", "block":
                 Hotkey("$" key, "Off")
 
             case "monitor", "special":
@@ -1901,6 +1993,13 @@ UnregisterHook(key) {
         }
     } catch {
         ; 取消失败，静默处理
+    }
+
+    ; intercept 按住期间被注销(如 STOPPED 注销 Z):up Hotkey 已关,按下状态等不到
+    ; 复位边沿。残留虽有 1.1s 时间窗兜底,仍会把注销后 1.1s 内重注册的第一次按下
+    ; 误判为自动重复 —— 这里直接清掉。
+    if (mode = "intercept" && InterceptKeysPressed.Has(key)) {
+        InterceptKeysPressed.Delete(key)
     }
 
     if (mode = "priority") {
@@ -1925,10 +2024,33 @@ UnregisterHook(key) {
             SpecialKeysPressed.Delete(key)
         }
         if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
+            ; 注销是配置/STOPPED 清理,必须立即结束且取消旧的一次性恢复定时器。
+            ; 否则旧 timer 可能在下一轮 special key 按住时误解除新抑制。
+            SetTimer(FinishSpecialKeyPause, 0)
             SpecialKeysPaused := false
             SetMacroSpecialSuppressed(false)
             ReconcileSkillHoldKeys()  ; 抑制解除,补齐被推迟的技能持键
-            SendEventToPython("special_key_pause:end")
+            ; 当前可能位于 Python→AHK 的 WM_COPYDATA 栈内,只入 pending,由 timer 回发。
+            QueuePythonStateEvent("special_pause", "special_key_pause:end", false)
+        }
+    }
+
+    ; monitor 模式与 special 一样依赖物理 key-up。按住期间注销后 up Hook 已不存在,
+    ; 必须直接归零 AHK 状态,并用最新 up 覆盖可能滞留的 pending down。
+    if (mode = "monitor") {
+        key_upper := StrUpper(key)
+        channel := "monitor:" key_upper
+        was_active := MonitorKeysState.Has(key_upper) && MonitorKeysState[key_upper]
+        had_pending := PendingPythonStateEvents.Has(channel)
+
+        if (MonitorKeysState.Has(key_upper)) {
+            MonitorKeysState.Delete(key_upper)
+        }
+        if (StrUpper(ForceMoveKey) = key_upper) {
+            ForceMoveActive := false
+        }
+        if (was_active || had_pending) {
+            QueuePythonStateEvent(channel, "monitor_key_up:" key, false)
         }
     }
 
@@ -1940,19 +2062,52 @@ UnregisterHook(key) {
 ; Hook处理器
 ; ===============================================================================
 HandleInterceptKey(key) {
-    ; 拦截模式 - 按键按下（简化版本，只处理按下事件）
+    ; 拦截模式 - 按键按下
+    global InterceptKeysPressed, INTERCEPT_REPEAT_WINDOW_MS
+
+    ; 键盘自动重复去重:up 之前的重复 down 只承认第一次(special 键在
+    ; HandleSpecialKeyDown 有同型去重;intercept 此前没配 up 边沿,无法判断)。
+    ; 窗口滚动刷新:按住期间每次重复推进时间戳;若 up 边沿丢失,1.1 秒后自愈。
+    now := MonotonicMs()
+    if (InterceptKeysPressed.Has(key)
+        && now - InterceptKeysPressed[key] < INTERCEPT_REPEAT_WINDOW_MS) {
+        InterceptKeysPressed[key] := now
+        return
+    }
+    InterceptKeysPressed[key] := now
 
     ; 所有拦截按键都完全拦截，只通知Python
-    SendEventToPython("intercept_key_down:" key)
+    ; 人手热键是 F8/Z/F7/F9 的唯一通路,不能被 stats/状态事件的共享退避门丢掉。
+    ; 频率天然很低,允许每次都真实尝试一次短超时发送。
+    SendEventToPython("intercept_key_down:" key, true)
 
     ; 🎯 F8不再在AHK端主动切换，由Python完成UI切换后主动通知AHK
 
     ; 不发送到目标应用程序（完全拦截）
 }
 
+HandleInterceptKeyUp(key) {
+    ; 拦截模式 - 按键释放:只复位去重状态,不通知 Python(状态机只消费按下边沿)。
+    ; up 同样被 $ 拦截:down 已被吞,孤儿 up 不该打进游戏。
+    global InterceptKeysPressed
+
+    if (InterceptKeysPressed.Has(key)) {
+        InterceptKeysPressed.Delete(key)
+    }
+}
+
 ; 🎯 特殊按键处理（如space）- 不拦截，持续状态检测
 HandleSpecialKeyDown(key) {
     global SpecialKeysPressed, SpecialKeysPaused
+
+    ; 键盘自动重复会再次触发 key-down Hotkey。物理键因 ~ 前缀仍正常透传,
+    ; 这里只去重状态事件,避免每次重复都同步回发 WM_COPYDATA 占住 AHK 主线程。
+    if (SpecialKeysPressed.Has(key)) {
+        return
+    }
+
+    ; 若在松开保护窗口内重新按下,继续沿用同一段暂停并取消旧恢复 timer。
+    SetTimer(FinishSpecialKeyPause, 0)
 
     ; 记录按键按下状态
     SpecialKeysPressed[key] := true
@@ -1961,7 +2116,7 @@ HandleSpecialKeyDown(key) {
     if (SpecialKeysPressed.Count = 1 && !SpecialKeysPaused) {
         SpecialKeysPaused := true
         SetMacroSpecialSuppressed(true)
-        SendEventToPython("special_key_pause:start")
+        QueuePythonStateEvent("special_pause", "special_key_pause:start")
     }
 
     ; 通知Python特殊按键状态
@@ -1969,24 +2124,40 @@ HandleSpecialKeyDown(key) {
 }
 
 HandleSpecialKeyUp(key) {
-    global SpecialKeysPressed, SpecialKeysPaused
+    global SpecialKeysPressed, SpecialKeysPaused, SpecialKeyResumeDelayMs
 
     ; 移除按键状态
     if (SpecialKeysPressed.Has(key)) {
         SpecialKeysPressed.Delete(key)
     }
 
-    ; 如果所有特殊按键都释放了，恢复系统
+    ; key-up 状态立即通知 Python；~Hook 已让物理 key-up 同样立即透传给游戏。
+    SendEventToPython("special_key_up:" key)
+
+    ; 所有特殊按键都释放后,仅自动输入的恢复可以按配置延后。
     if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
-        SpecialKeysPaused := false
-        SetMacroSpecialSuppressed(false)
-        ; 抑制解除:补齐抑制期间被推迟的技能持键 down
-        ReconcileSkillHoldKeys()
-        SendEventToPython("special_key_pause:end")
+        if (SpecialKeyResumeDelayMs > 0) {
+            SetTimer(FinishSpecialKeyPause, -SpecialKeyResumeDelayMs)
+        } else {
+            FinishSpecialKeyPause()
+        }
+    }
+}
+
+FinishSpecialKeyPause() {
+    global SpecialKeysPressed, SpecialKeysPaused
+
+    ; 一次性 timer 到期前可能有另一个 special key 按下；此时绝不能解除新抑制。
+    if (SpecialKeysPressed.Count > 0 || !SpecialKeysPaused) {
+        return
     }
 
-    ; 通知Python特殊按键状态
-    SendEventToPython("special_key_up:" key)
+    SetTimer(FinishSpecialKeyPause, 0)
+    SpecialKeysPaused := false
+    SetMacroSpecialSuppressed(false)
+    ; 抑制解除:补齐抑制期间被推迟的技能持键 down
+    ReconcileSkillHoldKeys()
+    QueuePythonStateEvent("special_pause", "special_key_pause:end")
 }
 
 ; 🎯 管理按键处理（如RButton/e）- 拦截+延迟+映射 + 去重
@@ -2071,8 +2242,8 @@ HandleMonitorKey(key) {
     ; 标记为按下状态
     MonitorKeysState[key_upper] := true
 
-    ; 发送按下事件
-    SendEventToPython("monitor_key_down:" key)
+    ; 状态事件保留最新值并失败重试,避免 down/up 任一丢失后两端永久分叉。
+    QueuePythonStateEvent("monitor:" key_upper, "monitor_key_down:" key)
 }
 
 HandleMonitorKeyUp(key) {
@@ -2090,24 +2261,60 @@ HandleMonitorKeyUp(key) {
     ; 标记为释放状态
     MonitorKeysState[key_upper] := false
 
-    ; 发送释放事件
-    SendEventToPython("monitor_key_up:" key)
+    QueuePythonStateEvent("monitor:" key_upper, "monitor_key_up:" key)
 }
 
 ; ===============================================================================
 ; 事件发送到Python
 ; ===============================================================================
-SendEventToPython(event) {
+QueuePythonStateEvent(channel, event, tryNow := true) {
+    global PendingPythonStateEvents
+
+    ; 同一状态通道只保留最新值:down 尚未补发时若已经 up,补发 up 才是当前真相。
+    PendingPythonStateEvents[channel] := event
+    if (tryNow) {
+        FlushPendingPythonStateEvents()
+    }
+}
+
+FlushPendingPythonStateEvents() {
+    global PendingPythonStateEvents
+
+    ; 每 tick 最多尝试一个状态事件。失败会开启退避,不应在同一轮继续累计超时。
+    for channel, event in PendingPythonStateEvents {
+        if (SendEventToPython(event)) {
+            ; 发送期间若发生状态更新,不能删除后来写入的新值。
+            if (PendingPythonStateEvents.Has(channel)
+                && PendingPythonStateEvents[channel] = event) {
+                PendingPythonStateEvents.Delete(channel)
+            }
+        }
+        return
+    }
+}
+
+SendEventToPython(event, bypassBackoff := false, armBackoff := true) {
     global CurrentPythonWindow, CachedPythonHwnd
+    global PythonSendBackoffUntil, PYTHON_SEND_BACKOFF_MS
+
+    now := MonotonicMs()
+    if (!bypassBackoff && now < PythonSendBackoffUntil) {
+        return false
+    }
 
     ; 🎯 使用缓存的窗口句柄
     if (CachedPythonHwnd != 0) {
         ; 直接使用缓存的句柄
         if (SendWMCopyDataToPython(CachedPythonHwnd, event)) {
-            return  ; 发送成功，直接返回
+            PythonSendBackoffUntil := 0
+            return true
         }
-        ; 发送失败，清除缓存
+        ; 失败后清缓存并退避。不要在同一事件内对同一窗口再等第二次。
         CachedPythonHwnd := 0
+        if (armBackoff) {
+            PythonSendBackoffUntil := now + PYTHON_SEND_BACKOFF_MS
+        }
+        return false
     }
 
     ; 🎯 缓存失效或首次调用：根据F8状态查找正确的窗口
@@ -2118,12 +2325,24 @@ SendEventToPython(event) {
         ; 🎯 如果最后一次发送也失败，清除缓存
         if (!SendWMCopyDataToPython(CachedPythonHwnd, event)) {
             CachedPythonHwnd := 0
+            if (armBackoff) {
+                PythonSendBackoffUntil := now + PYTHON_SEND_BACKOFF_MS
+            }
+            return false
         }
+        PythonSendBackoffUntil := 0
+        return true
     }
+    if (armBackoff) {
+        PythonSendBackoffUntil := now + PYTHON_SEND_BACKOFF_MS
+    }
+    return false
 }
 
 ; 发送WM_COPYDATA消息到Python的辅助函数（简单高效版本）
 SendWMCopyDataToPython(hwnd, eventData) {
+    global PYTHON_SEND_TIMEOUT_MS, SMTO_ABORTIFHUNG, SMTO_ERRORONEXIT
+
     try {
         ; 准备UTF-8编码的数据
         eventBytes := Buffer(StrLen(eventData) * 3 + 1)  ; UTF-8最多3字节/字符
@@ -2135,15 +2354,20 @@ SendWMCopyDataToPython(hwnd, eventData) {
         NumPut("UInt", dataSize, cds, A_PtrSize)           ; cbData = 数据长度
         NumPut("Ptr", eventBytes.Ptr, cds, A_PtrSize * 2)  ; lpData = 数据指针
 
-        ; 发送WM_COPYDATA消息
-        result := DllCall("user32.dll\SendMessageW",
+        ; 同步发送但设短超时上限。返回值表示消息是否成功送达;
+        ; receiverResult 是 Python 窗口过程的返回值(当前可能为 0),不用于判断传输成功。
+        receiverResult := Buffer(A_PtrSize, 0)
+        sent := DllCall("user32.dll\SendMessageTimeoutW",
             "Ptr", hwnd,      ; 目标窗口句柄
             "UInt", 0x004A,   ; WM_COPYDATA
             "Ptr", 0,         ; wParam
-            "Ptr", cds.Ptr)   ; lParam
+            "Ptr", cds.Ptr,   ; lParam
+            "UInt", SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT,
+            "UInt", PYTHON_SEND_TIMEOUT_MS,
+            "Ptr", receiverResult.Ptr,
+            "Ptr")
 
-        ; 返回成功状态
-        return (result != 0)
+        return (sent != 0)
 
     } catch as err {
         ; 发送失败，返回失败
@@ -2151,18 +2375,32 @@ SendWMCopyDataToPython(hwnd, eventData) {
     }
 }
 
+; 每秒推送一次队列观测(SetTimer 见 ProcessQueue 定时器旁)。
+; e/h/n/l 是**实时**队列深度(QueueCounts,不是累计入队数 —— 累计数只涨不落,
+; 看不出"现在积压多少");p/d/x 是累计 处理/过载丢弃/等待过期。
+; Python 端(main_window)把它压成 OSD 的一行,RUNNING/PAUSED 时展示。
 SendStatsToPython() {
-    ; 🚀 发送统计信息
+    global QueueCounts, QueueStats
+
     stats := Format("stats:e={},h={},n={},l={},p={},d={},x={}",
-        QueueStats["emergency"],
-        QueueStats["high"],
-        QueueStats["normal"],
-        QueueStats["low"],
+        QueueCounts["emergency"],
+        QueueCounts["high"],
+        QueueCounts["normal"],
+        QueueCounts["low"],
         QueueStats["processed"],
         QueueStats["dropped"],
         QueueStats["expired"]
     )
-    SendEventToPython(stats)
+    ; stats 是纯观测:失败直接丢弃,不得武装共享退避门封锁随后的人手热键。
+    SendEventToPython(stats, false, false)
+}
+
+ActivateTargetWindow() {
+    global TargetWin
+
+    if (TargetWin != "" && WinExist(TargetWin)) {
+        WinActivate(TargetWin)
+    }
 }
 
 ; ===============================================================================
@@ -2182,6 +2420,7 @@ ClearAllConfigurableHooks() {
     ; 简化版本：清空所有记录的 Hook
     ; F8/F7/F9 永久根热键不在 RegisteredHooks 中,自动被保留(见 RegisterHook 的 key_upper 检查)
     global ActiveManagedKeys, SpecialKeysPressed, SpecialKeysPaused, ManagedKeysConfig
+    global MonitorKeysState, ForceMoveActive, PendingPythonStateEvents
 
     ; 收集所有要删除的键
     keysToRemove := []
@@ -2202,10 +2441,21 @@ ClearAllConfigurableHooks() {
     ; 兜底:即使 per-key 注销有遗漏,也确保 special 状态彻底归零
     SpecialKeysPressed := Map()
     if (SpecialKeysPaused) {
+        SetTimer(FinishSpecialKeyPause, 0)
         SpecialKeysPaused := false
         SetMacroSpecialSuppressed(false)
-        SendEventToPython("special_key_pause:end")
     }
+
+    ; CLEAR_HOOKS 只用于进入 STOPPED。所有动态状态在两端本地归零,旧 down 不得在
+    ; 下一轮 timer 中迟到；逐键注销生成的 monitor up/special end 也无需再回发。
+    MonitorKeysState := Map()
+    ForceMoveActive := false
+    PendingPythonStateEvents := Map()
+
+    ; ⚠️ 刻意**不**整体清 InterceptKeysPressed:此刻用户可能正按着 F8(本次 STOPPED
+    ; 的来源),清掉它的按下状态会让键盘自动重复立刻再发一条 intercept_key_down
+    ; (把刚停下的状态又切回去)。可配置 intercept 键(Z/原地键/BOSS 键)已由上面的
+    ; 逐键 UnregisterHook 清理;F8/F7/F9 永久注册,其 up 边沿始终存在,无残留风险。
 
     ; 抑制状态已彻底归零:与期望集合对齐一次。
     ; STOPPED 路径下 Python 已先下发空集合,此处为无操作;配置热切换时则补齐被推迟的 down。

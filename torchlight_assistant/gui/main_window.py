@@ -20,7 +20,7 @@ from typing import Dict, Optional, Any
 
 from ..core.macro_engine import MacroState
 from ..core.event_bus import event_bus
-from .status_window import OSDStatusWindow
+from .status_window import OSDStatusWindow, format_queue_stats_line
 from .debug_osd_window import DebugOsdWindow # Import DebugOsdWindow
 from .skill_config_widget import SimplifiedSkillWidget
 from .ui_components import (
@@ -49,6 +49,12 @@ class GameSkillConfigUI(QMainWindow):
         self.macro_engine = macro_engine
         self.sound_manager = sound_manager
         self.osd_status_window: Optional[OSDStatusWindow] = None
+        # 队列观测(AHK 每秒推 "stats:" 事件):OSD 基础文本与最新队列行分开存,
+        # 状态变化与 stats 到达都能独立重绘,互不覆盖对方的信息
+        self._osd_base_text = ""
+        self._osd_base_color = "white"
+        self._osd_state_name = "STOPPED"
+        self._queue_stats_line = ""
         self.skill_widgets: Dict[str, SimplifiedSkillWidget] = {}
 
         self._skills_config = {}
@@ -167,6 +173,8 @@ class GameSkillConfigUI(QMainWindow):
         event_bus.subscribe("affix_reroll:show_ui", self._on_affix_reroll_show_ui)
         event_bus.subscribe("ocr:init_success", self._on_ocr_init_success)
         event_bus.subscribe("ocr:init_failed", self._on_ocr_init_failed)
+        # AHK 每秒推送的队列观测(实时深度 + 累计丢弃),RUNNING/PAUSED 时挂到 OSD
+        event_bus.subscribe("stats", self._on_queue_stats)
         # DEBUG OSD窗口的事件订阅已移到_create_widgets方法中处理
 
     def _setup_hotkeys(self):
@@ -318,7 +326,28 @@ class GameSkillConfigUI(QMainWindow):
             osd_text = state_text
             if boss_text:
                 osd_text = f"{state_text}\n{boss_text}"
+            # 记住基础文本:stats 到达时在它下面挂队列行,不覆盖状态/BOSS 信息
+            self._osd_base_text = osd_text
+            self._osd_base_color = color
+            self._osd_state_name = state.name
+            if self._queue_stats_line and state.name in ("RUNNING", "PAUSED"):
+                osd_text = f"{osd_text}\n{self._queue_stats_line}"
             self.osd_status_window.update_status(osd_text, color)
+
+    def _on_queue_stats(self, key: str = ""):
+        """AHK 每秒推送的队列观测(已在 GUI 线程:WM_COPYDATA → 信号桥)。
+
+        只在 RUNNING/PAUSED 刷新 OSD 队列行 —— 其他状态 OSD 展示的是纯状态文本,
+        队列必然为空,挂一行 0 只会加噪音。最新一行始终缓存,状态切换时由
+        _perform_macro_status_updated_ui 决定是否带上。
+        """
+        self._queue_stats_line = format_queue_stats_line(key)
+        if not self.osd_status_window or self._osd_state_name not in ("RUNNING", "PAUSED"):
+            return
+        text = self._osd_base_text
+        if self._queue_stats_line:
+            text = f"{text}\n{self._queue_stats_line}"
+        self.osd_status_window.update_status(text, self._osd_base_color)
 
     def _on_macro_status_updated(self, engine_state: Dict[str, Any]):
         QTimer.singleShot(0, lambda: self._perform_macro_status_updated_ui(engine_state))

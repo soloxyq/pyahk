@@ -11,6 +11,7 @@
   (e) 抑制只推迟 down、释放永不推迟   (f) 抑制解除后补按
   (g) 队列动作(管理键 release:/press:)与持久持键同名时的账本修正
   (h) 安全收尾释放(含队列级临时持键 ManagedHoldTargets)
+  (i) special key 松开保护只延迟自动输入恢复,key-up 事件立即回发
 
 无 AutoHotkey v2 时自动跳过。
 """
@@ -75,6 +76,11 @@ _EXTRACT = [
     "TrackMacroDown",
     "TrackMacroUp",
     "ReleaseMacroHeldKeys",
+    "AbortMacroRuntime",
+    "SetMacroSpecialSuppressed",
+    "HandleSpecialKeyDown",
+    "HandleSpecialKeyUp",
+    "FinishSpecialKeyPause",
 ]
 
 
@@ -104,6 +110,7 @@ _STUBS = r"""
 #SingleInstance Off
 
 global KeyLog := []
+global EventLog := []
 global BlockMouseSim := false      ; 模拟 block_mouse 原地模式
 global EmergencySim := false
 global ResultFile := A_Args.Length >= 1 ? A_Args[1] : (A_ScriptDir "\out.txt")
@@ -114,10 +121,11 @@ global SkillHeldKeys := Map()
 global SkillHeldOrder := []
 global ManagedHoldTargets := Map()
 global ActiveManagedKeys := Map()
+global SpecialKeysPressed := Map()
 global SpecialKeysPaused := false
+global SpecialKeyResumeDelayMs := 0
 global RuntimeAcceptingActions := true
-global DelayUntil := 0
-global DelayClearOthers := false
+global ManagedDelayUntil := 0
 global MacroSteps := []
 global MacroActive := false
 global MacroIndex := 1
@@ -184,7 +192,17 @@ PushFrontAction(priority, action) {
     global PushedBack
     PushedBack.Push(priority ":" action)
 }
+PushFrontWait(priority, action, waitMs) {
+    global PushedBack
+    PushedBack.Push(priority ":" action ":wait" waitMs)
+}
 SendEventToPython(data) {
+    global EventLog
+    EventLog.Push(data)
+}
+QueuePythonStateEvent(channel, event, tryNow := true) {
+    ; 事件传输的合并/退避由 test_ahk_event_transport.py 覆盖；此处只记录状态时序。
+    SendEventToPython(event)
 }
 SetMacroManagedSuppressed(flag) {
 }
@@ -211,20 +229,33 @@ LogStr() {
     }
     return out
 }
+EventStr() {
+    global EventLog
+    out := ""
+    for i, e in EventLog {
+        out .= (i > 1 ? "," : "") e
+    }
+    return out
+}
 ResetAll() {
-    global KeyLog, SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
+    global KeyLog, EventLog, SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
     global ManagedHoldTargets, ActiveManagedKeys, BlockMouseSim
-    global SpecialKeysPaused, RuntimeAcceptingActions
+    global SpecialKeysPressed, SpecialKeysPaused, SpecialKeyResumeDelayMs
+    global RuntimeAcceptingActions
     global MacroSteps, MacroActive, MacroIndex, MacroDueTime
     global MacroHeldKeys, MacroHeldOrder, MacroSpecialSuppressed, MacroManagedSuppressed
+    SetTimer(FinishSpecialKeyPause, 0)
     KeyLog := []
+    EventLog := []
     SkillHoldDesiredOrder := []
     SkillHeldKeys := Map()
     SkillHeldOrder := []
     ManagedHoldTargets := Map()
     ActiveManagedKeys := Map()
+    SpecialKeysPressed := Map()
     BlockMouseSim := false
     SpecialKeysPaused := false
+    SpecialKeyResumeDelayMs := 0
     RuntimeAcceptingActions := true
     MacroSteps := []
     MacroActive := false
@@ -367,6 +398,58 @@ Expect("k3-停宏释放宏持键", LogStr(), "down:x,up:x")
 RuntimeAcceptingActions := true
 MacroTick()
 Expect("k4-MacroActive 已复位,开闸也不复活", LogStr(), "down:x,up:x")
+
+; (l) special key:按下立即中止宏;key-up 立即回发,自动输入延后恢复
+ResetAll()
+SpecialKeyResumeDelayMs := 50
+SetMacroSteps("down:x`npress:y`nup:x")
+StartMacro()
+MacroTick()
+HandleSpecialKeyDown("Space")
+HandleSpecialKeyDown("Space")  ; 自动重复 key-down:不得重复回发/重复中止
+Expect("l1-special 按下立即释放宏持键", LogStr(), "down:x,up:x")
+Expect("l2-重复 down 去重", EventStr(),
+    "special_key_pause:start,special_key_down:Space")
+MacroTick()
+Expect("l3-按住期间宏静默", LogStr(), "down:x,up:x")
+
+HandleSpecialKeyUp("Space")
+Expect("l4-key-up 事件立即回发", EventStr(),
+    "special_key_pause:start,special_key_down:Space,special_key_up:Space")
+Expect("l5-保护窗口内仍处于暂停", SpecialKeysPaused ? "yes" : "no", "yes")
+MacroTick()
+Expect("l6-保护窗口内宏仍静默", LogStr(), "down:x,up:x")
+Sleep SpecialKeyResumeDelayMs + 100
+Expect("l7-到期后自动解除暂停", SpecialKeysPaused ? "yes" : "no", "no")
+Expect("l8-pause:end 到期后才回发", EventStr(),
+    "special_key_pause:start,special_key_down:Space,special_key_up:Space,special_key_pause:end")
+MacroTick()
+Expect("l9-宏从第 1 步恢复", LogStr(), "down:x,up:x,down:x")
+
+; (m) 多 special key 与保护期内重按:任何仍按住的键都不得被旧 timer 提前恢复
+ResetAll()
+SpecialKeyResumeDelayMs := 30
+HandleSpecialKeyDown("Space")
+HandleSpecialKeyDown("RButton")
+HandleSpecialKeyUp("Space")
+Sleep SpecialKeyResumeDelayMs + 50
+Expect("m1-另一特殊键仍按住时不恢复", SpecialKeysPaused ? "yes" : "no", "yes")
+HandleSpecialKeyUp("RButton")
+Sleep 10
+HandleSpecialKeyDown("Space")  ; 保护期内重按会取消 RButton up 安排的旧 timer
+Sleep SpecialKeyResumeDelayMs + 50
+Expect("m2-重按后旧 timer 不误恢复", SpecialKeysPaused ? "yes" : "no", "yes")
+HandleSpecialKeyUp("Space")
+Sleep SpecialKeyResumeDelayMs + 80
+Expect("m3-最后一个 key-up 的保护期结束后恢复", SpecialKeysPaused ? "yes" : "no", "no")
+
+; (n) 默认 0 保持旧语义,但事件顺序统一为 key-up 在 pause:end 之前
+ResetAll()
+HandleSpecialKeyDown("Space")
+HandleSpecialKeyUp("Space")
+Expect("n1-零延迟立即恢复", SpecialKeysPaused ? "yes" : "no", "no")
+Expect("n2-零延迟事件顺序", EventStr(),
+    "special_key_pause:start,special_key_down:Space,special_key_up:Space,special_key_pause:end")
 
 ; ============================ 汇总 ============================
 report := "CHECKS=" Checks "`n"

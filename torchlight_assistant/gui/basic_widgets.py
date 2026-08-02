@@ -176,6 +176,7 @@ class TimingSettingsWidget(QWidget):
             ("「通用」鼠标时长:", "mouse_click"),
             ("「技能」冷却检查:", "cooldown_checker"),
             ("「通用」图像捕获间隔:", "capture_interval"),
+            ("「通用」特殊键恢复保护:", "special_key_resume_delay"),
             ("「通用」HP药剂冷却:", "hp_cooldown"),
             ("「通用」MP药剂冷却:", "mp_cooldown"),
             ("「通用」MP/HP检测间隔:", "resource_check_interval"),
@@ -193,6 +194,14 @@ class TimingSettingsWidget(QWidget):
             col += 2
             if col >= 4:
                 col, row = 0, row + 1
+        # 捕获间隔与引擎侧钳制同一口径(macro_engine.CAPTURE_INTERVAL_MIN/MAX_MS):
+        # 10..1000ms。Qt 会把加载进来的越界旧值静默钳到范围内,引擎读取处另有警告日志。
+        self.timing_spinboxes["capture_interval"].setRange(10, 1000)
+        # 0 保持立即恢复；正值只延迟自动输入，不延迟特殊键本身的 key-up。
+        self.timing_spinboxes["special_key_resume_delay"].setRange(0, 1000)
+        self.timing_spinboxes["special_key_resume_delay"].setToolTip(
+            "特殊键松开后，自动技能/宏继续发送前的保护时间。0 表示立即恢复。"
+        )
         layout.addWidget(time_group)
 
         # 声音设置
@@ -220,6 +229,9 @@ class TimingSettingsWidget(QWidget):
                 "cooldown_checker"
             ].value(),
             "capture_interval": self.timing_spinboxes["capture_interval"].value(),
+            "special_key_resume_delay_ms": self.timing_spinboxes[
+                "special_key_resume_delay"
+            ].value(),
             "hp_cooldown": self.timing_spinboxes["hp_cooldown"].value(),
             "mp_cooldown": self.timing_spinboxes["mp_cooldown"].value(),
             "resource_check_interval": self.timing_spinboxes["resource_check_interval"].value(),
@@ -236,6 +248,9 @@ class TimingSettingsWidget(QWidget):
             "mouse_click": config.get("mouse_click_duration", 5),
             "cooldown_checker": config.get("cooldown_checker_interval", 100),
             "capture_interval": config.get("capture_interval", 40),
+            "special_key_resume_delay": config.get(
+                "special_key_resume_delay_ms", 0
+            ),
             "hp_cooldown": config.get("hp_cooldown", 5000),
             "mp_cooldown": config.get("mp_cooldown", 8000),
             "resource_check_interval": config.get("resource_check_interval", 200),

@@ -8,6 +8,8 @@ import os
 import time
 from typing import Optional
 
+from PySide6.QtCore import Qt
+
 from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
 # AHKEventReceiver已移除，使用WM_COPYDATA通信
 from torchlight_assistant.config.ahk_config import AHKConfig
@@ -43,6 +45,8 @@ class AHKInputHandler:
         self._drop_non_emergency = False
         # AHK 子进程死亡探测:命令发送失败时检查存活,首次发现进程退出即告警并上报(只报一次)
         self._ahk_death_notified = False
+        # AHK 传输失效探测(进程活着但命令超时):同样只告警上报一次
+        self._ahk_transport_failure_notified = False
         
         self._init_ahk_system()
         
@@ -63,8 +67,13 @@ class AHKInputHandler:
             target_str = f"ahk_exe {AHKConfig.WINDOW_EXE}"
             self.command_sender.set_target_window(target_str)
 
-        # 连接AHK事件信号（通过WM_COPYDATA接收）
-        ahk_signal_bridge.ahk_event.connect(self._on_ahk_event)
+        # WM_COPYDATA 原生窗口过程必须尽快返回。READY 初始化包含捕获/OCR/磁盘操作,
+        # 若用同线程直连,AHK 的 50ms SendMessageTimeoutW 会把正常 F8 处理误判为失败。
+        # 显式队列连接把业务处理移到下一轮 Qt 事件循环,同时保持事件 FIFO 顺序。
+        ahk_signal_bridge.ahk_event.connect(
+            self._on_ahk_event,
+            Qt.QueuedConnection,
+        )
 
     def _on_ahk_event(self, event: str):
         """这个方法现在总是在主GUI线程中被调用"""
@@ -140,10 +149,51 @@ class AHKInputHandler:
         return False
 
     def _check_send(self, ok: bool) -> bool:
-        """命令发送返回假值时探测 AHK 存活(已死则一次性告警+触发停机)。透传原返回值。"""
+        """命令发送返回假值时探测故障原因。透传原返回值。
+
+        两类发送失败,分开处置:
+        - 进程已退出 → check_ahk_alive 一次性发布 ahk_process_died;
+        - 进程活着但 timeout → 一次性发布 ahk_transport_failed。
+          失联后不强杀 AHK:它可能还压着物理按键,强杀会跳过 OnExit 释放,
+          留给用户"重启应用"这一条明确出路。
+        no_window 不熔断也不锁 F8:FindWindow 失败本身是微秒级且可能因脚本重启恢复,
+        下一条命令会重新发现窗口。进入 READY 的闸门命令失败仍会回退 STOPPED。
+        普通业务拒绝(rejected,如闸门关闭/未知命令)不属于故障,不触发上报。
+        """
         if not ok:
-            self.check_ahk_alive()
+            failure_kind = self._last_transport_failure_kind()
+            alive = self.check_ahk_alive()
+            if alive and failure_kind:
+                self._notify_transport_failed(failure_kind)
         return ok
+
+    def _last_transport_failure_kind(self) -> str:
+        """返回最近一次致命传输失败类型；业务拒绝和本地异常不在此处停机。"""
+        from hold_client import SEND_TIMEOUT
+
+        sender = self.command_sender
+        if sender is None:
+            return ""
+        kind = sender.last_failure_kind
+        return kind if kind == SEND_TIMEOUT else ""
+
+    def _notify_transport_failed(self, failure_kind: str = "timeout"):
+        """AHK 传输失效的一次性告警 + 上报(经信号桥切回 GUI 线程)。"""
+        if self._ahk_transport_failure_notified:
+            return
+        self._ahk_transport_failure_notified = True
+        if self.command_sender is not None:
+            self.command_sender.mark_transport_unavailable(failure_kind)
+        reason = "500ms 无响应"
+        LOG_ERROR(
+            f"[AHK输入] ⚠️ 命令发送失败({reason}):AHK 进程仍在,但通信通道已失效。"
+            "后续按键命令将全部失效。不会自动重启或强杀 AHK(可能残留按住的键),"
+            "正在停止主功能 —— 请重启本应用。"
+        )
+        try:
+            ahk_signal_bridge.ahk_event.emit(f"ahk_transport_failed:{failure_kind}")
+        except Exception as e:
+            LOG_ERROR(f"[AHK输入] 上报 AHK 传输失效事件失败: {e}")
 
     def send_key(self, key_str: str) -> bool:
         """
@@ -267,7 +317,12 @@ class AHKInputHandler:
                 except Exception as e:
                     LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
             return True
-        return self._check_send(self.command_sender.set_skill_hold_keys(key_list))
+        return self._check_send(
+            self.command_sender.set_skill_hold_keys(
+                key_list,
+                force=not key_list,
+            )
+        )
 
     def set_macro_steps(self, steps) -> bool:
         """把通用宏步骤下发给 AHK 端解释器。"""
@@ -303,7 +358,7 @@ class AHKInputHandler:
                 self.debug_display_manager.add_action("MacroStop")
             except Exception as e:
                 LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
-        return self._check_send(self.command_sender.stop_macro())
+        return self._check_send(self.command_sender.stop_macro(force=True))
 
     def set_accepting_actions(self, enabled: bool) -> bool:
         """运行时闸门。关闸 = AHK 端原子停止屏障。
@@ -315,15 +370,20 @@ class AHKInputHandler:
         进入 STOPPED/PAUSED 时第一件事就关掉:UnifiedScheduler.stop() 只 join 2 秒,
         超时的在飞回调之后仍可能下发命令,而那时 Python 侧停止流程已经走完。
         """
-        return self._check_send(self.command_sender.set_accepting_actions(enabled))
+        return self._check_send(
+            self.command_sender.set_accepting_actions(
+                enabled,
+                force=not enabled,
+            )
+        )
 
     def clear_queue(self):
         """清空所有队列(含 emergency)。用于 PAUSED 状态完全停下。"""
-        return self._check_send(self.command_sender.clear_queue(-1))
+        return self._check_send(self.command_sender.clear_queue(-1, force=True))
 
     def clear_non_emergency_queue(self):
         """只清非紧急队列,保留 emergency。用于管理按键期间保留 HP/MP 救命动作。"""
-        return self._check_send(self.command_sender.clear_queue(-2))
+        return self._check_send(self.command_sender.clear_queue(-2, force=True))
 
     def get_queue_stats(self) -> dict:
         return {"wm_copydata_mode": True}
@@ -402,7 +462,9 @@ class AHKInputHandler:
 
     def clear_all_configurable_hooks(self) -> bool:
         """清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）"""
-        return self._check_send(self.command_sender.clear_all_configurable_hooks())
+        return self._check_send(
+            self.command_sender.clear_all_configurable_hooks(force=True)
+        )
     
     def set_python_window_state(self, state: str) -> bool:
         """设置Python窗口状态

@@ -141,6 +141,7 @@
         "mouse_click_duration": 5,
         "cooldown_checker_interval": 110,
         "capture_interval": 60,
+        "special_key_resume_delay_ms": 125,
         "hp_cooldown": 1000,
         "mp_cooldown": 2000,
         "resource_check_interval": 200,
@@ -250,6 +251,50 @@
         "macro_steps": [
             {
                 "type": "press",
+                "key": "3"
+            },
+            {
+                "type": "press",
+                "key": "LButton"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
+                "key": "LButton"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
+                "key": "LButton"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
+                "key": "LButton"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
+                "key": "LButton"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
                 "key": "LButton"
             },
             {
@@ -257,7 +302,7 @@
                 "key": "6"
             }
         ],
-        "skill_sequence": "LButton,6",
+        "skill_sequence": "3,LButton,6,LButton,6,LButton,6,LButton,6,LButton,6,LButton,6",
         "process_history": {
             "recent_processes": [
                 "NutstoreClient.exe",

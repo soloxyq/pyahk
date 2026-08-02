@@ -103,9 +103,9 @@ class SkillManager:
 
 **性能优化**:`_prepare_frame_detection_cache()` 一次取帧给所有技能用,避免重复 `get_current_frame()`。
 
-**优先级按键暂停响应**:订阅 `scheduler_pause_requested` / `scheduler_resume_requested`,在管理键期间暂停整个 `UnifiedScheduler`(节省 70-90% CPU,事件驱动)。
+**管理键执行**:不暂停 `UnifiedScheduler`。输入独占由 AHK 端清理非紧急队列、`delay_clear` 和宏/持键抑制保证,HP/MP 检测继续运行。
 
-**hold 模式技能**(`TriggerMode=2`):一次性 `hold_key()`/`release_key()`,在 `start/stop/pause/resume` 与配置热更新时增量同步。按下顺序稳定为鼠标键优先,同类内部按配置顺序,避免“左键按住后键盘键没跟上”的时序问题。
+**hold 模式技能**(`TriggerMode=2`):Python 用 `set_skill_hold_keys()` 下发完整期望集合,AHK 独占维护实际持键账本并做差量同步。`start/resume` 声明完整集合,`pause/stop` 声明空集合;按下顺序稳定为鼠标键优先,同类内部按配置顺序。
 
 **BOSS 模式**:`BossOnly=true` 的定时/冷却技能在 BOSS 模式关闭时跳过;按住型不参与 BOSS 模式,GUI 和配置归一化会禁用该组合。
 
@@ -164,8 +164,7 @@ class AHKInputHandler:
     def send_key(self, key_str: str) -> bool:
         """支持单键 'q' 或序列 'delay50,q,delay100,w'"""
     def click_mouse(self, button="left", hold_time=None) -> bool: ...
-    def hold_key(self, key: str) -> bool: ...                # priority=2 (normal),用于 TriggerMode=2 启动按住
-    def release_key(self, key: str) -> bool: ...             # priority=0 (emergency),防 stuck key
+    def set_skill_hold_keys(self, keys) -> bool: ...          # 声明 TriggerMode=2 的完整期望持键集合
 
     # 队列管理
     def clear_queue(self): ...                           # 清全部(包括 emergency)
@@ -198,14 +197,11 @@ class AHKInputHandler:
 
 `dry_run_mode=True` 时不真发按键,只记录到 `debug_display_manager`(用于调参)。
 
-**TriggerMode=2 按住模式的 hold/release 语义**:
-- `hold_key()` 走 normal 队列(priority=2)。失败的代价小(键没按住而已,下次循环/resume 还能再 hold)
-- `release_key()` 走 **emergency 队列**(priority=0)。失败的代价是**键卡住** —— 必须确保穿透
-  - normal 队列里的 `release:*` 会被 managed key 的 `delay_clear` 期间的 `ClearNonEmergencyQueues()` 清掉
-  - `SpecialKeysPaused` 期间 `ProcessQueue` 只扫每个队列队首,普通 `press:*` 在前会埋住后面的 `release:*`
-  - emergency 直接绕过两类过滤
-- 二者**都不查 `_drop_non_emergency`**,因为 hold/release 是 START/STOP/PAUSE/RESUME 时的一次性状态切换,不能被 Space 闪避动态阻断
-- `release` 是 AHK 端 `IsAllowedDuringPause(action)` 识别的"安全动作",即使有人忘了发 emergency,也能透过 SpecialKeysPaused 过滤(双保险)
+**TriggerMode=2 声明式持键语义**:
+- Python 不镜像“实际按住了什么”,只发送完整期望集合;AHK 端按 LIFO 释放多余键、按配置顺序补按缺失键
+- 非空声明在特殊键/管理键抑制期只更新期望,暂不产生 down;抑制解除时 `ReconcileSkillHoldKeys()` 自动补齐
+- 空集合、运行时关闸和 `ClearQueue(-1)` 都是安全清理路径,直接释放 AHK 账本中的持键,不依赖普通动作队列
+- 管理键临时 `hold:target/release:target` 若与持久持键同名,执行器会同步修正账本并重新对齐,避免物理状态与账本分叉
 
 ---
 
@@ -224,8 +220,7 @@ class AHKCommandSender:
     def send_key(self, key: str, priority: int = 2) -> bool: ...
     def send_sequence(self, sequence: str, priority: int = 2) -> bool: ...
     def send_mouse_click(self, button: str = "left", priority: int = 2) -> bool: ...
-    def hold_key(self, key: str, priority: int = 2) -> bool: ...
-    def release_key(self, key: str, priority: int = 2) -> bool: ...
+    def set_skill_hold_keys(self, keys) -> bool: ...
 
     # 语义化便捷方法
     def send_emergency(self, key: str): ...              # priority=0
@@ -323,7 +318,7 @@ class EventBus:
 - `engine:state_changed` / `engine:status_updated` / `engine:config_updated`
 - `engine:macro_running` / `engine:macro_paused` / 等 4 个状态对应事件
 - `intercept_key_down` / `special_key_*` / `managed_key_*` / `monitor_key_*`
-- `scheduler_pause_requested` / `scheduler_resume_requested`
+- `queue_drop` / `stats` / `ahk_process_died` / `ahk_transport_failed`
 - `ui:*` / `hotkey:*` / `affix_reroll:*` / `debug_osd_*`
 
 ---

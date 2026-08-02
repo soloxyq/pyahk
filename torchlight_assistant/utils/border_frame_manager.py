@@ -294,9 +294,8 @@ class BorderFrameManager:
                     self.paused = False
                     # 快照复用窗口跟随**本次实际生效**的捕获间隔(即 interval_ms,
                     # 而不是构造时的 self.capture_interval)。
-                    # 注意:实际启动路径 macro_engine._start_subsystems_based_on_mode()
-                    # 并不传 interval_ms,因此这里恒为默认 40ms —— GUI 的"捕获间隔"
-                    # 设置目前只作用于 READY 期的一次性捕获,没有接到这条循环上。
+                    # 启动路径 macro_engine._start_subsystems_based_on_mode() 传入
+                    # _capture_interval_ms()(GUI 配置,10..1000ms 钳制,默认 40)。
                     self.capture_interval = max(0.0, interval_ms / 1000.0)
                     self._snapshot_reuse_window = self._compute_reuse_window(self.capture_interval)
                     # 新会话:作废上个会话可能残留的快照

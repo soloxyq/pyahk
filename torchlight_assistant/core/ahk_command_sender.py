@@ -3,7 +3,14 @@ AHK命令发送器
 负责将Python的决策转换为AHK命令并发送
 """
 
-from hold_client import send_ahk_cmd
+import threading
+
+from hold_client import (
+    send_ahk_cmd_ex,
+    SEND_ERROR,
+    SEND_NO_WINDOW,
+    SEND_TIMEOUT,
+)
 from torchlight_assistant.config.ahk_commands import (
     CMD_PING, CMD_SET_TARGET, CMD_ACTIVATE, CMD_ENQUEUE,
     CMD_CLEAR_QUEUE, CMD_PAUSE, CMD_RESUME,
@@ -30,11 +37,54 @@ class AHKCommandSender:
         self.window_title = window_title
         self._stationary_mode_active = False
         self._stationary_mode_type = "shift_modifier"
+        # 失败类型必须按发送线程保存。GUI 与调度线程可能同时发命令,若共用一个字段,
+        # 线程 A 超时后会被线程 B 的成功结果覆盖,_check_send 就漏报真正的挂死。
+        self._send_state = threading.local()
+        # 首次 timeout 后普通命令立即失败,避免生产侧继续堆积更多 500ms 等待。
+        # no_window 是微秒级的可恢复发现失败,不打开永久熔断。安全清理命令显式
+        # force=True 绕过熔断,保证 STOPPED 仍有一次真实的止血机会。
+        self._transport_failure_kind = ""
         self._check_connection()
-    
+
+    @property
+    def last_failure_kind(self) -> str:
+        return getattr(self._send_state, "last_failure_kind", "")
+
+    @last_failure_kind.setter
+    def last_failure_kind(self, kind: str):
+        self._send_state.last_failure_kind = kind
+
+    def mark_transport_unavailable(self, kind: str):
+        """熔断普通命令；保留安全清理与 shutdown 的强制发送机会。"""
+        if kind:
+            self._transport_failure_kind = kind
+
+    def _send(self, cmd_id, param: str = "", *, force: bool = False) -> bool:
+        """统一发送包装器:所有 AHK 命令必须经此发出,不得直接调 hold_client。
+
+        - **永不抛异常**(send_ahk_cmd_ex 已保证,这里是第二道防线):
+          调用方普遍写 `_check_send(sender.xxx())`,异常在参数求值阶段逃逸
+          会整个绕过 _check_send 里的死亡/挂死探测。
+        - 记录最近一次失败类型,供上层区分故障(timeout/no_window/rejected)。
+        """
+        terminal_kind = getattr(self, "_transport_failure_kind", "")
+        if terminal_kind and not force:
+            self.last_failure_kind = terminal_kind
+            return False
+
+        try:
+            ok, kind = send_ahk_cmd_ex(self.window_title, cmd_id, param)
+        except Exception as e:  # 防御性兜底,正常情况下 send_ahk_cmd_ex 不抛
+            LOG_ERROR(f"[AHKCommandSender] 发送命令异常(cmd={cmd_id}): {e}")
+            ok, kind = False, SEND_ERROR
+        self.last_failure_kind = "" if ok else kind
+        if not ok and kind == SEND_TIMEOUT:
+            self.mark_transport_unavailable(kind)
+        return ok
+
     def _check_connection(self):
         """检查AHK连接"""
-        if not send_ahk_cmd(self.window_title, CMD_PING):
+        if not self._send(CMD_PING):
             raise ConnectionError(
                 "无法连接到AHK服务器！\n"
                 "请确保 hold_server_extended.ahk 正在运行。\n"
@@ -47,7 +97,7 @@ class AHKCommandSender:
 
     def set_target_window(self, target: str) -> bool:
         """设置AHK的目标窗口标识符 (例如 'ahk_exe notepad++.exe')"""
-        return send_ahk_cmd(self.window_title, CMD_SET_TARGET, target)
+        return self._send(CMD_SET_TARGET, target)
     
     def set_send_mode(self, mode: str) -> bool:
         """设置按键发送模式
@@ -62,11 +112,11 @@ class AHKCommandSender:
         """
         if mode not in ["direct", "control"]:
             raise ValueError(f"Invalid send mode: {mode}. Must be 'direct' or 'control'")
-        return send_ahk_cmd(self.window_title, CMD_SET_SEND_MODE, mode)
+        return self._send(CMD_SET_SEND_MODE, mode)
 
     def activate_window(self) -> bool:
         """请求AHK激活当前设置的目标窗口"""
-        return send_ahk_cmd(self.window_title, CMD_ACTIVATE)
+        return self._send(CMD_ACTIVATE)
 
     # ========================================================================
     # 原地模式管理
@@ -80,23 +130,23 @@ class AHKCommandSender:
         # 发送命令到AHK
         from torchlight_assistant.config.ahk_commands import CMD_SET_STATIONARY
         param = f"{'true' if active else 'false'}:{mode_type}"
-        return send_ahk_cmd(self.window_title, CMD_SET_STATIONARY, param)
+        return self._send(CMD_SET_STATIONARY, param)
     
     def set_force_move_key(self, key: str):
         """设置强制移动键"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_KEY
-        return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_KEY, key)
+        return self._send(CMD_SET_FORCE_MOVE_KEY, key)
     
     def set_force_move_state(self, active: bool):
         """设置强制移动状态"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_STATE
         param = "true" if active else "false"
-        return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_STATE, param)
+        return self._send(CMD_SET_FORCE_MOVE_STATE, param)
     
     def set_force_move_replacement_key(self, key: str):
         """设置强制移动替换键"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_REPLACEMENT_KEY
-        return send_ahk_cmd(self.window_title, CMD_SET_FORCE_MOVE_REPLACEMENT_KEY, key)
+        return self._send(CMD_SET_FORCE_MOVE_REPLACEMENT_KEY, key)
 
     def set_force_move_passthrough_keys(self, keys) -> bool:
         """设置强制移动期间不被替换的白名单键(位移技能,如 RButton 闪现)
@@ -108,14 +158,12 @@ class AHKCommandSender:
             CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS,
         )
         param = ",".join(str(k).strip() for k in (keys or []) if str(k).strip())
-        return send_ahk_cmd(
-            self.window_title, CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS, param
-        )
+        return self._send(CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS, param)
     
-    def clear_all_configurable_hooks(self) -> bool:
+    def clear_all_configurable_hooks(self, *, force: bool = False) -> bool:
         """清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）"""
         from torchlight_assistant.config.ahk_commands import CMD_CLEAR_HOOKS
-        return send_ahk_cmd(self.window_title, CMD_CLEAR_HOOKS, "")
+        return self._send(CMD_CLEAR_HOOKS, "", force=force)
     
     def set_python_window_state(self, state: str) -> bool:
         """设置Python窗口状态
@@ -124,7 +172,7 @@ class AHKCommandSender:
             state: "main" 或 "osd"
         """
         from torchlight_assistant.config.ahk_commands import CMD_SET_PYTHON_WINDOW_STATE
-        return send_ahk_cmd(self.window_title, CMD_SET_PYTHON_WINDOW_STATE, state)
+        return self._send(CMD_SET_PYTHON_WINDOW_STATE, state)
     
     def batch_update_config(self, config_dict: dict) -> bool:
         """批量更新配置（Master方案学习）
@@ -138,14 +186,16 @@ class AHKCommandSender:
             # 构建参数字符串： "hp_key:1,mp_key:2,stationary_type:shift_modifier"
             config_items = []
             for key, value in config_dict.items():
-                if value:  # 只发送非空值
+                # 数值 0 是有效配置(例如 special_key_resume_delay_ms=0 用于清除
+                # 上一个配置的保护窗口),不能按 falsy 丢掉。None/空字符串才表示未配置。
+                if value is not None and value != "":
                     config_items.append(f"{key}:{value}")
             
             if not config_items:
                 return True  # 没有配置需要更新
             
             param = ",".join(config_items)
-            result = send_ahk_cmd(self.window_title, CMD_BATCH_UPDATE_CONFIG, param)
+            result = self._send(CMD_BATCH_UPDATE_CONFIG, param)
             
             return result
         except Exception as e:
@@ -164,7 +214,7 @@ class AHKCommandSender:
         """设置管理按键配置"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_MANAGED_KEY_CONFIG
         param = f"{key}:{target}:{delay}:{hold_ms}"
-        return send_ahk_cmd(self.window_title, CMD_SET_MANAGED_KEY_CONFIG, param)
+        return self._send(CMD_SET_MANAGED_KEY_CONFIG, param)
 
     # ========================================================================
     # AHK 端通用宏
@@ -197,17 +247,15 @@ class AHKCommandSender:
 
     def set_macro_steps(self, steps) -> bool:
         """设置 AHK 端宏步骤列表。"""
-        return send_ahk_cmd(
-            self.window_title, CMD_SET_MACRO_STEPS, self.serialize_macro_steps(steps)
-        )
+        return self._send(CMD_SET_MACRO_STEPS, self.serialize_macro_steps(steps))
 
     def start_macro(self) -> bool:
         """启动 AHK 端宏循环。"""
-        return send_ahk_cmd(self.window_title, CMD_START_MACRO, "")
+        return self._send(CMD_START_MACRO, "")
 
-    def stop_macro(self) -> bool:
+    def stop_macro(self, *, force: bool = False) -> bool:
         """停止 AHK 端宏循环并释放宏持键。"""
-        return send_ahk_cmd(self.window_title, CMD_STOP_MACRO, "")
+        return self._send(CMD_STOP_MACRO, "", force=force)
 
     # ========================================================================
     # 队列操作
@@ -225,7 +273,7 @@ class AHKCommandSender:
             是否成功
         """
         param = f"{priority}:{action}"
-        return send_ahk_cmd(self.window_title, CMD_ENQUEUE, param)
+        return self._send(CMD_ENQUEUE, param)
     
     def send_key(self, key: str, priority: int = 2) -> bool:
         """
@@ -271,7 +319,7 @@ class AHKCommandSender:
             str(k).strip() for k in (keys or []) if str(k).strip()
         )
 
-    def set_skill_hold_keys(self, keys) -> bool:
+    def set_skill_hold_keys(self, keys, *, force: bool = False) -> bool:
         """声明式下发 TriggerMode=2 期望持键的**完整集合**(空集合=释放全部)。
 
         AHK 端独占维护"实际已按下"状态并做差量同步,因此本命令幂等:
@@ -279,13 +327,13 @@ class AHKCommandSender:
         """
         from torchlight_assistant.config.ahk_commands import CMD_SET_SKILL_HOLD_KEYS
 
-        return send_ahk_cmd(
-            self.window_title,
+        return self._send(
             CMD_SET_SKILL_HOLD_KEYS,
             self.serialize_skill_hold_keys(keys),
+            force=force,
         )
 
-    def set_accepting_actions(self, enabled: bool) -> bool:
+    def set_accepting_actions(self, enabled: bool, *, force: bool = False) -> bool:
         """运行时闸门。关闸 = AHK 端原子停止屏障(清场+封住所有输入生产路径)。
 
         用于"按了 F8/Z 之后绝不再有键打进游戏":Python 侧 join 调度线程只等 2 秒,
@@ -295,10 +343,10 @@ class AHKCommandSender:
         """
         from torchlight_assistant.config.ahk_commands import CMD_SET_ACCEPTING_ACTIONS
 
-        return send_ahk_cmd(
-            self.window_title,
+        return self._send(
             CMD_SET_ACCEPTING_ACTIONS,
             "true" if enabled else "false",
+            force=force,
         )
 
     def shutdown(self) -> bool:
@@ -309,7 +357,7 @@ class AHKCommandSender:
         """
         from torchlight_assistant.config.ahk_commands import CMD_SHUTDOWN
 
-        return send_ahk_cmd(self.window_title, CMD_SHUTDOWN)
+        return self._send(CMD_SHUTDOWN, force=True)
 
 
     # ========================================================================
@@ -318,13 +366,13 @@ class AHKCommandSender:
     
     def pause(self) -> bool:
         """暂停队列处理"""
-        return send_ahk_cmd(self.window_title, CMD_PAUSE)
+        return self._send(CMD_PAUSE)
     
     def resume(self) -> bool:
         """恢复队列处理"""
-        return send_ahk_cmd(self.window_title, CMD_RESUME)
+        return self._send(CMD_RESUME)
     
-    def clear_queue(self, priority: int = -1) -> bool:
+    def clear_queue(self, priority: int = -1, *, force: bool = False) -> bool:
         """
         清空队列
 
@@ -334,7 +382,7 @@ class AHKCommandSender:
                 -2 = 仅非紧急(high/normal/low,保留 emergency 救命药剂)
                 0-3 = 指定单个优先级队列
         """
-        return send_ahk_cmd(self.window_title, CMD_CLEAR_QUEUE, str(priority))
+        return self._send(CMD_CLEAR_QUEUE, str(priority), force=force)
     
     # ========================================================================
     # Hook管理
@@ -348,7 +396,7 @@ class AHKCommandSender:
     def _send_hook_register(self, key: str, mode: str) -> bool:
         """实际发送注册命令到 AHK,无保留键检查 — 仅 register_hook / register_root_hook 内部使用。"""
         param = f"{key}:{mode}"
-        return send_ahk_cmd(self.window_title, CMD_HOOK_REGISTER, param)
+        return self._send(CMD_HOOK_REGISTER, param)
 
     def register_root_hook(self, key: str) -> bool:
         """注册永久根热键(F8/F7/F9 专用,intercept 模式)。绕过保留键检查。"""
@@ -381,16 +429,11 @@ class AHKCommandSender:
         Args:
             key: 按键名称
         """
-        return send_ahk_cmd(self.window_title, CMD_HOOK_UNREGISTER, key)
+        return self._send(CMD_HOOK_UNREGISTER, key)
     
-    # ========================================================================
-    # 统计信息
-    # ========================================================================
-    
-    def get_stats(self) -> bool:
-        """请求统计信息"""
-        return send_ahk_cmd(self.window_title, "get_stats")
-    
+    # 统计信息不提供请求接口:AHK 端每秒主动推送 "stats:" 事件(SendStatsToPython),
+    # 旧的 get_stats() 把字符串当命令 ID 发送,从未工作过,已删除。
+
     # ========================================================================
     # 便捷方法
     # ========================================================================

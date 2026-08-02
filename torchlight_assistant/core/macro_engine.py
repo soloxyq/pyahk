@@ -17,6 +17,17 @@ from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 from ..utils.key_names import normalize_config_keys
 
 
+# GUI「图像捕获间隔」的合法范围与默认值(毫秒)。
+# 下限 10:更低会让 DXGI 捕获线程空转抢 CPU;上限 1000:更高时资源检测/技能冷却
+# 基本失明,一定是配错了(比如把秒填成了毫秒的倒数)。
+CAPTURE_INTERVAL_MIN_MS = 10
+CAPTURE_INTERVAL_MAX_MS = 1000
+CAPTURE_INTERVAL_DEFAULT_MS = 40
+SPECIAL_KEY_RESUME_DELAY_MIN_MS = 0
+SPECIAL_KEY_RESUME_DELAY_MAX_MS = 1000
+SPECIAL_KEY_RESUME_DELAY_DEFAULT_MS = 0
+
+
 class MacroEngine:
     """重构后的宏引擎 - 专注于状态管理和事件协调"""
 
@@ -44,6 +55,9 @@ class MacroEngine:
         # 失败结果存在这里,由 ui:request_current_config 握手时一次性重放。
         self._pending_load_error: Optional[Tuple[str, str]] = None
         self.current_config_file = self._resolve_initial_config_file(config_file)
+        # AHK 传输挂死锁:置位后 F8 拒绝进入 READY(见 _on_ahk_transport_failed),
+        # 只能重启应用解除 —— 挂死的 AHK 无法经命令恢复,也不能安全强杀。
+        self._ahk_transport_failed = False
         self._is_debug_mode_active = (
             False  # 跟踪当前是否处于调试模式（由配置和状态决定）
         )
@@ -178,6 +192,8 @@ class MacroEngine:
         # AHK 子进程意外退出 → 强制停机 + 告警。由 AHKInputHandler 在命令发送失败时探测到进程
         # 已退出后,经 ahk_signal_bridge 切回 GUI 线程发布本事件(故本 handler 已在主线程)。
         event_bus.subscribe("ahk_process_died", self._on_ahk_process_died)
+        # AHK 进程活着但消息循环挂死(命令 500ms 无响应):同样延迟停机,并锁定 READY 入口
+        event_bus.subscribe("ahk_transport_failed", self._on_ahk_transport_failed)
         # AHK 丢弃了待发动作(过载预算裁剪 / 等待过期),data 带两个累计计数
         event_bus.subscribe("queue_drop", self._on_queue_drop)
 
@@ -481,6 +497,11 @@ class MacroEngine:
     def _handle_ahk_special_key_pause(self, action: str):
         """处理特殊按键状态变化（最小实现）：特殊按键激活期间丢弃所有非紧急入队"""
         if action == "start":
+            # 🔒 迟到的 start(QueuedConnection 跨状态转换)不得在 STOPPED 重新打开
+            # 丢弃闸:special Hook 已注销,end 永远不会到,非紧急入队会被永久丢弃
+            # (下轮开跑一个技能都不发且无日志)。end 不设门禁 —— 安全方向。
+            if self._state == MacroState.STOPPED:
+                return
             LOG_INFO("【特殊按键】 特殊按键激活 - 丢弃所有非紧急入队")
             # 启用丢弃非紧急入队（HP/MP除外）
             if hasattr(self.input_handler, "set_drop_non_emergency"):
@@ -493,6 +514,10 @@ class MacroEngine:
 
     def _handle_ahk_managed_key_down(self, key: str):
         """处理管理按键按下（如RButton/e）- 拦截+延迟+映射"""
+        # 🔒 STOPPED 时迟到的管理键事件没有意义(停止链已清空全部队列),
+        # 且熔断闩死时下面的 force 清队还要白等一次 500ms —— 直接丢弃。
+        if self._state == MacroState.STOPPED:
+            return
         LOG_INFO(f"[管理按键] ========== 按下: {key} ==========")
         LOG_INFO(f"[管理按键] 当前状态: {self._state}")
 
@@ -521,6 +546,12 @@ class MacroEngine:
 
     def _handle_ahk_monitor_key_down(self, key: str):
         """处理AHK监控按键按下（交互键A等）"""
+        # 🔒 QueuedConnection 下事件可能跨状态转换迟到:STOPPED 时 monitor Hook 已注销,
+        # 迟到的 down 不得把刚归零的 force-move 重新点亮(配对的 up 永远不会再来,
+        # AHK 端 ForceMoveActive 会卡 true → 下轮开跑技能全被换成交互键)。
+        # up 方向不设门禁 —— 它只会关闭状态,是安全方向。
+        if self._state == MacroState.STOPPED:
+            return
         key_lower = key.lower()
 
         # 检查是否是交互/强制移动按键
@@ -613,7 +644,7 @@ class MacroEngine:
             # 收集资源区域配置，用于模板截取
             resource_regions = self._collect_resource_regions()
             ready_frame = self.border_manager.capture_once_for_debug_and_cache(
-                self._global_config.get("capture_interval", 40), resource_regions
+                self._capture_interval_ms(), resource_regions
             )
 
             # 通知ResourceManager截取HSV模板
@@ -637,6 +668,12 @@ class MacroEngine:
             # PAUSED 是关着闸的;READY→RUNNING 时闸门已开,重开是幂等空操作。
             if not self._open_runtime_gate("进入 RUNNING"):
                 return
+
+            # 闸门关闭期间 AHK 拒绝 set_force_move_state(True)(防迟到激活复活替换);
+            # 用户按住强制移动键跨过 Z 恢复时,PAUSED 里的合法 true 也被拒了 ——
+            # 开闸后按 Python 账本重对齐一次。幂等,一条命令。
+            if hasattr(self.input_handler, "set_force_move_state"):
+                self.input_handler.set_force_move_state(self._force_move_active)
 
             # 如果是从暂停状态恢复，调用resume；否则启动子系统
             if from_state == MacroState.PAUSED:
@@ -686,6 +723,12 @@ class MacroEngine:
                     LOG_ERROR("[停止] 关闭运行时闸门失败(AHK 可能已退出)")
             except Exception as e:
                 LOG_ERROR(f"[停止] 关闭运行时闸门失败: {e}")
+
+            # monitor/special 的物理 key-up 可能因 Hook 注销而永远不会产生。
+            # STOPPED 本地直接复位,避免下一轮仍显示/执行强制移动或继续丢弃普通技能。
+            self._force_move_active = False
+            if hasattr(self.input_handler, "set_drop_non_emergency"):
+                self.input_handler.set_drop_non_emergency(False)
             # 说明:技能持键已改为声明式命令(CMD_SET_SKILL_HOLD_KEYS),不再经动作队列,
             # 因此第 2 步清队列不会再把持键的释放动作一起清掉。
 
@@ -743,12 +786,37 @@ class MacroEngine:
 
         event_bus.publish(f"engine:macro_{state.name.lower()}")
 
+    def _capture_interval_ms(self) -> int:
+        """「图像捕获间隔」的唯一读取口径:10..1000ms,默认 40。
+
+        钳制放在读取处而不是加载处:_global_config 有两条赋值路径(F8 与
+        _on_config_updated),读取处钳制两条都罩住。非法值要**可见**地纠正 ——
+        静默用 0/负数会让捕获线程空转,静默用超大值会让检测"失明",都比报错难查。
+        """
+        raw = self._global_config.get("capture_interval", CAPTURE_INTERVAL_DEFAULT_MS)
+        try:
+            val = int(raw)
+        except (TypeError, ValueError):
+            LOG_ERROR(
+                f"[捕获间隔] 配置值非法({raw!r}),回退默认 {CAPTURE_INTERVAL_DEFAULT_MS}ms"
+            )
+            return CAPTURE_INTERVAL_DEFAULT_MS
+        clamped = min(max(val, CAPTURE_INTERVAL_MIN_MS), CAPTURE_INTERVAL_MAX_MS)
+        if clamped != val:
+            LOG_ERROR(
+                f"[捕获间隔] 配置值 {val}ms 超出合法范围 "
+                f"{CAPTURE_INTERVAL_MIN_MS}..{CAPTURE_INTERVAL_MAX_MS}ms,已钳制为 {clamped}ms"
+            )
+        return clamped
+
     def _start_subsystems_based_on_mode(self):
         """根据当前准备的模式，启动或恢复对应的子系统。"""
         LOG_INFO(f"[状态转换] 启动子系统，当前模式: {self._prepared_mode}")
 
-        # 统一启动屏幕捕获
-        self.border_manager.start_capture_loop(capture_region=None)
+        # 统一启动屏幕捕获(捕获间隔与 READY 期一次性捕获同一口径,见 _capture_interval_ms)
+        self.border_manager.start_capture_loop(
+            interval_ms=self._capture_interval_ms(), capture_region=None
+        )
 
         if self._prepared_mode == "combat":
             LOG_INFO("[状态转换] 启动技能管理器")
@@ -821,6 +889,14 @@ class MacroEngine:
             LOG_INFO(f"[热键] 是否有配置: {full_config is not None}")
             with self._transition_lock:
                 if self._state == MacroState.STOPPED:
+                    # 🔒 AHK 传输挂死后禁止重新进入 READY:命令通道已不可用,
+                    # 进 READY 只会"看着在跑、键全没发"。不自动重启,请用户重启应用。
+                    if self._ahk_transport_failed:
+                        LOG_ERROR(
+                            "[MacroEngine] AHK 通信已挂死并被锁定,无法启动。"
+                            "请重启本应用(不会自动重启 AHK)。"
+                        )
+                        return
                     # 🔧 三模式硬互斥(combat/pathfinding/洗练):洗练运行时拒绝启动主功能,
                     # 与 _on_f9_key_press 保持对称(F9 也有此检查)
                     if self.affix_reroll_manager.status.is_running:
@@ -1048,6 +1124,31 @@ class MacroEngine:
             mode_type = stationary_config.get("mode_type", "")
             if mode_type:
                 batch_config["stationary_type"] = mode_type
+
+            raw_resume_delay = global_config.get(
+                "special_key_resume_delay_ms", SPECIAL_KEY_RESUME_DELAY_DEFAULT_MS
+            )
+            try:
+                resume_delay = int(raw_resume_delay)
+            except (TypeError, ValueError):
+                LOG_ERROR(
+                    f"[特殊键恢复] 配置值非法({raw_resume_delay!r}),"
+                    f"回退默认 {SPECIAL_KEY_RESUME_DELAY_DEFAULT_MS}ms"
+                )
+                resume_delay = SPECIAL_KEY_RESUME_DELAY_DEFAULT_MS
+            clamped_resume_delay = min(
+                max(resume_delay, SPECIAL_KEY_RESUME_DELAY_MIN_MS),
+                SPECIAL_KEY_RESUME_DELAY_MAX_MS,
+            )
+            if clamped_resume_delay != resume_delay:
+                LOG_ERROR(
+                    f"[特殊键恢复] 配置值 {resume_delay}ms 超出合法范围 "
+                    f"{SPECIAL_KEY_RESUME_DELAY_MIN_MS}.."
+                    f"{SPECIAL_KEY_RESUME_DELAY_MAX_MS}ms,"
+                    f"已钳制为 {clamped_resume_delay}ms"
+                )
+            # 始终下发 0,否则从带保护窗口的配置切换到默认配置会在 AHK 留下旧值。
+            batch_config["special_key_resume_delay_ms"] = clamped_resume_delay
             
             # 只有在有配置更新时才发送
             if batch_config and hasattr(self.input_handler, "batch_update_config"):
@@ -1208,12 +1309,50 @@ class MacroEngine:
             self._stop_due_to_ahk_death()
 
     def _stop_due_to_ahk_death(self):
-        """实际停机(主线程,延后执行):AHK 崩溃后强制切回 STOPPED。"""
+        """实际停机(主线程,延后执行):AHK 崩溃/挂死后强制切回 STOPPED。"""
         try:
             if self._state != MacroState.STOPPED:
                 self.stop_macro()
         except Exception as e:
             LOG_ERROR(f"[引擎] AHK 崩溃后强制停止失败: {e}")
+
+    def _on_ahk_transport_failed(self, key: str = ""):
+        """AHK 传输挂死(进程活着但命令 500ms 无响应)的应急处理(已在 GUI 线程)。
+
+        与 ahk_process_died 汇入同一个延迟 STOPPED 流程,但额外**锁定 READY 入口**:
+        挂死的 AHK 既不能自动重启(TerminateProcess 会跳过 OnExit,可能把按住的键
+        永久留在游戏里),也无法通过命令恢复 —— 用户重启应用是唯一干净出路,
+        在此之前允许 F8 重新进 READY 只会制造"看着在跑、键全没发"的假象。
+        """
+        self._ahk_transport_failed = True
+        reason = key or "unknown"
+        LOG_ERROR(
+            f"[引擎] ⚠️ AHK 通信失效({reason})。已停止主功能并锁定启动入口:"
+            "不会自动重启或强杀 AHK,请重启本应用。"
+        )
+        try:
+            import winsound
+
+            winsound.MessageBeep(winsound.MB_ICONHAND)
+        except Exception:
+            pass
+        try:
+            if self.sound_manager:
+                self.sound_manager.play("goodbye")
+        except Exception as e:
+            LOG_ERROR(f"[引擎] AHK 挂死告警音播放失败: {e}")
+        try:
+            event_bus.publish("engine:ahk_transport_notice")
+        except Exception:
+            pass
+        # 与 ahk_process_died 相同:延后停机,避免在状态转换内部同步重入 _set_state
+        try:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, self._stop_due_to_ahk_death)
+        except Exception as e:
+            LOG_ERROR(f"[引擎] 调度 AHK 挂死停机失败,改为直接停机: {e}")
+            self._stop_due_to_ahk_death()
 
     def toggle_pause_resume(self) -> bool:
         try:
@@ -1439,6 +1578,7 @@ class MacroEngine:
             "queue_processor_interval": 50,
             "cooldown_checker_interval": 100,
             "capture_interval": 40,
+            "special_key_resume_delay_ms": 0,
             "sound_feedback_enabled": False,
             "boss_mode_hotkey": "",
             "window_activation": {"enabled": False, "ahk_class": "", "ahk_exe": ""},

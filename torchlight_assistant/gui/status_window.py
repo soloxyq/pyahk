@@ -5,6 +5,31 @@ from typing import Optional
 from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 
 
+def format_queue_stats_line(data: str) -> str:
+    """把 AHK 每秒推送的 stats 载荷压成 OSD 的一行紧凑文本。
+
+    载荷形如 "e=0,h=1,n=3,l=0,p=120,d=2,x=1":e/h/n/l 是**实时**队列深度,
+    p/d/x 是累计 处理/过载丢弃/等待过期(与 queue_drop 诊断同口径)。
+    丢弃计数只在非零时展示(常态不加噪音)。解析不了返回 ""(不显示,不抛异常)。
+    """
+    vals = {}
+    for part in data.split(","):
+        if "=" in part:
+            k, v = part.split("=", 1)
+            try:
+                vals[k.strip()] = int(v)
+            except ValueError:
+                pass
+    if not all(k in vals for k in ("e", "h", "n", "l")):
+        return ""
+    line = f"队列 e{vals['e']} h{vals['h']} n{vals['n']} l{vals['l']}"
+    dropped = vals.get("d", 0)
+    expired = vals.get("x", 0)
+    if dropped or expired:
+        line += f" | 丢弃 过载{dropped} 过期{expired}"
+    return line
+
+
 class OSDStatusWindow(QWidget):
     """A small, always-on-top OSD status window"""
 
