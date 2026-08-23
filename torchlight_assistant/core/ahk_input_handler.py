@@ -6,7 +6,8 @@ AHK输入处理器
 import subprocess
 import os
 import time
-from typing import Optional
+from collections import deque
+from typing import Callable, Optional
 
 from PySide6.QtCore import Qt
 
@@ -24,6 +25,7 @@ class AHKInputHandler:
 
     # 永久根热键(F8 主控 / F7 洗练 / F9 寻路) — 业务配置侧禁止注册,避免覆盖 STOPPED 时的状态机 handler
     RESERVED_ROOT_KEYS = frozenset({"f8", "f7", "f9"})
+    RECENT_AHK_EVENT_LIMIT = 512
 
     def __init__(self, event_bus=None, debug_display_manager=None):
         self.event_bus = event_bus
@@ -47,6 +49,9 @@ class AHKInputHandler:
         self._ahk_death_notified = False
         # AHK 传输失效探测(进程活着但命令超时):同样只告警上报一次
         self._ahk_transport_failure_notified = False
+        self._signal_connected = False
+        self._recent_ahk_event_ids = deque()
+        self._recent_ahk_event_id_set = set()
         
         self._init_ahk_system()
         
@@ -74,10 +79,61 @@ class AHKInputHandler:
             self._on_ahk_event,
             Qt.QueuedConnection,
         )
+        self._signal_connected = True
+
+    def _disconnect_ahk_signal(self):
+        """对称解除全局信号桥连接，避免重建引擎后旧 handler 继续收事件。"""
+        if not getattr(self, "_signal_connected", False):
+            return
+        try:
+            ahk_signal_bridge.ahk_event.disconnect(self._on_ahk_event)
+        except (RuntimeError, TypeError) as e:
+            # Qt 对已经断开的连接会抛异常；cleanup 必须保持幂等。
+            LOG_INFO(f"[AHK输入] 解除事件信号连接时已不存在: {e}")
+        finally:
+            self._signal_connected = False
+
+    def _unwrap_ahk_event(self, event: str) -> Optional[str]:
+        """解包可靠事件信封，并在有界窗口内按 session/seq 去重。"""
+        if not event.startswith("evt:"):
+            return event
+
+        parts = event.split(":", 3)
+        if len(parts) != 4 or not parts[1] or not parts[2] or not parts[3]:
+            LOG_ERROR(f"[AHK输入] 丢弃格式错误的可靠事件信封: {event!r}")
+            return None
+        session_id, sequence, payload = parts[1], parts[2], parts[3]
+        try:
+            sequence_value = int(sequence)
+        except ValueError:
+            LOG_ERROR(f"[AHK输入] 丢弃序号非法的可靠事件信封: {event!r}")
+            return None
+        if sequence_value < 0:
+            LOG_ERROR(f"[AHK输入] 丢弃负序号可靠事件信封: {event!r}")
+            return None
+
+        recent_ids = getattr(self, "_recent_ahk_event_ids", None)
+        recent_set = getattr(self, "_recent_ahk_event_id_set", None)
+        if recent_ids is None or recent_set is None:
+            # 兼容测试中 object.__new__ 构造的最小实例。
+            recent_ids = self._recent_ahk_event_ids = deque()
+            recent_set = self._recent_ahk_event_id_set = set()
+        event_id = (session_id, sequence_value)
+        if event_id in recent_set:
+            return None
+        while len(recent_ids) >= self.RECENT_AHK_EVENT_LIMIT:
+            recent_set.discard(recent_ids.popleft())
+        recent_ids.append(event_id)
+        recent_set.add(event_id)
+        return payload
 
     def _on_ahk_event(self, event: str):
         """这个方法现在总是在主GUI线程中被调用"""
         if not self.event_bus:
+            return
+
+        event = self._unwrap_ahk_event(event)
+        if event is None:
             return
         
         parts = event.split(':', 1)
@@ -154,8 +210,8 @@ class AHKInputHandler:
         两类发送失败,分开处置:
         - 进程已退出 → check_ahk_alive 一次性发布 ahk_process_died;
         - 进程活着但 timeout → 一次性发布 ahk_transport_failed。
-          失联后不强杀 AHK:它可能还压着物理按键,强杀会跳过 OnExit 释放,
-          留给用户"重启应用"这一条明确出路。
+          失联后不强杀 AHK:它可能还压着物理按键,强杀会跳过 OnExit 释放。
+          普通命令先 fail-closed 熔断；冷却后仅允许串行 PING 探测恢复。
         no_window 不熔断也不锁 F8:FindWindow 失败本身是微秒级且可能因脚本重启恢复,
         下一条命令会重新发现窗口。进入 READY 的闸门命令失败仍会回退 STOPPED。
         普通业务拒绝(rejected,如闸门关闭/未知命令)不属于故障,不触发上报。
@@ -187,35 +243,62 @@ class AHKInputHandler:
         reason = "500ms 无响应"
         LOG_ERROR(
             f"[AHK输入] ⚠️ 命令发送失败({reason}):AHK 进程仍在,但通信通道已失效。"
-            "后续按键命令将全部失效。不会自动重启或强杀 AHK(可能残留按住的键),"
-            "正在停止主功能 —— 请重启本应用。"
+            "普通按键命令已暂时熔断。不会自动重启或强杀 AHK(可能残留按住的键),"
+            "正在停止主功能；冷却后再次启动会先探测通信，持续失败请重启本应用。"
         )
         try:
             ahk_signal_bridge.ahk_event.emit(f"ahk_transport_failed:{failure_kind}")
         except Exception as e:
             LOG_ERROR(f"[AHK输入] 上报 AHK 传输失效事件失败: {e}")
 
+    def recover_transport(self) -> bool:
+        """有界探测 timeout 后的 AHK 通信；不发送或重放业务动作。"""
+        sender = self.command_sender
+        if sender is None or not self.check_ahk_alive():
+            return False
+        was_unavailable = sender.transport_unavailable
+        ok = sender.recover_transport()
+        if ok and was_unavailable:
+            self._ahk_transport_failure_notified = False
+            try:
+                ahk_signal_bridge.ahk_event.emit("ahk_transport_recovered:")
+            except Exception as e:
+                LOG_ERROR(f"[AHK输入] 上报 AHK 通信恢复事件失败: {e}")
+        return ok
+
+    def probe_transport(self) -> bool:
+        """兼容别名；状态机恢复入口使用 recover_transport。"""
+        return self.recover_transport()
+
+    def _dispatch_action(
+        self,
+        debug_action: str,
+        send: Callable[[], bool],
+        *,
+        emergency: bool = False,
+    ) -> bool:
+        """普通输入的唯一出口：统一处理 dry-run、特殊键抑制和发送检查。"""
+        if self.dry_run_mode:
+            if self.debug_display_manager:
+                try:
+                    self.debug_display_manager.add_action(debug_action)
+                except Exception as e:
+                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
+            return True
+        if self._drop_non_emergency and not emergency:
+            return False
+        return self._check_send(send())
+
     def send_key(self, key_str: str) -> bool:
         """
         发送按键
         """
         LOG(f"[AHK输入][DEBUG] send_key called with: {key_str}")
-        if self.dry_run_mode:
-            if self.debug_display_manager:
-                try:
-                    self.debug_display_manager.add_action(f"Key:{key_str}")
-                except Exception as e:
-                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
-            return True
-        
-        # 特殊按键激活时，丢弃所有非紧急入队（send_key 视为非紧急）
-        if self._drop_non_emergency:
-            return False
-        
         if "," in key_str:
-            return self._check_send(self.command_sender.send_sequence(key_str, priority=2))
+            send = lambda: self.command_sender.send_sequence(key_str, priority=2)
         else:
-            return self._check_send(self.command_sender.send_key(key_str, priority=2))
+            send = lambda: self.command_sender.send_key(key_str, priority=2)
+        return self._dispatch_action(f"Key:{key_str}", send)
     
     def activate_target_window(self):
         """请求AHK激活目标窗口"""
@@ -235,69 +318,89 @@ class AHKInputHandler:
         """
         点击鼠标
         """
-        if self.dry_run_mode:
-            if self.debug_display_manager:
-                try:
-                    self.debug_display_manager.add_action(f"Mouse:{button}")
-                except Exception as e:
-                    LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
-            return True
-
-        # 特殊按键激活时，丢弃非紧急入队（鼠标点击视为非紧急）
-        if self._drop_non_emergency:
-            return False
-
-        return self._check_send(self.command_sender.send_mouse_click(button, priority=2))
+        return self._dispatch_action(
+            f"Mouse:{button}",
+            lambda: self.command_sender.send_mouse_click(button, priority=2),
+        )
 
     def click_mouse_at(self, x: int, y: int, hold_time: Optional[float] = None) -> bool:
-        """点击屏幕指定坐标
-
-        ⚠️ 暂未实现 - 当前 AHK 命令协议中没有定义带坐标的鼠标点击命令。
-        洗练(SimpleAffixRerollManager)和寻路(PathfindingManager)调用本方法,
-        在新增 AHK 命令支持前会返回 False 并记录错误,而不会抛 AttributeError。
-
-        TODO: 新增 CMD_MOUSE_CLICK_AT 命令,AHK 端用 `Click x, y` 实现。
-        """
-        LOG_ERROR(
-            f"[AHK输入] click_mouse_at 暂未实现 (x={x}, y={y}, hold_time={hold_time})。"
-            f"洗练/寻路功能需要新增 AHK 命令才能正常工作。"
+        """点击屏幕指定坐标；hold_time 单位沿用现有调用方约定为毫秒。"""
+        try:
+            x_value = int(x)
+            y_value = int(y)
+            hold_ms = 0 if hold_time is None else int(hold_time)
+        except (TypeError, ValueError):
+            LOG_ERROR(
+                f"[AHK输入] 非法坐标点击参数: x={x!r}, y={y!r}, "
+                f"hold_time={hold_time!r}"
+            )
+            return False
+        if not (-2147483648 <= x_value <= 2147483647) or not (
+            -2147483648 <= y_value <= 2147483647
+        ):
+            LOG_ERROR(f"[AHK输入] 坐标超出 32 位范围: ({x_value}, {y_value})")
+            return False
+        clamped_hold_ms = min(max(hold_ms, 0), 5000)
+        if clamped_hold_ms != hold_ms:
+            LOG_INFO(
+                f"[AHK输入] 鼠标按住时长 {hold_ms}ms 超出范围，"
+                f"已钳制为 {clamped_hold_ms}ms"
+            )
+        hold_ms = clamped_hold_ms
+        return self._dispatch_action(
+            f"MouseAt:{x_value},{y_value},{hold_ms}",
+            lambda: self.command_sender.send_mouse_click_at(
+                x_value, y_value, hold_ms, priority=2
+            ),
         )
-        return False
     
     def execute_skill_normal(self, key: str):
         # 🔧 BUG修复: 配置中 Key 字段允许序列(如 "delay50,1,delay100,2"),
         # 之前直接 send_normal 会把整串当作单个按键名 press: 出去导致无效。
         # 现在检测逗号自动走 send_sequence(AHK 端在 EnqueueAction 入口展开为原子动作)。
-        if not key or self._drop_non_emergency:
-            return
+        if not key:
+            return False
         if "," in key:
-            self._check_send(self.command_sender.send_sequence(key, priority=2))
+            send = lambda: self.command_sender.send_sequence(key, priority=2)
         else:
-            self._check_send(self.command_sender.send_normal(key))
+            send = lambda: self.command_sender.send_normal(key)
+        return self._dispatch_action(f"SkillNormal:{key}", send)
 
     def execute_skill_high(self, key: str):
-        if not key or self._drop_non_emergency:
-            return
+        if not key:
+            return False
         if "," in key:
-            self._check_send(self.command_sender.send_sequence(key, priority=1))
+            send = lambda: self.command_sender.send_sequence(key, priority=1)
         else:
-            self._check_send(self.command_sender.send_high_priority(key))
+            send = lambda: self.command_sender.send_high_priority(key)
+        return self._dispatch_action(f"SkillHigh:{key}", send)
 
     def execute_utility(self, key: str):
-        if not key or self._drop_non_emergency:
-            return
+        if not key:
+            return False
         if "," in key:
-            self._check_send(self.command_sender.send_sequence(key, priority=3))
+            send = lambda: self.command_sender.send_sequence(key, priority=3)
         else:
-            self._check_send(self.command_sender.send_low_priority(key))
+            send = lambda: self.command_sender.send_low_priority(key)
+        return self._dispatch_action(f"Utility:{key}", send)
     
     def execute_hp_potion(self, key: str):
-        if key:
-            self._check_send(self.command_sender.send_emergency(key))
+        if not key:
+            return False
+        return self._dispatch_action(
+            f"HPPotion:{key}",
+            lambda: self.command_sender.send_emergency(key),
+            emergency=True,
+        )
     
     def execute_mp_potion(self, key: str):
-        if key:
-            self._check_send(self.command_sender.send_emergency(key))
+        if not key:
+            return False
+        return self._dispatch_action(
+            f"MPPotion:{key}",
+            lambda: self.command_sender.send_emergency(key),
+            emergency=True,
+        )
 
     def set_skill_hold_keys(self, keys) -> bool:
         """声明式下发 TriggerMode=2 期望持键的**完整集合**(取代旧 hold_key/release_key)。
@@ -377,6 +480,10 @@ class AHKInputHandler:
             )
         )
 
+    def arm_main_mode(self) -> bool:
+        """开始 READY 两阶段入口；AHK 原子关闸清场后标记主模式 armed。"""
+        return self._check_send(self.command_sender.arm_main_mode())
+
     def clear_queue(self):
         """清空所有队列(含 emergency)。用于 PAUSED 状态完全停下。"""
         return self._check_send(self.command_sender.clear_queue(-1, force=True))
@@ -428,7 +535,9 @@ class AHKInputHandler:
     
     def set_force_move_state(self, active: bool) -> bool:
         """设置强制移动状态"""
-        return self._check_send(self.command_sender.set_force_move_state(active))
+        return self._check_send(
+            self.command_sender.set_force_move_state(active, force=not active)
+        )
     
     def set_force_move_key(self, key: str) -> bool:
         """设置强制移动键"""
@@ -445,7 +554,9 @@ class AHKInputHandler:
     def set_stationary_mode(self, active: bool, mode_type: str = "shift_modifier") -> bool:
         """设置原地模式状态。"""
         return self._check_send(
-            self.command_sender.set_stationary_mode(active, mode_type)
+            self.command_sender.set_stationary_mode(
+                active, mode_type, force=not active
+            )
         )
 
     def set_managed_key_config(
@@ -485,6 +596,7 @@ class AHKInputHandler:
         self.stop()
     
     def stop(self):
+        self._disconnect_ahk_signal()
         if not self.ahk_process:
             return
 

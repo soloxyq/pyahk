@@ -4,6 +4,7 @@ AHK命令发送器
 """
 
 import threading
+import time
 
 from hold_client import (
     send_ahk_cmd_ex,
@@ -32,6 +33,10 @@ class AHKCommandSender:
     - 控制队列暂停/恢复
     - 处理原地模式的shift修饰符
     """
+
+    # timeout 只说明发送方在预算内没有等到返回，消息可能已经进入 AHK 队列。
+    # 留出安静窗口再探测，避免 GUI/游戏短暂停顿时连续制造 500ms 等待。
+    TRANSPORT_PROBE_COOLDOWN_SECONDS = 2.0
     
     def __init__(self, window_title: str = "HoldServer_Window_UniqueName_12345"):
         self.window_title = window_title
@@ -44,6 +49,8 @@ class AHKCommandSender:
         # no_window 是微秒级的可恢复发现失败,不打开永久熔断。安全清理命令显式
         # force=True 绕过熔断,保证 STOPPED 仍有一次真实的止血机会。
         self._transport_failure_kind = ""
+        self._transport_circuit_lock = threading.Lock()
+        self._next_transport_probe_at = 0.0
         self._check_connection()
 
     @property
@@ -57,7 +64,72 @@ class AHKCommandSender:
     def mark_transport_unavailable(self, kind: str):
         """熔断普通命令；保留安全清理与 shutdown 的强制发送机会。"""
         if kind:
-            self._transport_failure_kind = kind
+            with self._transport_circuit_lock:
+                self._transport_failure_kind = kind
+                self._next_transport_probe_at = max(
+                    self._next_transport_probe_at,
+                    time.monotonic() + self.TRANSPORT_PROBE_COOLDOWN_SECONDS,
+                )
+
+    @property
+    def transport_unavailable(self) -> bool:
+        """普通命令是否正被 timeout 熔断。"""
+        return bool(self._transport_failure_kind)
+
+    def recover_transport(self) -> bool:
+        """在冷却期后串行探测通信，成功才解除普通命令熔断。
+
+        探测只发送无副作用的 PING，并且不会重放触发故障的业务命令。锁使用
+        non-blocking 获取：GUI 与调度线程同时请求恢复时只有一个线程最多等待
+        一次 500ms，其余调用立即失败，维持有界等待和 fail-closed 语义。
+        """
+        if not self.transport_unavailable:
+            return True
+
+        if time.monotonic() < self._next_transport_probe_at:
+            self.last_failure_kind = self._transport_failure_kind
+            return False
+
+        if not self._transport_circuit_lock.acquire(blocking=False):
+            self.last_failure_kind = self._transport_failure_kind
+            return False
+
+        try:
+            # 获取锁前后的时间可能跨过较长调度间隙，必须在锁内再次检查。
+            if not self._transport_failure_kind:
+                return True
+            now = time.monotonic()
+            if now < self._next_transport_probe_at:
+                self.last_failure_kind = self._transport_failure_kind
+                return False
+
+            # 在实际发送前先推进下一探测时间。即使 ctypes 层发生异常，也不会
+            # 让随后每条业务命令立刻再次探测并各等待 500ms。
+            self._next_transport_probe_at = (
+                now + self.TRANSPORT_PROBE_COOLDOWN_SECONDS
+            )
+            try:
+                ok, kind = send_ahk_cmd_ex(self.window_title, CMD_PING, "")
+            except Exception as e:
+                LOG_ERROR(f"[AHKCommandSender] 通信恢复探测异常: {e}")
+                ok, kind = False, SEND_ERROR
+
+            self.last_failure_kind = "" if ok else kind
+            if not ok:
+                # 保留原 timeout 熔断原因。探测时暂时找不到窗口不代表可以重新
+                # 放行业务命令；用户重启 AHK 后下一次冷却探测仍可恢复。
+                return False
+
+            self._transport_failure_kind = ""
+            self._next_transport_probe_at = 0.0
+            LOG_INFO("[AHKCommandSender] AHK 通信探测成功，普通命令熔断已解除")
+            return True
+        finally:
+            self._transport_circuit_lock.release()
+
+    def probe_transport(self) -> bool:
+        """兼容别名；新调用方使用 recover_transport。"""
+        return self.recover_transport()
 
     def _send(self, cmd_id, param: str = "", *, force: bool = False) -> bool:
         """统一发送包装器:所有 AHK 命令必须经此发出,不得直接调 hold_client。
@@ -122,26 +194,32 @@ class AHKCommandSender:
     # 原地模式管理
     # ========================================================================
     
-    def set_stationary_mode(self, active: bool, mode_type: str = "shift_modifier"):
-        """设置原地模式状态"""
+    def set_stationary_mode(
+        self,
+        active: bool,
+        mode_type: str = "shift_modifier",
+        *,
+        force: bool = False,
+    ):
+        """设置原地模式状态；关闭方向可作为停机安全命令强制发送。"""
         self._stationary_mode_active = active
         self._stationary_mode_type = mode_type
         
         # 发送命令到AHK
         from torchlight_assistant.config.ahk_commands import CMD_SET_STATIONARY
         param = f"{'true' if active else 'false'}:{mode_type}"
-        return self._send(CMD_SET_STATIONARY, param)
+        return self._send(CMD_SET_STATIONARY, param, force=force)
     
     def set_force_move_key(self, key: str):
         """设置强制移动键"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_KEY
         return self._send(CMD_SET_FORCE_MOVE_KEY, key)
     
-    def set_force_move_state(self, active: bool):
-        """设置强制移动状态"""
+    def set_force_move_state(self, active: bool, *, force: bool = False):
+        """设置强制移动状态；关闭方向可由上层作为安全命令强制发送。"""
         from torchlight_assistant.config.ahk_commands import CMD_SET_FORCE_MOVE_STATE
         param = "true" if active else "false"
-        return self._send(CMD_SET_FORCE_MOVE_STATE, param)
+        return self._send(CMD_SET_FORCE_MOVE_STATE, param, force=force)
     
     def set_force_move_replacement_key(self, key: str):
         """设置强制移动替换键"""
@@ -306,6 +384,16 @@ class AHKCommandSender:
             priority: 优先级
         """
         return self.enqueue(f"mouse_click:{button}", priority)
+
+    def send_mouse_click_at(
+        self, x: int, y: int, hold_ms: int = 0, priority: int = 2
+    ) -> bool:
+        """把坐标点击作为队列动作发送。
+
+        协议格式为 ``mouse_click_at:x,y,hold_ms``。继续复用 CMD_ENQUEUE，
+        使坐标点击与普通动作共享运行时闸门、优先级和过载控制。
+        """
+        return self.enqueue(f"mouse_click_at:{x},{y},{hold_ms}", priority)
     
     # 注意:TriggerMode=2 的持久按住键**不再**通过队列的 hold:/release: 动作实现,
     # 改用声明式 set_skill_hold_keys(见下方)。原因:入队成功 ≠ 已按下,
@@ -348,6 +436,12 @@ class AHKCommandSender:
             "true" if enabled else "false",
             force=force,
         )
+
+    def arm_main_mode(self) -> bool:
+        """声明主状态机进入 READY；AHK 先原子关闸清场，再设置 armed 标记。"""
+        from torchlight_assistant.config.ahk_commands import CMD_SET_ACCEPTING_ACTIONS
+
+        return self._send(CMD_SET_ACCEPTING_ACTIONS, "arm_main")
 
     def shutdown(self) -> bool:
         """请求 AHK 自行释放全部持键后退出。

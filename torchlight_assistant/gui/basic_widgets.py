@@ -197,6 +197,7 @@ class TimingSettingsWidget(QWidget):
         # 捕获间隔与引擎侧钳制同一口径(macro_engine.CAPTURE_INTERVAL_MIN/MAX_MS):
         # 10..1000ms。Qt 会把加载进来的越界旧值静默钳到范围内,引擎读取处另有警告日志。
         self.timing_spinboxes["capture_interval"].setRange(10, 1000)
+        self.timing_spinboxes["key_press"].setRange(1, 1000)
         # 0 保持立即恢复；正值只延迟自动输入，不延迟特殊键本身的 key-up。
         self.timing_spinboxes["special_key_resume_delay"].setRange(0, 1000)
         self.timing_spinboxes["special_key_resume_delay"].setToolTip(

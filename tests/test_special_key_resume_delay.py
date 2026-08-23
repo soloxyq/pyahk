@@ -93,6 +93,45 @@ def test_ahk_parser_and_gui_range_are_wired():
     )
 
 
+def test_key_press_duration_is_sent_clamped_and_used_by_ahk():
+    def update(value_present, value=None):
+        cfg = {"resource_management": {}}
+        if value_present:
+            cfg["key_press_duration"] = value
+        recorder = _InputRecorder()
+        state = SimpleNamespace(input_handler=recorder)
+        lines = []
+        with mock.patch.object(me, "LOG_ERROR", new=lines.append):
+            MacroEngine._update_ahk_emergency_keys_cache(state, cfg)
+        return recorder.batches[0]["key_press_duration"], lines
+
+    assert update(False) == (10, [])
+    assert update(True, 35) == (35, [])
+    assert update(True, 0)[0] == 1
+    assert update(True, 5000)[0] == 1000
+    assert update(True, "bad")[0] == 10
+
+    with open(os.path.join(REPO, "hold_server_extended.ahk"), encoding="utf-8") as fp:
+        ahk = fp.read()
+    assert 'case "key_press_duration":' in ahk
+    assert "Sleep KeyPressDurationMs" in ahk
+    assert "Sleep 5" not in ahk
+
+    with open(
+        os.path.join(REPO, "torchlight_assistant", "gui", "basic_widgets.py"),
+        encoding="utf-8",
+    ) as fp:
+        gui = fp.read()
+    assert 'timing_spinboxes["key_press"].setRange(1, 1000)' in gui
+
+
+def test_generated_default_config_declares_key_press_duration():
+    engine = object.__new__(MacroEngine)
+    config = engine._generate_default_config()
+
+    assert config["global"]["key_press_duration"] == me.KEY_PRESS_DURATION_DEFAULT_MS
+
+
 def test_d4_druid_profile_enables_a_valid_guard():
     with open(os.path.join(REPO, "d4_druid.json"), encoding="utf-8") as fp:
         cfg = json.load(fp)

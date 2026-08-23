@@ -70,6 +70,7 @@ _EXTRACT = [
     "ClearNonEmergencyQueues",
     "ClearQueue",
     "IsAllowedDuringPause",
+    "AcceptPythonQueuedAction",
     "EnforceQueueBudget",
     "DropOldestDroppableFrom",
     "IsDroppableAction",
@@ -135,12 +136,19 @@ global ActiveManagedKeys := Map()
 global SkillHeldKeys := Map()
 global SkillHeldOrder := []
 global ManagedHoldTargets := Map()
+global CoordinateMouseHoldActive := false
+global CoordinateMouseHoldPriority := -1
+global PendingPythonReliableEvents := []
+global PendingPythonStateEvents := Map()
+global PythonStatsRetryAt := 0
+global PYTHON_STATS_RETRY_MS := 2000
 global ACTION_PRESS := "press"
 global ACTION_HOLD := "hold"
 global ACTION_RELEASE := "release"
 global ACTION_SEQUENCE := "sequence"
 global ACTION_CLEANUP := "cleanup"
 global ACTION_MOUSE_CLICK := "click"
+global ACTION_MOUSE_CLICK_AT := "mouse_click_at"
 global ACTION_DELAY := "delay"
 global ACTION_NOTIFY := "notify"
 global ACTION_SEQ_RUNNING := "seqrun"
@@ -178,12 +186,21 @@ MarkManagedHoldTarget(key) {
 }
 ClearManagedHoldTarget(key) {
 }
-ReleaseAllManagedHoldTargets() {
+ReleaseAllManagedHoldTargets(preserveNonEmergencyCoordinate := false) {
     return false
+}
+ReleaseCoordinateMouseHoldIfCleared(priority) {
+    return false
+}
+ClearCoordinateMouseHoldState(key, priority) {
 }
 ClearManagedKeyMark(key) {
 }
 ExecuteMouseClick(data) {
+}
+ExecuteMouseClickAt(data, priority) {
+}
+QueuePythonReliableEvent(data, tryNow := true) {
 }
 SendEventToPython(data, bypassBackoff := false, armBackoff := true) {
     global OverloadNotifications
@@ -286,6 +303,22 @@ loop 500 {
 }
 Record("s1_ticks_to_drain", ticksUsed)
 Record("s1_executed", ExecLog.Length)
+
+; =====================================================================
+; S0 特殊键保护必须在 AHK 的 Python 入队边界成立，不能依赖可能被合并的 start 事件
+; =====================================================================
+ResetAll()
+SpecialKeysPaused := true
+s0DropResult := AcceptPythonQueuedAction(2, "press:skill")
+AcceptPythonQueuedAction(2, "sequence:press:q,press:w")
+Record("s0_drop_reports_success", s0DropResult ? 1 : 0)
+Record("s0_ordinary_dropped", TotalQueueCount)
+AcceptPythonQueuedAction(0, "press:hp")
+AcceptPythonQueuedAction(2, "release:LButton")
+Record("s0_safe_actions_kept", TotalQueueCount)
+SpecialKeysPaused := false
+AcceptPythonQueuedAction(2, "press:after")
+Record("s0_after_pause_kept", TotalQueueCount)
 
 ; =====================================================================
 ; S2 序列放大:占 1 个队列项(一个决策),但要 N 个 tick 才发得完(N 个原子)
@@ -943,6 +976,18 @@ def _measure_timer_period():
     period = vals["elapsed_ms"] / max(1, vals["fires"])
     _TIMER_MEASURED = (period, 1000.0 / period)
     return _TIMER_MEASURED
+
+
+def test_special_pause_drops_new_non_emergency_actions_at_ahk_boundary():
+    """快速 start/end 合并也不能让保护期内的新技能积压到 Space 松开后补打。"""
+    if AHK_EXE is None:
+        print("SKIP: 未找到 AutoHotkey v2")
+        return
+    d = _measure()
+    assert d["s0_drop_reports_success"] == "1"
+    assert d["s0_ordinary_dropped"] == "0"
+    assert d["s0_safe_actions_kept"] == "2"
+    assert d["s0_after_pause_kept"] == "3"
 
 
 def test_process_queue_tick_period():

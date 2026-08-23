@@ -66,8 +66,11 @@ _EXTRACT = [
     "MarkManagedHoldTarget",
     "ClearManagedHoldTarget",
     "ReleaseAllManagedHoldTargets",
+    "ClearCoordinateMouseHoldState",
     "ClearManagedKeyMark",
     "ExecuteAction",
+    "ParseMouseClickAt",
+    "ExecuteMouseClickAt",
     # 宏解释器一组:验证运行时闸门能压住 MacroTick
     "SetMacroSteps",
     "StartMacro",
@@ -120,6 +123,8 @@ global SkillHoldDesiredOrder := []
 global SkillHeldKeys := Map()
 global SkillHeldOrder := []
 global ManagedHoldTargets := Map()
+global CoordinateMouseHoldActive := false
+global CoordinateMouseHoldPriority := -1
 global ActiveManagedKeys := Map()
 global SpecialKeysPressed := Map()
 global SpecialKeysPaused := false
@@ -140,9 +145,11 @@ global ACTION_RELEASE := "release"
 global ACTION_SEQUENCE := "sequence"
 global ACTION_CLEANUP := "cleanup"
 global ACTION_MOUSE_CLICK := "click"
+global ACTION_MOUSE_CLICK_AT := "mouse_click_at"
 global ACTION_DELAY := "delay"
 global ACTION_NOTIFY := "notify"
 global ACTION_SEQ_RUNNING := "seqrun"
+global MAX_MOUSE_CLICK_HOLD_MS := 5000
 
 ; ---- 桩函数(IsSkillHoldSuppressed 是真函数,从原文抽取,不在此列)----
 ShouldBlockMouseInStationary(key) {
@@ -186,6 +193,22 @@ IsEmergencyAction(action) {
 }
 ExecuteMouseClick(data) {
 }
+ClickMouseAtOnce(x, y) {
+    global KeyLog
+    if (ShouldBlockMouseInStationary("LButton")) {
+        return false
+    }
+    KeyLog.Push("clickat:" x "," y)
+    return true
+}
+PressMouseAt(x, y) {
+    global KeyLog
+    if (ShouldBlockMouseInStationary("LButton")) {
+        return false
+    }
+    KeyLog.Push("move:" x "," y)
+    return SendDown("LButton")
+}
 ; 序列推进会把剩余部分放回队首;本文件只测持键账本,不测队列,故记录即可
 global PushedBack := []
 PushFrontAction(priority, action) {
@@ -202,6 +225,10 @@ SendEventToPython(data) {
 }
 QueuePythonStateEvent(channel, event, tryNow := true) {
     ; 事件传输的合并/退避由 test_ahk_event_transport.py 覆盖；此处只记录状态时序。
+    SendEventToPython(event)
+}
+QueuePythonReliableEvent(event, tryNow := true) {
+    ; 可靠信封/FIFO 由 test_ahk_event_transport.py 覆盖；此处只记录业务时序。
     SendEventToPython(event)
 }
 SetMacroManagedSuppressed(flag) {
@@ -239,7 +266,8 @@ EventStr() {
 }
 ResetAll() {
     global KeyLog, EventLog, SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
-    global ManagedHoldTargets, ActiveManagedKeys, BlockMouseSim
+    global ManagedHoldTargets, ActiveManagedKeys, BlockMouseSim, PushedBack
+    global CoordinateMouseHoldActive, CoordinateMouseHoldPriority
     global SpecialKeysPressed, SpecialKeysPaused, SpecialKeyResumeDelayMs
     global RuntimeAcceptingActions
     global MacroSteps, MacroActive, MacroIndex, MacroDueTime
@@ -247,10 +275,13 @@ ResetAll() {
     SetTimer(FinishSpecialKeyPause, 0)
     KeyLog := []
     EventLog := []
+    PushedBack := []
     SkillHoldDesiredOrder := []
     SkillHeldKeys := Map()
     SkillHeldOrder := []
     ManagedHoldTargets := Map()
+    CoordinateMouseHoldActive := false
+    CoordinateMouseHoldPriority := -1
     ActiveManagedKeys := Map()
     SpecialKeysPressed := Map()
     BlockMouseSim := false
@@ -450,6 +481,45 @@ HandleSpecialKeyUp("Space")
 Expect("n1-零延迟立即恢复", SpecialKeysPaused ? "yes" : "no", "no")
 Expect("n2-零延迟事件顺序", EventStr(),
     "special_key_pause:start,special_key_down:Space,special_key_up:Space,special_key_pause:end")
+
+; (o) 坐标点击:零时长直接点击;长按用同优先级 notBefore 释放,不阻塞队列线程
+ResetAll()
+virtualLeft := SysGet(76)
+virtualTop := SysGet(77)
+virtualRight := virtualLeft + SysGet(78)
+ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",0", 2)
+Expect("o1-零时长点击", LogStr(), "clickat:" virtualLeft "," virtualTop)
+Expect("o2-零时长不建立持键账本", ManagedHoldTargets.Count, 0)
+Expect("o3-零时长不安排释放", PushedBack.Length, 0)
+
+ResetAll()
+ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",75", 2)
+Expect("o4-长按只发 down", LogStr(),
+    "move:" virtualLeft "," virtualTop ",down:LButton")
+Expect("o5-长按建立账本", ManagedHoldTargets.Has("LButton") ? "yes" : "no", "yes")
+Expect("o6-长按标记激活", CoordinateMouseHoldActive ? "yes" : "no", "yes")
+Expect("o7-释放使用同优先级延时队首", PushedBack[1],
+    "2:release:LButton:wait75")
+ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",20", 3)
+Expect("o8-重叠长按被拒绝", PushedBack.Length, 1)
+ExecuteAction("release:LButton", 2)
+Expect("o9-释放清理物理键", LogStr(),
+    "move:" virtualLeft "," virtualTop ",down:LButton,up:LButton")
+Expect("o10-释放清理状态", CoordinateMouseHoldActive ? "yes" : "no", "no")
+Expect("o11-释放清理账本", ManagedHoldTargets.Count, 0)
+
+ResetAll()
+ExecuteAction("mouse_click_at:" virtualRight "," virtualTop ",0", 2)
+Expect("o12-虚拟桌面右边界为半开区间", LogStr(), "")
+
+ResetAll()
+BlockMouseSim := true
+ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",0", 2)
+Expect("o13-block_mouse 同样吞掉零时长坐标点击", LogStr(), "")
+ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",75", 2)
+Expect("o14-block_mouse 在长按时也不移动鼠标", LogStr(), "")
+Expect("o15-block_mouse 长按不建立持键账本", ManagedHoldTargets.Count, 0)
+Expect("o16-block_mouse 长按不安排 release", PushedBack.Length, 0)
 
 ; ============================ 汇总 ============================
 report := "CHECKS=" Checks "`n"

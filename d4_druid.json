@@ -254,55 +254,107 @@
                 "key": "3"
             },
             {
-                "type": "press",
-                "key": "LButton"
-            },
-            {
-                "type": "press",
-                "key": "6"
+                "type": "delay",
+                "ms": 35
             },
             {
                 "type": "press",
                 "key": "LButton"
             },
             {
+                "type": "delay",
+                "ms": 35
+            },
+            {
                 "type": "press",
                 "key": "6"
+            },
+            {
+                "type": "delay",
+                "ms": 35
             },
             {
                 "type": "press",
                 "key": "LButton"
             },
             {
+                "type": "delay",
+                "ms": 35
+            },
+            {
                 "type": "press",
                 "key": "6"
+            },
+            {
+                "type": "delay",
+                "ms": 35
             },
             {
                 "type": "press",
                 "key": "LButton"
             },
             {
+                "type": "delay",
+                "ms": 35
+            },
+            {
                 "type": "press",
                 "key": "6"
+            },
+            {
+                "type": "delay",
+                "ms": 35
             },
             {
                 "type": "press",
                 "key": "LButton"
             },
             {
+                "type": "delay",
+                "ms": 35
+            },
+            {
                 "type": "press",
                 "key": "6"
+            },
+            {
+                "type": "delay",
+                "ms": 35
             },
             {
                 "type": "press",
                 "key": "LButton"
             },
             {
+                "type": "delay",
+                "ms": 35
+            },
+            {
                 "type": "press",
                 "key": "6"
+            },
+            {
+                "type": "delay",
+                "ms": 35
+            },
+            {
+                "type": "press",
+                "key": "LButton"
+            },
+            {
+                "type": "delay",
+                "ms": 35
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "delay",
+                "ms": 35
             }
         ],
-        "skill_sequence": "3,LButton,6,LButton,6,LButton,6,LButton,6,LButton,6,LButton,6",
+        "skill_sequence": "3,delay35,LButton,delay35,6,delay35,LButton,delay35,6,delay35,LButton,delay35,6,delay35,LButton,delay35,6,delay35,LButton,delay35,6,delay35,LButton,delay35,6,delay35",
         "process_history": {
             "recent_processes": [
                 "NutstoreClient.exe",

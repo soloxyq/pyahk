@@ -31,6 +31,7 @@ class PathfindingManager:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()  # 新增：暂停事件
+        self._cleanup_done = False
 
         # 地图与探索状态
         self.global_map: Optional[np.ndarray] = None
@@ -93,6 +94,18 @@ class PathfindingManager:
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
         LOG_INFO("[寻路管理器] 自动寻路已停止")
+
+    def cleanup(self):
+        """停止工作线程并对称解除全局 EventBus 订阅。"""
+        if getattr(self, "_cleanup_done", False):
+            return
+        self._cleanup_done = True
+        try:
+            self.stop()
+        except Exception as e:
+            LOG_ERROR(f"[寻路管理器] 清理时停止失败: {e}")
+        finally:
+            event_bus.unsubscribe("engine:config_updated", self._on_config_updated)
 
     def pause(self):
         """暂停寻路执行"""

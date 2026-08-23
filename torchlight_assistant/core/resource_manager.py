@@ -17,6 +17,7 @@ import numpy as np
 from ..utils.border_frame_manager import BorderFrameManager
 from .ahk_input_handler import AHKInputHandler
 from ..utils.debug_log import LOG_INFO, LOG_ERROR, LOG
+from ..utils.region_utils import parse_screen_rect
 
 
 class ResourceManager:
@@ -254,12 +255,14 @@ class ResourceManager:
 
             else:
                 # rectangle
-                x1 = int(config.get("region_x1", 0))
-                y1 = int(config.get("region_y1", 0))
-                x2 = int(config.get("region_x2", 0))
-                y2 = int(config.get("region_y2", 0))
-                if not (x1 < x2 and y1 < y2):
+                rect = parse_screen_rect(
+                    config,
+                    frame_width=frame.shape[1],
+                    frame_height=frame.shape[0],
+                )
+                if rect is None:
                     raise ValueError(f"{resource_type.upper()} 未配置有效检测区域")
+                x1, y1, x2, y2 = rect
 
                 if self.debug_display_manager:
                     self.debug_display_manager.update_detection_region(
@@ -431,16 +434,15 @@ class ResourceManager:
     def _get_region_from_config(self, config: Dict[str, Any]) -> Optional[Tuple[int, int, int, int]]:
         """从配置中获取区域坐标"""
         try:
-            x1 = config.get("region_x1", 0)
-            y1 = config.get("region_y1", 0)
-            x2 = config.get("region_x2", 0)
-            y2 = config.get("region_y2", 0)
-
-            if x1 < x2 and y1 < y2:
-                return (x1, y1, x2, y2)
-            else:
-                LOG_ERROR(f"[ResourceManager] 无效的区域坐标: ({x1},{y1}) -> ({x2},{y2})")
-                return None
+            rect = parse_screen_rect(config)
+            if rect is not None:
+                return rect
+            LOG_ERROR(
+                "[ResourceManager] 无效的区域坐标: "
+                f"({config.get('region_x1')},{config.get('region_y1')}) -> "
+                f"({config.get('region_x2')},{config.get('region_y2')})"
+            )
+            return None
         except Exception as e:
             LOG_ERROR(f"[ResourceManager] 获取区域坐标失败: {e}")
             return None
@@ -537,14 +539,6 @@ class ResourceManager:
             )
         else:
             # 使用矩形检测
-            region_x1 = config.get("region_x1", 0)
-            region_y1 = config.get("region_y1", 0)
-            region_x2 = config.get("region_x2", 0)
-            region_y2 = config.get("region_y2", 0)
-
-            if region_x1 == 0 or region_y1 == 0 or region_x2 == 0 or region_y2 == 0:
-                return 100.0
-
             # 确保有帧数据
             frame = cached_frame
             if frame is None:
@@ -555,6 +549,15 @@ class ResourceManager:
 
             if frame is None:
                 return 100.0
+
+            rect = parse_screen_rect(
+                config,
+                frame_width=frame.shape[1],
+                frame_height=frame.shape[0],
+            )
+            if rect is None:
+                return 100.0
+            region_x1, region_y1, region_x2, region_y2 = rect
 
             # 使用矩形资源检测接口获取精确百分比
             region_name = f"{resource_type}_region"

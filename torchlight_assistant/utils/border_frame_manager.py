@@ -10,6 +10,7 @@ from PIL import Image
 import os
 import cv2
 from .debug_log import LOG, LOG_ERROR, LOG_INFO
+from .region_utils import parse_screen_rect
 
 
 # 导入Native Graphics Capture管理器
@@ -216,12 +217,15 @@ class BorderFrameManager:
             detection_mode = str(config.get("detection_mode", "rectangle")).lower()
 
             if detection_mode == "text_ocr":
-                x1 = int(config.get("text_x1", 0))
-                y1 = int(config.get("text_y1", 0))
-                x2 = int(config.get("text_x2", 0))
-                y2 = int(config.get("text_y2", 0))
-                if x1 < x2 and y1 < y2 and x1 >= 0 and y1 >= 0:
-                    return (x1, y1, x2, y2)
+                rect = parse_screen_rect(
+                    config, ("text_x1", "text_y1", "text_x2", "text_y2")
+                )
+                if rect is not None:
+                    return rect
+                x1 = config.get("text_x1")
+                y1 = config.get("text_y1")
+                x2 = config.get("text_x2")
+                y2 = config.get("text_y2")
                 LOG(f"[资源区域] 无效的文本OCR区域: ({x1},{y1}) -> ({x2},{y2})")
                 return None
 
@@ -229,7 +233,7 @@ class BorderFrameManager:
                 center_x = int(config.get("center_x", 0))
                 center_y = int(config.get("center_y", 0))
                 radius = int(config.get("radius", 0))
-                if radius > 0 and center_x > 0 and center_y > 0:
+                if radius > 0 and center_x >= 0 and center_y >= 0:
                     return (
                         max(0, center_x - radius),
                         max(0, center_y - radius),
@@ -239,13 +243,13 @@ class BorderFrameManager:
                 LOG(f"[资源区域] 无效的圆形区域: center=({center_x},{center_y}), radius={radius}")
                 return None
 
-            x1 = int(config.get("region_x1", 0))
-            y1 = int(config.get("region_y1", 0))
-            x2 = int(config.get("region_x2", 0))
-            y2 = int(config.get("region_y2", 0))
-
-            if x1 < x2 and y1 < y2 and x1 > 0 and y1 > 0:
-                return (x1, y1, x2, y2)
+            rect = parse_screen_rect(config)
+            if rect is not None:
+                return rect
+            x1 = config.get("region_x1")
+            y1 = config.get("region_y1")
+            x2 = config.get("region_x2")
+            y2 = config.get("region_y2")
         except Exception as e:
             LOG_ERROR(f"[资源区域] 获取区域坐标失败: {e}")
             return None

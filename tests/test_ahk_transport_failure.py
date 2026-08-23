@@ -168,6 +168,8 @@ def _sender_state():
     state.window_title = "TEST_WINDOW"
     state._send_state = threading.local()
     state._transport_failure_kind = ""
+    state._transport_circuit_lock = threading.Lock()
+    state._next_transport_probe_at = 0.0
     return state
 
 
@@ -219,6 +221,42 @@ def test_no_window_does_not_open_circuit_and_next_send_can_recover():
         assert state._transport_failure_kind == ""
         assert AHKCommandSender._send(state, 1, "") is True
     assert raw_send.call_count == 2
+
+
+def test_timeout_circuit_recovers_only_after_serial_cooldown_ping():
+    state = _sender_state()
+    state._transport_failure_kind = SEND_TIMEOUT
+    state._next_transport_probe_at = 20.0
+
+    with mock.patch.object(sender_mod.time, "monotonic", return_value=19.0), \
+         mock.patch.object(sender_mod, "send_ahk_cmd_ex") as raw_send:
+        assert state.recover_transport() is False
+    raw_send.assert_not_called()
+    assert state._transport_failure_kind == SEND_TIMEOUT
+
+    state._next_transport_probe_at = 0.0
+    with mock.patch.object(sender_mod.time, "monotonic", return_value=21.0), \
+         mock.patch.object(
+             sender_mod, "send_ahk_cmd_ex", return_value=(True, SEND_OK)
+         ) as raw_send:
+        assert state.recover_transport() is True
+    raw_send.assert_called_once_with("TEST_WINDOW", 1, "")
+    assert state._transport_failure_kind == ""
+    assert state.last_failure_kind == ""
+
+
+def test_transport_recovery_probe_is_nonblocking_when_another_probe_runs():
+    state = _sender_state()
+    state._transport_failure_kind = SEND_TIMEOUT
+    state._next_transport_probe_at = 0.0
+    assert state._transport_circuit_lock.acquire(blocking=False)
+    try:
+        with mock.patch.object(sender_mod.time, "monotonic", return_value=10.0), \
+             mock.patch.object(sender_mod, "send_ahk_cmd_ex") as raw_send:
+            assert state.recover_transport() is False
+        raw_send.assert_not_called()
+    finally:
+        state._transport_circuit_lock.release()
 
 
 def test_last_failure_kind_is_thread_local():
@@ -329,6 +367,10 @@ def test_input_handler_marks_only_cleanup_commands_force():
             calls.append(("hooks", force))
             return True
 
+        def set_force_move_state(self, active, *, force=False):
+            calls.append(("force_move", active, force))
+            return True
+
     state = SimpleNamespace(
         command_sender=Sender(),
         dry_run_mode=False,
@@ -342,6 +384,8 @@ def test_input_handler_marks_only_cleanup_commands_force():
     assert AHKInputHandler.set_skill_hold_keys(state, [])
     assert AHKInputHandler.set_skill_hold_keys(state, ["q"])
     assert AHKInputHandler.clear_all_configurable_hooks(state)
+    assert AHKInputHandler.set_force_move_state(state, False)
+    assert AHKInputHandler.set_force_move_state(state, True)
     assert calls == [
         ("gate", False, True),
         ("gate", True, False),
@@ -350,6 +394,8 @@ def test_input_handler_marks_only_cleanup_commands_force():
         ("holds", [], True),
         ("holds", ["q"], False),
         ("hooks", True),
+        ("force_move", False, True),
+        ("force_move", True, False),
     ]
 
 
@@ -392,8 +438,28 @@ def test_notify_transport_failed_emits_event_once():
     assert "重启" in logged[0], "告警没有明确提示用户重启应用"
 
 
+def test_handler_recovery_emits_once_and_rearms_timeout_notification():
+    sender = SimpleNamespace(
+        transport_unavailable=True,
+        recover_transport=lambda: True,
+    )
+    state = SimpleNamespace(
+        command_sender=sender,
+        check_ahk_alive=lambda: True,
+        _ahk_transport_failure_notified=True,
+    )
+    emitted = []
+    fake_bridge = SimpleNamespace(
+        ahk_event=SimpleNamespace(emit=emitted.append)
+    )
+    with mock.patch.object(handler_mod, "ahk_signal_bridge", fake_bridge):
+        assert AHKInputHandler.recover_transport(state) is True
+    assert emitted == ["ahk_transport_recovered:"]
+    assert state._ahk_transport_failure_notified is False
+
+
 # ---------------------------------------------------------------------------
-# MacroEngine:锁定 READY 入口 + 延迟停机
+# MacroEngine:恢复探测门禁 + 延迟停机
 # ---------------------------------------------------------------------------
 
 def test_engine_transport_failed_sets_lock_and_schedules_delayed_stop():
@@ -417,18 +483,25 @@ def test_engine_transport_failed_sets_lock_and_schedules_delayed_stop():
 
 
 def test_f8_ready_entry_is_gated_on_transport_failure():
-    """源码级钉死:F8 的 STOPPED 分支必须先检查 _ahk_transport_failed。"""
+    """F8 的 STOPPED 分支必须先通过无副作用恢复探测。"""
     path = os.path.join(REPO, "torchlight_assistant", "core", "macro_engine.py")
     with open(path, encoding="utf-8") as fp:
         src = fp.read()
     m = re.search(r"def _handle_f8_press\b(.*?)STOPPED状态启动", src, re.S)
     assert m, "未找到 F8 的 STOPPED → READY 分支"
-    assert "_ahk_transport_failed" in m.group(1), (
-        "F8 STOPPED 分支没有传输挂死闸门 —— 挂死后仍可进 READY(键全发不出去)"
+    assert "_recover_ahk_transport_for_start" in m.group(1), (
+        "F8 STOPPED 分支没有通信恢复门禁 —— 熔断时仍可直接进 READY"
     )
     assert re.search(
-        r'event_bus\.subscribe\(\s*"ahk_transport_failed"', src
+        r'(?:event_bus\.subscribe|self\._subscribe_event)\(\s*'
+        r'"ahk_transport_failed"',
+        src,
     ), "引擎没有订阅 ahk_transport_failed 事件"
+    assert re.search(
+        r'(?:event_bus\.subscribe|self\._subscribe_event)\(\s*'
+        r'"ahk_transport_recovered"',
+        src,
+    ), "引擎没有订阅 ahk_transport_recovered 事件"
 
 
 if __name__ == "__main__":

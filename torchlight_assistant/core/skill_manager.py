@@ -77,8 +77,12 @@ class SkillManager:
 
     def _on_config_updated(self, skills_config, global_config):
         """响应配置更新，并动态更新调度器任务"""
-        # 更新内部配置
-        self.update_all_configs(skills_config)
+        # 技能配置先按旧模式更新；若持键同步失败，保留新配置供下次完整启动，
+        # 但不能继续切换调度任务或产生新的输入动作。
+        if not self.update_all_configs(skills_config):
+            self._global_config = global_config
+            self._abort_running_config_update("技能持键热更新失败")
+            return
         self.update_global_config(global_config)
     
     def _start_autonomous_scheduling(self):
@@ -173,21 +177,34 @@ class SkillManager:
 
     def resume(self):
         """恢复所有技能活动"""
-        if self._is_running:
-            self._is_paused = False
+        if not self._is_running:
+            return False
+        if not self._is_paused:
+            return True
 
-            # 恢复统一调度器
-            self.unified_scheduler.resume()
-            LOG_INFO("[统一调度器] 已恢复")
+        # 先恢复 AHK 输入状态；失败时调度器继续保持暂停，不会出现 Python 已生产、
+        # AHK 却拒绝 START_MACRO/持键声明的半恢复状态。
+        if self._is_macro_mode():
+            input_ready = self._start_ahk_macro()
+        else:
+            input_ready = self._sync_skill_hold_keys()
+        if not input_ready:
+            return False
 
+        if not self.unified_scheduler.resume():
+            # 输入状态已经先恢复，调度器却拒绝 resume 时必须立即补偿；否则
+            # MacroEngine 尚未完成 RUNNING 转换，AHK 宏却会独自继续发键。
             if self._is_macro_mode():
-                self._start_ahk_macro()
+                self._stop_ahk_macro()
             else:
-                # 重新声明完整期望持键集合
-                self._sync_skill_hold_keys()
+                self._release_skill_hold_keys()
+            return False
+        self._is_paused = False
+        LOG_INFO("[统一调度器] 已恢复")
+        return True
 
-    def update_all_configs(self, skills_config: Dict[str, Any]):
-        """更新所有技能配置并同步调度器"""
+    def update_all_configs(self, skills_config: Dict[str, Any]) -> bool:
+        """更新所有技能配置并同步调度器；输入状态提交失败时返回 False。"""
         with self._config_lock:
             # 记录旧的技能配置用于对比
             old_timed_skills = {
@@ -216,10 +233,10 @@ class SkillManager:
             # 如果调度器正在运行，需要更新任务
             if self._is_running and self.unified_scheduler.get_status()["running"]:
                 if self._is_macro_mode():
-                    return
+                    return True
                 # 非暂停状态下,重新声明完整期望集合(AHK 端自行算差量,幂等)
-                if not self._is_paused:
-                    self._sync_skill_hold_keys()
+                if not self._is_paused and not self._sync_skill_hold_keys():
+                    return False
                 # 移除不再需要的定时技能任务
                 removed_skills = old_timed_skills - new_timed_skills
                 for skill_name in removed_skills:
@@ -261,8 +278,24 @@ class SkillManager:
                             f"[统一调度器] 更新定时技能任务: {skill_name}, 间隔: {interval:.3f}s"
                         )
 
-    def update_global_config(self, global_config: Dict[str, Any]):
-        """更新全局配置并同步调度器"""
+        return True
+
+    def _abort_running_config_update(self, reason: str) -> bool:
+        """热更新输入提交失败时先停生产者，再请求状态机执行完整 STOPPED 清场。"""
+        was_running = self._is_running
+        self._is_running = False
+        self._is_paused = False
+        if was_running:
+            self._stop_autonomous_scheduling()
+        LOG_ERROR(f"[配置热更新] {reason}，已停止输入生产并请求回退 STOPPED")
+        try:
+            event_bus.publish("skill_manager:input_sync_failed", reason=reason)
+        except Exception as e:
+            LOG_ERROR(f"[配置热更新] 发布停机请求失败: {e}")
+        return False
+
+    def update_global_config(self, global_config: Dict[str, Any]) -> bool:
+        """更新全局配置；运行中先提交 AHK 输入状态，再切换 Python 调度任务。"""
         old_sequence_enabled = self._global_config.get("sequence_enabled", False)
         new_sequence_enabled = global_config.get("sequence_enabled", False)
         old_macro_steps = self._global_config.get("macro_steps")
@@ -273,16 +306,22 @@ class SkillManager:
 
         if self._is_running and macro_changed:
             if old_sequence_enabled:
-                self._stop_ahk_macro()
+                if not self._stop_ahk_macro():
+                    return self._abort_running_config_update("停止旧 AHK 宏失败")
             if new_sequence_enabled:
                 # 🔧 进入宏模式:先释放技能模式遗留的 TriggerMode=2 持久按住键,否则卡键。
                 # config_updated 先于本方法调用 update_all_configs(),而那时 self._global_config 仍是
                 # 旧值(sequence_enabled=False),会沿技能路径保留这些持键。此处兜底释放。
-                if not old_sequence_enabled:
-                    self._release_skill_hold_keys()
-                self._set_ahk_macro_steps()
-                if not self._is_paused:
-                    self._start_ahk_macro(sync_steps=False)
+                if not old_sequence_enabled and not self._release_skill_hold_keys():
+                    return self._abort_running_config_update("切入宏模式时释放技能持键失败")
+                if not self._set_ahk_macro_steps():
+                    return self._abort_running_config_update("下发热更新宏步骤失败")
+                if not self._is_paused and not self._start_ahk_macro(sync_steps=False):
+                    return self._abort_running_config_update("启动热更新 AHK 宏失败")
+            elif old_sequence_enabled and not self._is_paused:
+                # 宏→技能时先恢复声明式持键，再重建会生产技能动作的调度任务。
+                if not self._sync_skill_hold_keys():
+                    return self._abort_running_config_update("切回技能模式时恢复持键失败")
 
         # 如果调度器正在运行，需要更新任务
         if self._is_running and self.unified_scheduler.get_status()["running"]:
@@ -292,11 +331,6 @@ class SkillManager:
                     f"[统一调度器] 序列模式状态变化: {old_sequence_enabled} -> {new_sequence_enabled}"
                 )
                 self._setup_all_scheduled_tasks()
-                # 🔧 切回技能模式:宏模式期间从未持有 TriggerMode=2 按住键,需补按下。
-                # (update_all_configs 在旧宏模式下 _is_macro_mode() 读旧值=True 而提前 return,
-                #  跳过了持键同步;声明式下发幂等,AHK 端只按下尚未持有的键)
-                if not new_sequence_enabled and not self._is_paused:
-                    self._sync_skill_hold_keys()
             else:
                 if not new_sequence_enabled:
                     # 技能模式：更新冷却检查间隔
@@ -322,6 +356,8 @@ class SkillManager:
                         LOG_INFO(
                             f"[统一调度器] 更新资源管理间隔: {resource_interval:.3f}s"
                         )
+
+        return True
 
     def execute_timed_skill(self, skill_name: str):
         """执行定时技能 - 统一帧管理版本"""
@@ -362,23 +398,41 @@ class SkillManager:
 
     def _set_ahk_macro_steps(self):
         steps = self._get_macro_steps()
-        if hasattr(self.input_handler, "set_macro_steps"):
-            self.input_handler.set_macro_steps(steps)
+        if not hasattr(self.input_handler, "set_macro_steps"):
+            LOG_ERROR("[宏] 输入层不支持下发宏步骤")
+            return False
+        if not self.input_handler.set_macro_steps(steps):
+            LOG_ERROR("[宏] 下发 AHK 宏步骤失败")
+            return False
         LOG_INFO(f"[宏] 已下发 AHK 宏步骤: {len(steps)}")
+        return True
 
     def _start_ahk_macro(self, sync_steps: bool = True):
         if not self._is_macro_mode():
-            return
-        if sync_steps:
-            self._set_ahk_macro_steps()
-        if hasattr(self.input_handler, "start_macro"):
-            self.input_handler.start_macro()
+            return True
+        if sync_steps and not self._set_ahk_macro_steps():
+            return False
+        if not hasattr(self.input_handler, "start_macro"):
+            LOG_ERROR("[宏] 输入层不支持启动宏")
+            return False
+        if not self.input_handler.start_macro():
+            LOG_ERROR("[宏] AHK 宏循环启动失败")
+            return False
         LOG_INFO("[宏] AHK 宏循环已启动")
+        return True
 
-    def _stop_ahk_macro(self):
-        if hasattr(self.input_handler, "stop_macro"):
-            self.input_handler.stop_macro()
+    def _stop_ahk_macro(self) -> bool:
+        if not hasattr(self.input_handler, "stop_macro"):
+            return True
+        try:
+            if self.input_handler.stop_macro() is False:
+                LOG_ERROR("[宏] AHK 宏循环停止失败")
+                return False
+        except Exception as e:
+            LOG_ERROR(f"[宏] AHK 宏循环停止异常: {e}")
+            return False
         LOG_INFO("[宏] AHK 宏循环已停止")
+        return True
 
     def check_cooldowns(self):
         """统一技能冷却检查 - 使用单帧数据确保一致性"""
@@ -808,24 +862,39 @@ class SkillManager:
 
     def start(self):
         if self._is_running:
-            return
-        self._is_running = True
-        self._is_paused = False
-        self._boss_mode_active = False
+            return True
 
         # 设置技能坐标并计算边框
         with self._config_lock:
             resource_config = self._global_config.get("resource_management", {})
             self.border_frame_manager.prepare_border(self._skills_config, resource_config)
 
-        # 直接启动自主调度
-        self._start_autonomous_scheduling()
-
+        # AHK 输入状态先成功提交，再启动 Python 生产者。失败时保持未运行，交给
+        # MacroEngine 的 RUNNING 入口回滚关闭闸门，绝不发布伪 RUNNING。
         if self._is_macro_mode():
-            self._start_ahk_macro()
+            input_ready = self._start_ahk_macro()
         else:
-            # 声明配置中的期望持键集合
-            self._sync_skill_hold_keys()
+            input_ready = self._sync_skill_hold_keys()
+        if not input_ready:
+            return False
+
+        self._is_running = True
+        self._is_paused = False
+        self._boss_mode_active = False
+        try:
+            self._start_autonomous_scheduling()
+            if not self.unified_scheduler.get_status()["running"]:
+                raise RuntimeError("统一调度器启动失败")
+        except Exception:
+            self._is_running = False
+            self._is_paused = False
+            self._stop_autonomous_scheduling()
+            if self._is_macro_mode():
+                self._stop_ahk_macro()
+            else:
+                self._release_skill_hold_keys()
+            raise
+        return True
 
     def stop(self):
         if not self._is_running:

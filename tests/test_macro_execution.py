@@ -37,23 +37,27 @@ class FakeInput:
 
     def __init__(self):
         self.calls = []
+        self.set_macro_steps_result = True
+        self.start_macro_result = True
+        self.stop_macro_result = True
+        self.skill_hold_result = True
 
     def set_macro_steps(self, steps):
         self.calls.append(("set_macro_steps", steps))
-        return True
+        return self.set_macro_steps_result
 
     def start_macro(self):
         self.calls.append(("start_macro",))
-        return True
+        return self.start_macro_result
 
     def stop_macro(self):
         self.calls.append(("stop_macro",))
-        return True
+        return self.stop_macro_result
 
     def set_skill_hold_keys(self, keys):
         # 声明式:记录每次下发的**完整期望集合**(空列表=释放全部)
         self.calls.append(("skill_hold", list(keys)))
-        return True
+        return self.skill_hold_result
 
     def execute_skill_normal(self, key):
         self.calls.append(("normal", key))
@@ -172,6 +176,25 @@ def test_start_macro_mode_delegates_steps_to_ahk():
     assert any(task[0] == "resource_checker" for task in sm.unified_scheduler.added_tasks)
 
 
+def test_macro_start_failure_does_not_publish_local_running_state():
+    sm = _make_sm(sequence_enabled=True)
+    sm.input_handler.start_macro_result = False
+
+    assert sm.start() is False
+    assert sm._is_running is False
+    assert sm.unified_scheduler.running is False
+
+
+def test_hold_sync_failure_does_not_start_python_producers():
+    sm = _make_sm(sequence_enabled=False)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm.input_handler.skill_hold_result = False
+
+    assert sm.start() is False
+    assert sm._is_running is False
+    assert sm.unified_scheduler.running is False
+
+
 def test_pause_and_resume_stop_and_restart_ahk_macro():
     sm = _make_sm(sequence_enabled=True)
     sm._is_running = True
@@ -181,6 +204,33 @@ def test_pause_and_resume_stop_and_restart_ahk_macro():
 
     assert ("stop_macro",) in sm.input_handler.calls
     assert _calls(sm, "start_macro")
+
+
+def test_resume_keeps_scheduler_paused_when_ahk_restore_fails():
+    sm = _make_sm(sequence_enabled=True)
+    assert sm.start() is True
+    sm.pause()
+    sm.input_handler.start_macro_result = False
+
+    assert sm.resume() is False
+    assert sm._is_paused is True
+    assert sm.unified_scheduler.paused is True
+
+
+def test_resume_compensates_ahk_macro_when_scheduler_resume_fails():
+    sm = _make_sm(sequence_enabled=True)
+    assert sm.start() is True
+    sm.pause()
+    sm.input_handler.calls.clear()
+    sm.unified_scheduler.resume = lambda: False
+
+    assert sm.resume() is False
+    assert _calls(sm, "start_macro")
+    assert _calls(sm, "stop_macro")
+    assert sm.input_handler.calls.index(("start_macro",)) < sm.input_handler.calls.index(
+        ("stop_macro",)
+    )
+    assert sm._is_paused is True
 
 
 def test_stop_macro_mode_stops_ahk_macro():
@@ -209,6 +259,83 @@ def test_update_macro_steps_restarts_running_ahk_macro():
     assert ("stop_macro",) in sm.input_handler.calls
     assert ("set_macro_steps", new_steps) in sm.input_handler.calls
     assert ("start_macro",) in sm.input_handler.calls
+
+
+def test_live_macro_step_sync_failure_stops_python_producers():
+    sm = _make_sm(sequence_enabled=True, scheduler_running=True)
+    sm._is_running = True
+    sm.input_handler.set_macro_steps_result = False
+
+    result = sm.update_global_config(
+        {
+            "sequence_enabled": True,
+            "macro_steps": [{"type": "press", "key": "2"}],
+            "resource_management": {"check_interval": 200},
+        }
+    )
+
+    assert result is False
+    assert sm._is_running is False
+    assert sm.unified_scheduler.stopped is True
+    assert not _calls(sm, "start_macro")
+
+
+def test_live_macro_start_failure_stops_python_producers():
+    sm = _make_sm(sequence_enabled=True, scheduler_running=True)
+    sm._is_running = True
+    sm.input_handler.start_macro_result = False
+
+    result = sm.update_global_config(
+        {
+            "sequence_enabled": True,
+            "macro_steps": [{"type": "press", "key": "2"}],
+            "resource_management": {"check_interval": 200},
+        }
+    )
+
+    assert result is False
+    assert sm._is_running is False
+    assert sm.unified_scheduler.stopped is True
+
+
+def test_live_skill_to_macro_release_failure_does_not_start_macro():
+    sm = _make_sm(sequence_enabled=False, scheduler_running=True)
+    sm._is_running = True
+    sm.input_handler.skill_hold_result = False
+
+    result = sm.update_global_config(
+        {
+            "sequence_enabled": True,
+            "macro_steps": [{"type": "press", "key": "2"}],
+            "resource_management": {"check_interval": 200},
+        }
+    )
+
+    assert result is False
+    assert sm._is_running is False
+    assert sm.unified_scheduler.stopped is True
+    assert not _calls(sm, "set_macro_steps")
+    assert not _calls(sm, "start_macro")
+
+
+def test_live_macro_to_skill_hold_failure_does_not_rebuild_tasks():
+    sm = _make_sm(sequence_enabled=True, scheduler_running=True)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm._is_running = True
+    sm.input_handler.skill_hold_result = False
+
+    result = sm.update_global_config(
+        {
+            "sequence_enabled": False,
+            "macro_steps": [],
+            "resource_management": {"check_interval": 200},
+        }
+    )
+
+    assert result is False
+    assert sm._is_running is False
+    assert sm.unified_scheduler.stopped is True
+    assert sm.unified_scheduler.added_tasks == []
 
 
 def test_switch_macro_to_skill_stops_ahk_macro_and_rebuilds_scheduler():

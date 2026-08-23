@@ -14,6 +14,7 @@
 Persistent
 #WinActivateForce ; 强制激活窗口
 SendMode "Input"  ; 使用SendInput模式，提高在游戏中的识别率
+CoordMode "Mouse", "Screen"  ; Python 传入的是 DXGI/桌面屏幕坐标
 
 ; 包含命令定义
 #Include ahk_commands.ahk
@@ -82,6 +83,8 @@ global ForceMovePassthroughKeys := Map()  ; 强制移动期间不被替换的白
 
 ; 发送模式
 global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控件发送(ControlSend)
+; 普通 press 动作的 down→up 持续时间。由 Python 的 key_press_duration 批量同步。
+global KeyPressDurationMs := 10
 
 ; 🎯 异步延迟机制
 ; 管理键独占延迟(delay_clear:)的结束时刻(单调毫秒),0 = 无。
@@ -99,7 +102,9 @@ global MacroHeldKeys := Map()
 global MacroHeldOrder := []
 global MacroSpecialSuppressed := false
 global MacroManagedSuppressed := false
-global MACRO_TICK_MS := 5
+; 仅是检查 MacroDueTime/推进下一步的轮询预算，不是宏步骤的保证间隔。
+; Windows timer 会按系统粒度量化；需要可控节奏必须在 MacroSteps 写显式 delay。
+global MACRO_POLL_INTERVAL_MS := 5
 
 ; 🎯 技能持久按住键(TriggerMode=2)—— 声明式账本,AHK 独占"实际按下"状态
 ; Python 只声明"期望按住哪些键"(有序,鼠标键在前),不再镜像实际状态。
@@ -114,6 +119,8 @@ global SkillHeldOrder := []         ; 实际按下顺序(LIFO 释放用)
 ; 否则 PAUSED/STOPPED 恰好落在 hold:target 与 release:target 之间时,
 ; release 会随 emergency 队列一起被清掉 → 该键真实卡在按下状态。
 global ManagedHoldTargets := Map()
+global CoordinateMouseHoldActive := false
+global CoordinateMouseHoldPriority := -1
 
 ; 🎯 运行时闸门:Python 进入 STOPPED/PAUSED 时**第一件事**就是关掉它。
 ; 理由:UnifiedScheduler.stop() 只 join 2 秒,若在飞回调(如 OCR)超时未退出,
@@ -123,7 +130,9 @@ global ManagedHoldTargets := Map()
 ; sequence 展开)、MacroTick、HandleManagedKey、CMD_START_MACRO、非空持键声明,
 ; 以及 IsSkillHoldSuppressed(压住 Reconcile 的补按环节)。
 ; 清队列/停宏/释放持键/空持键声明等安全清理命令永远放行,释放(up)永不被闸门拦截。
-global RuntimeAcceptingActions := true
+; 进程启动必须 fail-closed：只有主状态机进入 READY/RUNNING，或独立
+; 洗练模式成功启动时，才能显式开闸。
+global RuntimeAcceptingActions := false
 ; WM_COPYDATA 返回值:0 留给未处理/默认窗口过程,业务拒绝必须返回非零专用值。
 ; Python 据此区分“AHK 明确拒绝”与“没有取得协议层结果”。
 global AHK_RESULT_REJECTED := 2
@@ -139,9 +148,40 @@ global CachedPythonHwnd := 0  ; 缓存的Python窗口句柄
 global PYTHON_SEND_TIMEOUT_MS := 50
 global PYTHON_SEND_BACKOFF_MS := 1000
 global PythonSendBackoffUntil := 0
-; 状态类事件保留**最新状态**并由 timer 重试:monitor up 丢失会让强制移动永久卡 true;
-; special pause:end 丢失会让 Python 继续丢弃非紧急生产。普通观察事件允许丢失。
+; 状态类事件保留**最新状态**并由 timer 重试:monitor 供 Python OSD/账本对齐
+; (AHK 本地物理账本独立保证按键替换);special pause:end 让 Python 停止丢弃
+; 非紧急生产。普通观察事件允许丢失。
 global PendingPythonStateEvents := Map()
+; 人工边沿事件不能像 monitor 状态那样合并，否则 F8→Z 等连续操作会改变语义。
+; Hotkey 线程只入 FIFO 后立即返回；timer 负责发送和重试。信封里的 session+seq 由
+; Python 去重，解决 SendMessageTimeoutW 已投递但发送方超时后重试造成的双触发。
+global PythonEventSession := String(MonotonicMs())
+global PythonReliableEventSeq := 0
+global PendingPythonReliableEvents := []
+global MAX_PENDING_PYTHON_RELIABLE_EVENTS := 64
+; 给停机 F8 预留容量，滚轮等高频业务事件不能把可靠队列占满后吞掉安全入口。
+global PYTHON_RELIABLE_F8_RESERVE := 4
+; 动态 Hook 存在时，F8 是“停机意图”而不是普通 toggle。在 Python
+; 可靠信封仍在 AHK FIFO 时保持 pending，合并 GUI 卡顿期间用户重复按下的 F8。
+global F8StopIntentPending := false
+; 主状态机已开始进入 READY，直到完整 STOPPED Hook 清理成功前保持 true。
+; 不能用 RegisteredHooks.Count 代替：Python 原先先开闸后注册首个 Hook，二者之间
+; 的物理 F8 会被误判成 STOPPED 启动键。显式 armed 标记把状态意图提前到开闸之前。
+global MainModeArmed := false
+; STOPPED→READY 的启动 F8 若仍物理按住，后续 down 是 Windows auto-repeat，
+; 不能误判成“再次按 F8 停机”。正常由永久 up Hook 清除；安全桌面吞掉 up 时，
+; 临时物理键态轮询在检测到释放后自愈。
+global MainModeF8AwaitRelease := false
+global MAIN_MODE_F8_RELEASE_POLL_MS := 25
+; 物理 F8 的本地停机锁存。它先于关闸/清场置位，完整动态 Hook 清理成功前，
+; 任何迟到的 SET_ACCEPTING_ACTIONS(true) 都不得重新打开输入。
+global PhysicalStopLatched := false
+global PythonReliableRetryUntil := 0
+global PythonReliableRetryDelayMs := 100
+global PYTHON_RELIABLE_RETRY_BASE_MS := 100
+global PYTHON_RELIABLE_RETRY_MAX_MS := 1000
+global PythonStatsRetryAt := 0
+global PYTHON_STATS_RETRY_MS := 2000
 global SMTO_ABORTIFHUNG := 0x0002
 global SMTO_ERRORONEXIT := 0x0020
 
@@ -230,7 +270,9 @@ global ACTION_CLEANUP := "cleanup"
 global ACTION_HOLD := "hold"
 global ACTION_RELEASE := "release"
 global ACTION_MOUSE_CLICK := "mouse_click"
+global ACTION_MOUSE_CLICK_AT := "mouse_click_at"
 global ACTION_NOTIFY := "notify"
+global MAX_MOUSE_CLICK_HOLD_MS := 5000
 
 ; ===============================================================================
 ; GUI窗口 (接收WM_COPYDATA)
@@ -252,11 +294,18 @@ ProcessQueue() {
     ; 否则函数内对其赋值会创建局部变量,读取也会读到未初始化的局部变量
     global ManagedDelayUntil, TotalQueueCount, QueueCounts
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
-    global QueueStats, IsPaused, SpecialKeysPaused
+    global QueueStats, IsPaused, SpecialKeysPaused, RuntimeAcceptingActions
     global PendingOverloadNotify, STALE_MS
 
+    ; 物理 F8 / PAUSED 的关闸可能中断一个较早的 timer 线程。入口先挡住后续 tick；
+    ; ClearQueue(-1) 与 ExecuteAction 的纵深检查负责已经在飞的那一个 tick。
+    if (!RuntimeAcceptingActions) {
+        return
+    }
+
     ; 过载通知:丢弃发生在 WM_COPYDATA 上下文,通知推迟到这里(定时器上下文)发出。
-    ; 放在快速返回**之前** —— 队列刚被清空(如 PAUSED)时这条通知也不该丢。
+    ; 对开闸状态放在“空队列”快速返回之前，确保队列刚被普通清空时通知不丢；
+    ; 关闸状态由上面的安全 guard 先返回，旧诊断留到下一次合法开闸后再发送。
     ; 标志由 NotifyQueueOverload 在**真正发出**时才清除(被节流时保留,下一 tick 重试)。
     if (PendingOverloadNotify) {
         NotifyQueueOverload()
@@ -304,11 +353,18 @@ ProcessQueue() {
 
     ; 🚀 索急队列永远执行（使用计数器检查）
     if (QueueCounts["emergency"] > 0) {
-        item := EmergencyQueue.RemoveAt(1)
-        DecrementQueueCount("emergency")
-        ExecuteAction(item.action, 0)
-        QueueStats["processed"] := QueueStats["processed"] + 1
-        return
+        ; 坐标长按的 release 可带 notBefore。尚未到期时允许后来的救命药剂越过，
+        ; 不能让鼠标保持时间压住 HP/MP；每次仍最多执行一个 ready 项。
+        now := MonotonicMs()
+        loop EmergencyQueue.Length {
+            if (EmergencyQueue[A_Index].notBefore <= now) {
+                item := EmergencyQueue.RemoveAt(A_Index)
+                DecrementQueueCount("emergency")
+                ExecuteAction(item.action, 0)
+                QueueStats["processed"] := QueueStats["processed"] + 1
+                return
+            }
+        }
     }
 
     ; 🎯 修复：优先级模式下的絒急按键处理（Master方案学习）
@@ -392,12 +448,12 @@ global QUEUE_TICK_MS := 15
 SetTimer(ProcessQueue, QUEUE_TICK_MS)
 
 ; 宏解释器独立 tick:只推进 AHK 端宏状态机,不占用队列与任何延迟闸门
-SetTimer(MacroTick, MACRO_TICK_MS)
+SetTimer(MacroTick, MACRO_POLL_INTERVAL_MS)
 
 ; 队列观测:每秒把实时深度 + 累计丢弃计数推给 Python(OSD 展示)。
 ; 主动推送,不加轮询命令 —— Python 端 get_stats 请求路径已删除。
 SetTimer(SendStatsToPython, 1000)
-SetTimer(FlushPendingPythonStateEvents, 100)
+SetTimer(FlushPendingPythonEvents, 100)
 
 ; 进程退出兜底:仅覆盖**正常退出路径**(ExitApp / CMD_SHUTDOWN / 用户手动关脚本)。
 ; ⚠️ Windows 的 TerminateProcess(Python Popen.terminate/kill)不会触发 OnExit ——
@@ -726,11 +782,17 @@ ClearManagedHoldTarget(key) {
 ; 返回 true 表示补发的 up 里有键同时是持久持键(账本已同步失忆),
 ; 调用方需要决定是否 ReconcileSkillHoldKeys() 补按 —— 若紧接着就要
 ; ReleaseAllSkillHoldKeys()(完全停下),则不该补按。
-ReleaseAllManagedHoldTargets() {
-    global ManagedHoldTargets
+ReleaseAllManagedHoldTargets(preserveNonEmergencyCoordinate := false) {
+    global ManagedHoldTargets, CoordinateMouseHoldActive, CoordinateMouseHoldPriority
 
     forgotHold := false
+    preserved := Map()
     for key, _ in ManagedHoldTargets {
+        if (preserveNonEmergencyCoordinate && key = "LButton"
+            && CoordinateMouseHoldActive && CoordinateMouseHoldPriority > 0) {
+            preserved[key] := true
+            continue
+        }
         SendUp(key)
         ; 该 target 可能同时是 TriggerMode=2 持久持键:这里真实发了 up,
         ; 技能账本必须同步,否则 Reconcile 以为还按着 → 永不补按。
@@ -738,8 +800,42 @@ ReleaseAllManagedHoldTargets() {
             forgotHold := true
         }
     }
-    ManagedHoldTargets := Map()
+    ManagedHoldTargets := preserved
+    if (!preserveNonEmergencyCoordinate || preserved.Count = 0) {
+        CoordinateMouseHoldActive := false
+        CoordinateMouseHoldPriority := -1
+    }
     return forgotHold
+}
+
+ReleaseCoordinateMouseHoldIfCleared(priority) {
+    global CoordinateMouseHoldActive, CoordinateMouseHoldPriority
+
+    if (!CoordinateMouseHoldActive) {
+        return false
+    }
+    clearsHold := priority = -1
+        || (priority = -2 && CoordinateMouseHoldPriority > 0)
+        || priority = CoordinateMouseHoldPriority
+    if (!clearsHold) {
+        return false
+    }
+
+    SendUp("LButton")
+    ClearManagedHoldTarget("LButton")
+    CoordinateMouseHoldActive := false
+    CoordinateMouseHoldPriority := -1
+    return true
+}
+
+ClearCoordinateMouseHoldState(key, priority) {
+    global CoordinateMouseHoldActive, CoordinateMouseHoldPriority
+
+    if (key = "LButton" && CoordinateMouseHoldActive
+        && priority = CoordinateMouseHoldPriority) {
+        CoordinateMouseHoldActive := false
+        CoordinateMouseHoldPriority := -1
+    }
 }
 
 ; SHUTDOWN 的实际退出动作(由一次性定时器调用,确保 WM_COPYDATA 已返回)
@@ -830,27 +926,33 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             }
             parts := CachedStrSplit(param, ":", , 2)
             if (parts.Length >= 2) {
+                if (!IsInteger(parts[1])) {
+                    return AHK_RESULT_REJECTED
+                }
                 priority := Integer(parts[1])
                 action := parts[2]
-                EnqueueAction(priority, action)
-                return 1
+                if (priority < 0 || priority > 3 || !IsValidQueuedAction(action)) {
+                    return AHK_RESULT_REJECTED
+                }
+                return AcceptPythonQueuedAction(priority, action) ? 1 : AHK_RESULT_REJECTED
             }
             return AHK_RESULT_REJECTED
 
         case CMD_SET_ACCEPTING_ACTIONS:
             ; SET_ACCEPTING_ACTIONS - 运行时闸门开关,参数 "true" / "false"
+            ; "arm_main" 先原子关闸清场，再声明主模式正在进入 READY。
+            if (param = "arm_main") {
+                return ArmMainMode() ? 1 : AHK_RESULT_REJECTED
+            }
             ; 关闸 = **原子停止屏障**:同一条消息内完成 关闸+清队+停宏+释放全部持键。
             ; 只关闸不清场是不够的:已入队的动作仍会被 ProcessQueue 消费,
-            ; MacroTick 仍以 5ms 周期真实发键 —— 靠 Python 侧后续命令补清必然有空窗。
-            RuntimeAcceptingActions := (param = "true")
-            if (!RuntimeAcceptingActions) {
-                ClearQueue(-1)
-            } else {
-                ; 开闸与抑制解除同型:补按被推迟的持键(正常流程 desired 已空,是空转;
-                ; Python 随后会重新声明完整集合)
-                ReconcileSkillHoldKeys()
+            ; MacroTick 仍会在下一次 poll 真实发键 —— 靠 Python 侧后续命令补清必然有空窗。
+            if (param != "true" && param != "false") {
+                return AHK_RESULT_REJECTED
             }
-            return 1
+            ; SetRuntimeActionGate 自身检查 PhysicalStopLatched。返回 rejected 很重要：
+            ; Python 必须知道这条迟到的开闸没有生效，不能继续恢复生产者。
+            return SetRuntimeActionGate(param = "true") ? 1 : AHK_RESULT_REJECTED
 
         case CMD_SHUTDOWN:
             ; SHUTDOWN - 优雅关闭。Python 的 Popen.terminate() 在 Windows 上是
@@ -858,8 +960,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 必须先原子清场:若只释放持键不清队列,本消息返回后、退出定时器触发前,
             ; 已到期的 ProcessQueue 可能先执行一次旧队列 → 退出前多发按键。
             ; ClearQueue(-1) 已包含 停宏(含宏持键)+队列级临时持键+技能持键 三类释放。
-            RuntimeAcceptingActions := false
-            ClearQueue(-1)
+            SetRuntimeActionGate(false)
             ; 不在消息处理函数里直接 ExitApp:先让本次 SendMessage 正常返回 1,
             ; 再由一次性定时器退出,先让 Python 的 SendMessageTimeoutW 正常返回。
             SetTimer(AhkShutdownNow, -1)
@@ -885,15 +986,13 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 参数格式: "key:mode"
             parts := CachedStrSplit(param, ":")
             if (parts.Length >= 2) {
-                RegisterHook(parts[1], parts[2])
-                return 1
+                return RegisterHook(parts[1], parts[2]) ? 1 : AHK_RESULT_REJECTED
             }
             return AHK_RESULT_REJECTED
 
         case CMD_HOOK_UNREGISTER:
             ; HOOK_UNREGISTER - 取消Hook
-            UnregisterHook(param)
-            return 1
+            return UnregisterHook(param) ? 1 : AHK_RESULT_REJECTED
 
         case CMD_CLEAR_QUEUE:
             ; CLEAR_QUEUE - 清空队列
@@ -921,20 +1020,25 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 参数格式: "key" 例如: "a"，空字符串表示清空配置
             global ForceMoveKey
             ForceMoveKey := param  ; 接受任何值，包括空字符串
+            ReconcileForceMoveState()
             return 1
 
         case CMD_SET_FORCE_MOVE_STATE:
             ; SET_FORCE_MOVE_STATE - 设置强制移动状态
             ; 参数格式: "true" 或 "false"
             ; 闸门关闭(STOPPED/PAUSED)时拒绝 true:QueuedConnection 下迟到的激活
-            ; 不得在 monitor Hook 已注销后复活按键替换(配对的 up 永远不会再来)。
-            ; false 是安全方向(只会关闭替换),始终放行。PAUSED 期间被拒的合法 true
-            ; 由 RUNNING 开闸后的重对齐补上(macro_engine._on_state_enter RUNNING 分支)。
+            ; 不得在 monitor Hook 已注销后复活按键替换。两个方向最终都从
+            ; AHK 物理账本重算，Python 回发仅作纵深对齐，不是执行态权威。
             global ForceMoveActive
+            if (param != "true" && param != "false") {
+                return AHK_RESULT_REJECTED
+            }
             if (param = "true" && !RuntimeAcceptingActions) {
                 return AHK_RESULT_REJECTED
             }
-            ForceMoveActive := (param = "true")
+            ; AHK 物理 monitor 账本是执行态权威。Python 命令只触发重对齐，
+            ; 不盲写 param；否则迟到 down 回发可在物理 up 后重新点亮替换。
+            ReconcileForceMoveState()
             return 1
 
         case CMD_SET_MANAGED_KEY_CONFIG:
@@ -954,8 +1058,7 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
         case CMD_CLEAR_HOOKS:
             ; CLEAR_HOOKS - 清空所有可配置的Hook（保留 F8/F7/F9 永久根热键）
-            ClearAllConfigurableHooks()
-            return 1
+            return ClearAllConfigurableHooks() ? 1 : AHK_RESULT_REJECTED
 
         case CMD_SET_FORCE_MOVE_REPLACEMENT_KEY:
             ; SET_FORCE_MOVE_REPLACEMENT_KEY - 设置强制移动替换键
@@ -1065,6 +1168,20 @@ IsAllowedDuringPause(action) {
     if (InStr(action, "release:") = 1)
         return true
     return false
+}
+
+; Python 的 pause:start 只是提前止流优化，不能作为正确性边界：状态事件按 channel
+; 合并，快速点按时 start 可能在 GUI 消费前被 end 覆盖。AHK 在同步 CMD_ENQUEUE
+; 接收边界依据本地 SpecialKeysPaused 再判一次；非安全动作按“已成功丢弃”返回，
+; 避免发送方把设计内丢弃误报为传输/协议失败。
+AcceptPythonQueuedAction(priority, action) {
+    global SpecialKeysPaused
+
+    if (SpecialKeysPaused && !IsAllowedDuringPause(action)) {
+        return true
+    }
+    EnqueueAction(priority, action)
+    return true
 }
 
 ; 过载时该动作可否被丢弃。
@@ -1239,7 +1356,8 @@ NotifyQueueOverload() {
     }
     LastOverloadNotifyAt := now
     PendingOverloadNotify := false
-    SendEventToPython("queue_drop:overload=" QueueStats["dropped"] ",expired=" QueueStats["expired"])
+    ; 诊断观测失败即丢，不得用它武装状态/人工事件的退避。
+    SendEventToPython("queue_drop:overload=" QueueStats["dropped"] ",expired=" QueueStats["expired"], false, false)
 }
 
 ; 判断是否为紧急动作（HP/MP等生存技能）
@@ -1300,6 +1418,7 @@ ClearManagedKeyMark(key) {
 ; 批量配置更新函数（Master方案学习）
 UpdateBatchConfig(configString) {
     global CachedHpKey, CachedMpKey, StationaryModeType, SpecialKeyResumeDelayMs
+    global KeyPressDurationMs
 
     if (configString = "") {
         return
@@ -1323,6 +1442,10 @@ UpdateBatchConfig(configString) {
                 case "special_key_resume_delay_ms":
                     if (IsInteger(value)) {
                         SpecialKeyResumeDelayMs := Min(Max(Integer(value), 0), 1000)
+                    }
+                case "key_press_duration":
+                    if (IsInteger(value)) {
+                        KeyPressDurationMs := Min(Max(Integer(value), 1), 1000)
                     }
             }
         }
@@ -1352,6 +1475,9 @@ DecrementQueueCount(queueName) {
 ; 🚀 快速清理非紂急队列（性能优化）
 ClearNonEmergencyQueues() {
     global HighQueue, NormalQueue, LowQueue, QueueCounts, TotalQueueCount
+
+    ; 坐标长按的 release 可能正在任一非紧急队首等待；清队前必须补 up。
+    ReleaseCoordinateMouseHoldIfCleared(-2)
     
     ; 更新计数器
     TotalQueueCount := TotalQueueCount - QueueCounts["high"] - QueueCounts["normal"] - QueueCounts["low"]
@@ -1542,22 +1668,26 @@ ClearQueue(priority) {
             ActiveManagedKeys := Map()
             ; release:target 也随 emergency 一起丢失 → 必须补发 up,否则该键卡在按下。
             ; 与 case -1 不同:这里只清了 emergency,持久持键仍应保持,所以要补按。
-            if (ReleaseAllManagedHoldTargets()) {
+            if (ReleaseAllManagedHoldTargets(true)) {
                 ReconcileSkillHoldKeys()
             }
         case 1:
+            ReleaseCoordinateMouseHoldIfCleared(1)
             TotalQueueCount := TotalQueueCount - QueueCounts["high"]
             QueueCounts["high"] := 0
             HighQueue := []
         case 2:
+            ReleaseCoordinateMouseHoldIfCleared(2)
             TotalQueueCount := TotalQueueCount - QueueCounts["normal"]
             QueueCounts["normal"] := 0
             NormalQueue := []
         case 3:
+            ReleaseCoordinateMouseHoldIfCleared(3)
             TotalQueueCount := TotalQueueCount - QueueCounts["low"]
             QueueCounts["low"] := 0
             LowQueue := []
         case -1:
+            ReleaseCoordinateMouseHoldIfCleared(-1)
             ; 🚀 清空所有队列（使用计数器）
             TotalQueueCount := 0
             QueueCounts["emergency"] := 0
@@ -1663,10 +1793,17 @@ CachedStrLower(str) {
 ExecuteAction(action, priority := 2) {
     ; 🔧 BUG修复(AHK v2 作用域): 把分散的 global 声明统一到函数顶部,
     ; 避免在 if 分支内零散声明导致维护困难
-    global ACTION_CLEANUP, ACTION_PRESS, ACTION_SEQUENCE, ACTION_HOLD, ACTION_RELEASE, ACTION_MOUSE_CLICK, ACTION_DELAY, ACTION_NOTIFY
+    global ACTION_CLEANUP, ACTION_PRESS, ACTION_SEQUENCE, ACTION_HOLD, ACTION_RELEASE
+    global ACTION_MOUSE_CLICK, ACTION_MOUSE_CLICK_AT, ACTION_DELAY, ACTION_NOTIFY
     global ACTION_SEQ_RUNNING
-    global ManagedDelayUntil
+    global ManagedDelayUntil, RuntimeAcceptingActions
     global SkillHeldKeys, SkillHeldOrder, ManagedHoldTargets
+
+    ; ProcessQueue 可能在取出 item 后被物理 F8 热键线程中断。返回原 timer 后不能
+    ; 执行这个已脱离全局队列的局部 item；release 由关闸的 ClearQueue(-1) 统一补齐。
+    if (!RuntimeAcceptingActions) {
+        return
+    }
 
     ; 🚀 处理清理标记（使用常量比较）
     if (InStr(action, ACTION_CLEANUP . ":")) {
@@ -1752,11 +1889,14 @@ ExecuteAction(action, priority := 2) {
     } else if (actionType = ACTION_RELEASE) {
         SendUp(actionData)
         ClearManagedHoldTarget(actionData)
+        ClearCoordinateMouseHoldState(actionData, priority)
         if (ForgetSkillHeldKey(actionData)) {
             ReconcileSkillHoldKeys()
         }
     } else if (actionType = ACTION_MOUSE_CLICK) {
         ExecuteMouseClick(actionData)
+    } else if (actionType = ACTION_MOUSE_CLICK_AT) {
+        ExecuteMouseClickAt(actionData, priority)
     } else if (actionType = ACTION_DELAY) {
         ; 兼容路径:裸 delay:N 队列项(非序列内)。转成本队列的等待哨兵:
         ; 只挡自己所在的优先级队列,到期后哨兵出队即完成,不会再次重置延时。
@@ -1771,7 +1911,7 @@ ExecuteAction(action, priority := 2) {
         ManagedDelayUntil := MonotonicMs() + Integer(actionData)
     } else if (actionType = ACTION_NOTIFY) {
         ; 🎯 发送通知到Python
-        SendEventToPython(actionData)
+        QueuePythonReliableEvent(actionData)
     }
 }
 
@@ -1827,6 +1967,7 @@ SendKeyInternal(key) {
 
 SendDirect(key) {
     ; 直接发送模式 - 使用SendInput
+    global KeyPressDurationMs
     ; 🔧 BUG修复(#3): 必须区分 "+1"(Shift+主键) 与 "+"(字面加号键,如管理按键 target="+")
     if (StrLen(key) > 1 && SubStr(key, 1, 1) = "+") {
         ; "+1" → "+{1}" (Shift 修饰符 + 主键花括号包装)
@@ -1840,7 +1981,7 @@ SendDirect(key) {
     } else {
         ; 普通按键
         Send "{" key " down}"
-        Sleep 5
+        Sleep KeyPressDurationMs
         Send "{" key " up}"
     }
     ; 所有分支的净效果都是"key 最终处于抬起状态"
@@ -1927,49 +2068,168 @@ ExecuteMouseClick(data) {
     Click data
 }
 
+IsValidQueuedAction(action) {
+    global ACTION_MOUSE_CLICK_AT
+
+    parts := CachedStrSplit(action, ":", , 2)
+    if (parts.Length < 2) {
+        return action != ACTION_MOUSE_CLICK_AT
+    }
+    if (parts[1] != ACTION_MOUSE_CLICK_AT) {
+        return true
+    }
+    return ParseMouseClickAt(parts[2], &x, &y, &holdMs)
+}
+
+ParseMouseClickAt(data, &x, &y, &holdMs) {
+    global MAX_MOUSE_CLICK_HOLD_MS
+
+    values := CachedStrSplit(data, ",")
+    if (values.Length != 3 || !IsInteger(values[1]) || !IsInteger(values[2])
+        || !IsInteger(values[3])) {
+        return false
+    }
+
+    x := Integer(values[1])
+    y := Integer(values[2])
+    holdMs := Integer(values[3])
+    virtualLeft := SysGet(76)
+    virtualTop := SysGet(77)
+    virtualRight := virtualLeft + SysGet(78)
+    virtualBottom := virtualTop + SysGet(79)
+    return x >= virtualLeft && x < virtualRight
+        && y >= virtualTop && y < virtualBottom
+        && holdMs >= 0 && holdMs <= MAX_MOUSE_CLICK_HOLD_MS
+}
+
+ExecuteMouseClickAt(data, priority) {
+    global ACTION_RELEASE
+    global ManagedHoldTargets, CoordinateMouseHoldActive, CoordinateMouseHoldPriority
+
+    if (!ParseMouseClickAt(data, &x, &y, &holdMs)) {
+        return false
+    }
+
+    if (holdMs = 0) {
+        return ClickMouseAtOnce(x, y)
+    }
+
+    ; 同一物理 LButton 不能同时存在两条待释放账本；跨优先级重叠会让较早
+    ; release 提前抬起较新的 hold。保持 single-flight，后续动作安全拒绝。
+    if (CoordinateMouseHoldActive || ManagedHoldTargets.Has("LButton")) {
+        return false
+    }
+
+    ; down 后把不可丢 release 放回同一优先级队首并设置 notBefore。
+    ; 不用 Sleep，因此其它优先级与 HP/MP 在保持窗口内仍可运行。
+    if (!PressMouseAt(x, y)) {
+        return false
+    }
+    MarkManagedHoldTarget("LButton")
+    CoordinateMouseHoldActive := true
+    CoordinateMouseHoldPriority := priority
+    PushFrontWait(priority, ACTION_RELEASE ":LButton", holdMs)
+    return true
+}
+
+ClickMouseAtOnce(x, y) {
+    if (ShouldBlockMouseInStationary("LButton")) {
+        return false
+    }
+    Click x, y
+    return true
+}
+
+PressMouseAt(x, y) {
+    if (ShouldBlockMouseInStationary("LButton")) {
+        return false
+    }
+    MouseMove x, y, 0
+    return SendDown("LButton")
+}
+
 ; ===============================================================================
 ; Hook管理
 ; ===============================================================================
 RegisterHook(key, mode) {
-    ; 简化版本：直接注册，不检查是否已存在
-    ; 永久根热键(F8/F7/F9)不加入 RegisteredHooks 记录,故 ClearAllConfigurableHooks 不会清它们
-    ; 🔧 关键修复：使用"On"选项确保热键被启用（即使之前被禁用过）
+    global RegisteredHooks
 
-    key_upper := StrUpper(key)
-
-    ; 记录Hook（永久根热键 F8/F7/F9 除外）
-    if (key_upper != "F8" && key_upper != "F7" && key_upper != "F9") {
-        RegisteredHooks[key] := mode
+    key := Trim(key)
+    mode := CachedStrLower(Trim(mode))
+    if (key = "" || !IsSupportedHookMode(mode)) {
+        return false
+    }
+    ; 滚轮只有离散 notch，没有可触发的物理 up 边沿。special/monitor 都是按住状态
+    ; 协议，允许注册会让 pause/force-move 永久卡在 true；intercept/priority 仍可用。
+    if (IsWheelKey(key) && (mode = "special" || mode = "monitor")) {
+        return false
     }
 
-    ; 根据模式注册Hotkey（使用"On"选项）
+    key_upper := StrUpper(key)
+    is_root := (key_upper = "F8" || key_upper = "F7" || key_upper = "F9")
+    ; 永久根热键只能使用 intercept。即使调用方绕过 Python 的双层保留键检查，
+    ; 也不能用 priority/special 等模式覆盖 down handler；root 不进 RegisteredHooks，
+    ; 一旦覆盖，ClearAllConfigurableHooks 也无法发现或恢复。
+    if (is_root && mode != "intercept") {
+        return false
+    }
+
+    ; 动态 Hook 重复注册是幂等操作；同一键换模式必须先显式注销，避免两个模式
+    ; 同时存活而 RegisteredHooks 只能记录其中一个。
+    if (!is_root && RegisteredHooks.Has(key)) {
+        return RegisteredHooks[key] = mode
+    }
+
+    downEnabled := false
+    upEnabled := false
     try {
         switch mode {
             case "intercept":
                 Hotkey("$" key, (*) => HandleInterceptKey(key), "On")
+                downEnabled := true
                 ; up 配对:提供自动重复去重的复位边沿,并拦掉孤儿 up(down 已被吞)。
                 ; 滚轮键跳过:up 变体注册不报错但永远不触发(实测),配了也没意义。
                 if (!IsWheelKey(key)) {
                     Hotkey("$" key " up", (*) => HandleInterceptKeyUp(key), "On")
+                    upEnabled := true
                 }
 
             case "priority":
                 Hotkey("$" key, (*) => HandleManagedKey(key), "On")
+                downEnabled := true
 
             case "special":
                 Hotkey("~" key, (*) => HandleSpecialKeyDown(key), "On")
+                downEnabled := true
                 Hotkey("~" key " up", (*) => HandleSpecialKeyUp(key), "On")
+                upEnabled := true
 
             case "monitor":
                 Hotkey("~" key, (*) => HandleMonitorKey(key), "On")
+                downEnabled := true
                 Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key), "On")
+                upEnabled := true
 
             case "block":
                 Hotkey("$" key, (*) => {}, "On")
+                downEnabled := true
         }
-    } catch as err {
-        ; 注册失败，静默处理
+    } catch {
+        ; 事务回滚:第二个(up)变体失败时,不能留下只有 down 的半注册 Hook。
+        if (upEnabled) {
+            try DisableHookUp(key, mode)
+        }
+        if (downEnabled) {
+            try DisableHookDown(key, mode)
+        }
+        return false
     }
+
+    ; 永久根热键不进入动态登记，因此 ClearAllConfigurableHooks 永远不会碰它们。
+    if (!is_root) {
+        RegisteredHooks[key] := mode
+    }
+    return true
 }
 
 UnregisterHook(key) {
@@ -1979,34 +2239,28 @@ UnregisterHook(key) {
     global MonitorKeysState, ForceMoveKey, ForceMoveActive
     global PendingPythonStateEvents, InterceptKeysPressed
 
-    ; 简化版本：直接取消，不需要重复注销
-
-    ; 检查是否在记录中
+    ; 注销不存在的动态 Hook 是幂等成功；永久根热键也不在此表中。
     if (!RegisteredHooks.Has(key)) {
-        return
+        return true
     }
 
-    ; 获取模式
     mode := RegisteredHooks[key]
 
-    ; 取消Hotkey
+    downDisabled := false
+    upDisabled := false
     try {
-        switch mode {
-            case "intercept":
-                Hotkey("$" key, "Off")
-                if (!IsWheelKey(key)) {
-                    Hotkey("$" key " up", "Off")
-                }
-
-            case "priority", "block":
-                Hotkey("$" key, "Off")
-
-            case "monitor", "special":
-                Hotkey("~" key, "Off")
-                Hotkey("~" key " up", "Off")
+        DisableHookDown(key, mode)
+        downDisabled := true
+        if (HookModeHasUpEdge(key, mode)) {
+            DisableHookUp(key, mode)
+            upDisabled := true
         }
     } catch {
-        ; 取消失败，静默处理
+        ; 若只关掉了 down,恢复它；登记和所有运行时状态保持原样，调用方收到 rejected。
+        if (downDisabled && !upDisabled) {
+            try EnableHookDown(key, mode)
+        }
+        return false
     }
 
     ; intercept 按住期间被注销(如 STOPPED 注销 Z):up Hotkey 已关,按下状态等不到
@@ -2070,6 +2324,56 @@ UnregisterHook(key) {
 
     ; 删除记录
     RegisteredHooks.Delete(key)
+    return true
+}
+
+IsSupportedHookMode(mode) {
+    return mode = "intercept" || mode = "priority" || mode = "special"
+        || mode = "monitor" || mode = "block"
+}
+
+HookModeHasUpEdge(key, mode) {
+    return (mode = "intercept" && !IsWheelKey(key)) || mode = "special" || mode = "monitor"
+}
+
+EnableHookDown(key, mode) {
+    switch mode {
+        case "intercept":
+            Hotkey("$" key, (*) => HandleInterceptKey(key), "On")
+        case "priority":
+            Hotkey("$" key, (*) => HandleManagedKey(key), "On")
+        case "special":
+            Hotkey("~" key, (*) => HandleSpecialKeyDown(key), "On")
+        case "monitor":
+            Hotkey("~" key, (*) => HandleMonitorKey(key), "On")
+        case "block":
+            Hotkey("$" key, (*) => {}, "On")
+        default:
+            throw Error("Unsupported hook mode: " mode)
+    }
+}
+
+EnableHookUp(key, mode) {
+    switch mode {
+        case "intercept":
+            Hotkey("$" key " up", (*) => HandleInterceptKeyUp(key), "On")
+        case "special":
+            Hotkey("~" key " up", (*) => HandleSpecialKeyUp(key), "On")
+        case "monitor":
+            Hotkey("~" key " up", (*) => HandleMonitorKeyUp(key), "On")
+        default:
+            throw Error("Hook mode has no up edge: " mode)
+    }
+}
+
+DisableHookDown(key, mode) {
+    prefix := (mode = "special" || mode = "monitor") ? "~" : "$"
+    Hotkey(prefix key, "Off")
+}
+
+DisableHookUp(key, mode) {
+    prefix := (mode = "special" || mode = "monitor") ? "~" : "$"
+    Hotkey(prefix key " up", "Off")
 }
 
 ; ===============================================================================
@@ -2077,7 +2381,25 @@ UnregisterHook(key) {
 ; ===============================================================================
 HandleInterceptKey(key) {
     ; 拦截模式 - 按键按下
-    global InterceptKeysPressed, INTERCEPT_REPEAT_WINDOW_MS
+    global InterceptKeysPressed, INTERCEPT_REPEAT_WINDOW_MS, RegisteredHooks
+    global MainModeArmed, MainModeF8AwaitRelease, PhysicalStopLatched
+
+    ; 活跃 F8 必须在通用重复去重前判定，且本次判定随后不再重读 Hook 数量。
+    ; STOPPED→READY 的启动 F8 若丢了 up，InterceptKeysPressed 会残留上一世代 down；
+    ; 新世代第一条 stop 必须无条件覆盖这个 stale down，不能在 1.1s 窗口内被吞。
+    isActiveF8Stop := StrUpper(key) = "F8"
+        && (PhysicalStopLatched || MainModeArmed || RegisteredHooks.Count > 0)
+    if (isActiveF8Stop && MainModeF8AwaitRelease) {
+        ; 这是触发 STOPPED→READY 的同一次物理长按产生的 auto-repeat。
+        ; 只有永久 up 边沿或物理键态轮询确认释放后，新 down 才能成为 stop。
+        InterceptKeysPressed[key] := MonotonicMs()
+        return
+    }
+    if (isActiveF8Stop && !PhysicalStopLatched) {
+        InterceptKeysPressed[key] := MonotonicMs()
+        LatchPhysicalStop("intercept_key_down:" key)
+        return
+    }
 
     ; 键盘自动重复去重:up 之前的重复 down 只承认第一次(special 键在
     ; HandleSpecialKeyDown 有同型去重;intercept 此前没配 up 边沿,无法判断)。
@@ -2093,10 +2415,20 @@ HandleInterceptKey(key) {
         InterceptKeysPressed[key] := now
     }
 
-    ; 所有拦截按键都完全拦截，只通知Python
-    ; 人手热键是 F8/Z/F7/F9 的唯一通路,不能被 stats/状态事件的共享退避门丢掉。
-    ; 频率天然很低,允许每次都真实尝试一次短超时发送。
-    SendEventToPython("intercept_key_down:" key, true)
+    ; 动态 Hook 存在表示主模式正在 READY/RUNNING/PAUSED。此时物理 F8
+    ; 必须先在 AHK 当地止血，不等 Python GUI 线程：即使事件通道连续超时，
+    ; 本边也已关闸+清队+停宏+释放全部持键。STOPPED 的 F8 启动和独立
+    ; F7 洗练都没有动态 Hook，不会被这条路径误关闸。
+    if (isActiveF8Stop) {
+        ; 置 latch、关闸、作废旧世代 FIFO、放入 stop 信封必须是同一原子片段。
+        ; 中间若允许 F7/F9 或 CLEAR_HOOKS 插入，会误删 stop 后的新事件，或把本次
+        ; F8 重新判成 STOPPED 的普通启动 toggle。
+        LatchPhysicalStop("intercept_key_down:" key)
+    } else {
+        ; 所有拦截按键都完全拦截，只通知Python。只入可靠 FIFO；同步 WM_COPYDATA
+        ; 由 timer 执行，GUI 停顿不能把当前 Hotkey 线程卡住或静默吞掉后续按键。
+        QueuePythonReliableEvent("intercept_key_down:" key)
+    }
 
     ; 🎯 F8不再在AHK端主动切换，由Python完成UI切换后主动通知AHK
 
@@ -2106,10 +2438,14 @@ HandleInterceptKey(key) {
 HandleInterceptKeyUp(key) {
     ; 拦截模式 - 按键释放:只复位去重状态,不通知 Python(状态机只消费按下边沿)。
     ; up 同样被 $ 拦截:down 已被吞,孤儿 up 不该打进游戏。
-    global InterceptKeysPressed
+    global InterceptKeysPressed, MainModeF8AwaitRelease
 
     if (InterceptKeysPressed.Has(key)) {
         InterceptKeysPressed.Delete(key)
+    }
+    if (StrUpper(key) = "F8" && MainModeF8AwaitRelease) {
+        MainModeF8AwaitRelease := false
+        SetTimer(PollMainModeF8Release, 0)
     }
 }
 
@@ -2136,8 +2472,8 @@ HandleSpecialKeyDown(key) {
         QueuePythonStateEvent("special_pause", "special_key_pause:start")
     }
 
-    ; 通知Python特殊按键状态
-    SendEventToPython("special_key_down:" key)
+    ; 通知Python特殊按键状态（边沿不可合并，走可靠 FIFO）。
+    QueuePythonReliableEvent("special_key_down:" key)
 }
 
 HandleSpecialKeyUp(key) {
@@ -2148,8 +2484,8 @@ HandleSpecialKeyUp(key) {
         SpecialKeysPressed.Delete(key)
     }
 
-    ; key-up 状态立即通知 Python；~Hook 已让物理 key-up 同样立即透传给游戏。
-    SendEventToPython("special_key_up:" key)
+    ; key-up 立即入可靠 FIFO；~Hook 已让物理 key-up 同样立即透传给游戏。
+    QueuePythonReliableEvent("special_key_up:" key)
 
     ; 所有特殊按键都释放后,仅自动输入的恢复可以按配置延后。
     if (SpecialKeysPressed.Count = 0 && SpecialKeysPaused) {
@@ -2205,7 +2541,7 @@ HandleManagedKey(key) {
         ClearNonEmergencyQueues()  ; 使用统一函数确保计数器同步
     }
 
-    SendEventToPython("managed_key_down:" key)
+    QueuePythonReliableEvent("managed_key_down:" key)
 
     ; 将延迟+映射操作放入Emergency队列
     if (ManagedKeysConfig.Has(key)) {
@@ -2258,6 +2594,9 @@ HandleMonitorKey(key) {
 
     ; 标记为按下状态
     MonitorKeysState[key_upper] := true
+    ; 执行态必须在物理边沿当地立即更新。Python 可能卡顿，状态事件
+    ; 也会 latest-wins 合并 down/up，不能让按键替换的正确性依赖往返。
+    ReconcileForceMoveState()
 
     ; 状态事件保留最新值并失败重试,避免 down/up 任一丢失后两端永久分叉。
     QueuePythonStateEvent("monitor:" key_upper, "monitor_key_down:" key)
@@ -2277,8 +2616,144 @@ HandleMonitorKeyUp(key) {
 
     ; 标记为释放状态
     MonitorKeysState[key_upper] := false
+    ReconcileForceMoveState()
 
     QueuePythonStateEvent("monitor:" key_upper, "monitor_key_up:" key)
+}
+
+ReconcileForceMoveState() {
+    ; AHK 是按键替换的执行端，因此物理 monitor 账本才是权威。
+    ; 闸门关闭时始终 false；开闸/换键/物理边沿都调用本函数重算。
+    global MonitorKeysState, ForceMoveKey, ForceMoveActive, RuntimeAcceptingActions
+
+    key_upper := StrUpper(Trim(ForceMoveKey))
+    ForceMoveActive := RuntimeAcceptingActions
+        && key_upper != ""
+        && MonitorKeysState.Has(key_upper)
+        && MonitorKeysState[key_upper]
+}
+
+ArmMainMode() {
+    ; READY 的两阶段入口：先 armed，完成 Hook/捕获准备后才由 Python 真正开闸。
+    ; 已有物理 stop latch 时拒绝重新 armed，入口会按正常失败路径回退 STOPPED。
+    global InterceptKeysPressed, MainModeArmed, MainModeF8AwaitRelease
+    global MAIN_MODE_F8_RELEASE_POLL_MS, PhysicalStopLatched
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        if (PhysicalStopLatched) {
+            return false
+        }
+        ; 不信任上一模式的 Python→AHK false 已经执行。尤其洗练停机可能在
+        ; SendMessageTimeoutW 超时后只恢复了 PING，旧 gate 仍为 true。
+        ; 在同一 Critical 内先建立“关闸且清场”不变量，再暴露 armed 状态。
+        if (!SetRuntimeActionGate(false)) {
+            return false
+        }
+        MainModeArmed := true
+        MainModeF8AwaitRelease := IsPhysicalKeyPressed("F8")
+        if (MainModeF8AwaitRelease) {
+            SetTimer(PollMainModeF8Release, MAIN_MODE_F8_RELEASE_POLL_MS)
+        } else {
+            ; up Hook 可能在安全桌面切换时丢失，但 arm 时键已经物理释放。
+            ; 此时旧启动 down 只是 stale 账本，直接清掉，允许真正的第二次按下。
+            SetTimer(PollMainModeF8Release, 0)
+            if (InterceptKeysPressed.Has("F8")) {
+                InterceptKeysPressed.Delete("F8")
+            }
+        }
+        return true
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
+}
+
+PollMainModeF8Release() {
+    global InterceptKeysPressed, MainModeF8AwaitRelease
+
+    if (!MainModeF8AwaitRelease) {
+        SetTimer(PollMainModeF8Release, 0)
+        return
+    }
+    if (IsPhysicalKeyPressed("F8")) {
+        return
+    }
+
+    ; 物理释放是真正的世代边界。轮询路径与 up Hook 做同一份幂等清理。
+    MainModeF8AwaitRelease := false
+    if (InterceptKeysPressed.Has("F8")) {
+        InterceptKeysPressed.Delete("F8")
+    }
+    SetTimer(PollMainModeF8Release, 0)
+}
+
+IsPhysicalKeyPressed(key) {
+    try {
+        return GetKeyState(key, "P")
+    } catch {
+        ; GetKeyState 正常不会失败；异常时不让 F8 永久变成死键。
+        return false
+    }
+}
+
+LatchPhysicalStop(event) {
+    ; latch 与关闸必须是同一个不可重入片段。若迟到的 Python 开闸消息夹在二者之间，
+    ; 它可能短暂重按持键，甚至覆盖本次 stop 的最终状态。
+    global PhysicalStopLatched
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        PhysicalStopLatched := true
+        SetRuntimeActionGate(false)
+        ; forceStopIntent 固化进入本 Critical 区时的状态判定。即使未来清理逻辑变化，
+        ; 这次物理 F8 也只能是 stop-only，绝不能在 STOPPED 中反向启动。
+        return QueuePythonReliableEvent(event, true, true)
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
+}
+
+SetRuntimeActionGate(accepting) {
+    ; 运行时输入闸门的唯一写入点。Python 命令、物理 F8 止血和 shutdown
+    ; 共用同一条原子语义，避免新的持键/队列类型只在某条停机路径释放。
+    global RuntimeAcceptingActions, PhysicalStopLatched
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        if (accepting && PhysicalStopLatched) {
+            return false
+        }
+
+        RuntimeAcceptingActions := accepting ? true : false
+        ; 无论开/关闸都立即从 AHK 物理账本重算：关闸必为 false，
+        ; PAUSED 期间仍按住强制移动键则在开闸时当地恢复。
+        ReconcileForceMoveState()
+        if (!RuntimeAcceptingActions) {
+            ClearQueue(-1)
+        } else {
+            ; 开闸与抑制解除同型:补按被推迟的持键(正常流程 desired 已空,是空转;
+            ; Python 随后会重新声明完整集合)
+            ReconcileSkillHoldKeys()
+        }
+        return true
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
 }
 
 ; ===============================================================================
@@ -2290,8 +2765,164 @@ QueuePythonStateEvent(channel, event, tryNow := true) {
     ; 同一状态通道只保留最新值:down 尚未补发时若已经 up,补发 up 才是当前真相。
     PendingPythonStateEvents[channel] := event
     if (tryNow) {
-        FlushPendingPythonStateEvents()
+        ; 当前可能是 Hotkey 或 WM_COPYDATA 线程；仅安排一次性 timer，不内联等待。
+        SchedulePythonEventFlush()
     }
+}
+
+QueuePythonReliableEvent(event, tryNow := true, forceStopIntent := false) {
+    global PythonEventSession, PythonReliableEventSeq
+    global PendingPythonReliableEvents, MAX_PENDING_PYTHON_RELIABLE_EVENTS
+    global PYTHON_RELIABLE_F8_RESERVE, RegisteredHooks, F8StopIntentPending
+    global PythonReliableRetryUntil, PythonReliableRetryDelayMs
+    global PYTHON_RELIABLE_RETRY_BASE_MS
+
+    isF8Event := IsF8StopEvent(event)
+    isActiveStopIntent := isF8Event && (forceStopIntent || RegisteredHooks.Count > 0)
+    if (isActiveStopIntent && F8StopIntentPending) {
+        ; 第一条停机意图已入队或已交给 Qt，继续按 F8 不应在恢复后
+        ; 排成 STOP→START→STOP。返回 true 表示该安全意图已被承认。
+        return true
+    }
+
+    PythonReliableEventSeq += 1
+    ; 显式标记 stop-only：若 GUI 在事件排队期间已经停机，Python 必须
+    ; 忽略这条迟到意图，不能把它当成 STOPPED→READY 的新启动。
+    wireEvent := isActiveStopIntent ? "intercept_key_down:f8_stop" : event
+    envelope := Format("evt:{}:{}:{}", PythonEventSession, PythonReliableEventSeq, wireEvent)
+
+    if (isActiveStopIntent) {
+        ; 物理 stop 是旧运行世代的终点。尚未交给 Python 的 F7/F9/Z/管理键等旧边沿
+        ; 全部失效；否则把 stop 插到它们前面后，这些旧根热键会在 STOPPED 中反向生效。
+        ; 本次调用返回后产生的新人工事件仍正常追加在 stop 后面。
+        PendingPythonReliableEvents := []
+        PendingPythonReliableEvents.Push(envelope)
+        ; 旧队首失败形成的退避也属于旧世代，不能让安全 stop 再等最多 1 秒。
+        PythonReliableRetryUntil := 0
+        PythonReliableRetryDelayMs := PYTHON_RELIABLE_RETRY_BASE_MS
+        F8StopIntentPending := true
+    } else {
+        ; 业务边沿最多占 max-reserve，确保 Python 长暂停/滚轮洪泛后 F8 仍能入队。
+        ; 普通 F8 绝对满时优先驱逐一个非 F8；若 64 项全是旧 F8，则驱逐最旧
+        ; toggle 保留最新意图，不能让根热键永久拒绝新输入。
+        softLimit := MAX_PENDING_PYTHON_RELIABLE_EVENTS - PYTHON_RELIABLE_F8_RESERVE
+        if (!isF8Event && PendingPythonReliableEvents.Length >= softLimit) {
+            OutputDebug("[pyahk] reliable Python event FIFO full; rejected seq=" PythonReliableEventSeq)
+            return false
+        }
+        if (isF8Event
+            && PendingPythonReliableEvents.Length >= MAX_PENDING_PYTHON_RELIABLE_EVENTS) {
+            evicted := false
+            loop PendingPythonReliableEvents.Length {
+                index := PendingPythonReliableEvents.Length - A_Index + 1
+                if (!IsF8Envelope(PendingPythonReliableEvents[index])) {
+                    PendingPythonReliableEvents.RemoveAt(index)
+                    evicted := true
+                    break
+                }
+            }
+            if (!evicted) {
+                PendingPythonReliableEvents.RemoveAt(1)
+            }
+        }
+        PendingPythonReliableEvents.Push(envelope)
+    }
+
+    if (tryNow) {
+        SchedulePythonEventFlush()
+    }
+    return true
+}
+
+IsF8StopEvent(event) {
+    return CachedStrLower(event) = "intercept_key_down:f8"
+}
+
+IsF8Envelope(envelope) {
+    return RegExMatch(envelope, "i):intercept_key_down:F8(?:_stop)?$")
+}
+
+IsF8StopEnvelope(envelope) {
+    return RegExMatch(envelope, "i):intercept_key_down:F8_stop$")
+}
+
+SchedulePythonEventFlush() {
+    ; FlushPendingPythonEvents 自身还有一个 100ms 周期 timer 负责失败重试。
+    ; AHK v2 对同一 callback 调 SetTimer(..., -1) 会把原周期 timer 改成一次性，
+    ; 因此“尽快发送”必须使用独立 callback，不能覆盖周期重试器。
+    SetTimer(FlushPendingPythonEventsSoon, -1)
+}
+
+FlushPendingPythonEventsSoon() {
+    FlushPendingPythonEvents()
+}
+
+FlushPendingPythonEvents() {
+    global PendingPythonReliableEvents
+
+    ; 人工边沿优先，且每次最多真实发送一条，避免 GUI 持续卡顿时一次 timer
+    ; 串行吃满多个 50ms。成功后用一次性 timer 继续推进队列。
+    if (PendingPythonReliableEvents.Length > 0) {
+        FlushPendingPythonReliableEvents()
+        return
+    }
+    FlushPendingPythonStateEvents()
+}
+
+FlushPendingPythonReliableEvents() {
+    global PendingPythonReliableEvents
+    global F8StopIntentPending
+    global PythonReliableRetryUntil, PythonReliableRetryDelayMs
+    global PYTHON_RELIABLE_RETRY_BASE_MS, PYTHON_RELIABLE_RETRY_MAX_MS
+
+    if (PendingPythonReliableEvents.Length = 0) {
+        return
+    }
+
+    now := MonotonicMs()
+    if (now < PythonReliableRetryUntil) {
+        return
+    }
+
+    envelope := PendingPythonReliableEvents[1]
+    ; 独立于观测/状态退避:人工事件必须真实尝试；失败也不污染共享状态退避。
+    if (SendEventToPython(envelope, true, false)) {
+        removed := false
+        if (PendingPythonReliableEvents.Length > 0
+            && PendingPythonReliableEvents[1] = envelope) {
+            PendingPythonReliableEvents.RemoveAt(1)
+            removed := true
+        }
+        ; pending 只描述“stop-only 信封仍在本地 FIFO”。交给 Qt 后即结束合并；
+        ; 后续 F8 可再排一条幂等 stop，不再依赖 CLEAR_HOOKS 成功与否永久解锁。
+        if (removed && IsF8StopEnvelope(envelope)) {
+            F8StopIntentPending := false
+        }
+        PythonReliableRetryUntil := 0
+        PythonReliableRetryDelayMs := PYTHON_RELIABLE_RETRY_BASE_MS
+        if (PendingPythonReliableEvents.Length > 0) {
+            SchedulePythonEventFlush()
+        }
+        return
+    }
+
+    ; 发送期间物理 F8 可能已用 stop-only 信封替换整个旧世代 FIFO。旧队首的失败
+    ; 不能在返回后重新武装退避，把刚刚重置为“立即尝试”的安全 stop 再压住。
+    if (PendingPythonReliableEvents.Length = 0
+        || PendingPythonReliableEvents[1] != envelope) {
+        PythonReliableRetryUntil := 0
+        PythonReliableRetryDelayMs := PYTHON_RELIABLE_RETRY_BASE_MS
+        if (PendingPythonReliableEvents.Length > 0) {
+            SchedulePythonEventFlush()
+        }
+        return
+    }
+
+    PythonReliableRetryUntil := now + PythonReliableRetryDelayMs
+    PythonReliableRetryDelayMs := Min(
+        PythonReliableRetryDelayMs * 2,
+        PYTHON_RELIABLE_RETRY_MAX_MS
+    )
 }
 
 FlushPendingPythonStateEvents() {
@@ -2397,7 +3028,16 @@ SendWMCopyDataToPython(hwnd, eventData) {
 ; 看不出"现在积压多少");p/d/x 是累计 处理/过载丢弃/等待过期。
 ; Python 端(main_window)把它压成 OSD 的一行,RUNNING/PAUSED 时展示。
 SendStatsToPython() {
-    global QueueCounts, QueueStats
+    global QueueCounts, QueueStats, PendingPythonReliableEvents, PendingPythonStateEvents
+    global PythonStatsRetryAt, PYTHON_STATS_RETRY_MS
+
+    now := MonotonicMs()
+    ; 观测永远给控制/状态事件让路；失败后静默 2 秒，避免 GUI 卡顿期间每秒固定
+    ; 占住 AHK 主线程 50ms。
+    if (PendingPythonReliableEvents.Length > 0 || PendingPythonStateEvents.Count > 0
+        || now < PythonStatsRetryAt) {
+        return
+    }
 
     stats := Format("stats:e={},h={},n={},l={},p={},d={},x={}",
         QueueCounts["emergency"],
@@ -2409,7 +3049,11 @@ SendStatsToPython() {
         QueueStats["expired"]
     )
     ; stats 是纯观测:失败直接丢弃,不得武装共享退避门封锁随后的人手热键。
-    SendEventToPython(stats, false, false)
+    if (SendEventToPython(stats, false, false)) {
+        PythonStatsRetryAt := 0
+    } else {
+        PythonStatsRetryAt := now + PYTHON_STATS_RETRY_MS
+    }
 }
 
 ActivateTargetWindow() {
@@ -2438,6 +3082,8 @@ ClearAllConfigurableHooks() {
     ; F8/F7/F9 永久根热键不在 RegisteredHooks 中,自动被保留(见 RegisterHook 的 key_upper 检查)
     global ActiveManagedKeys, SpecialKeysPressed, SpecialKeysPaused, ManagedKeysConfig
     global MonitorKeysState, ForceMoveActive, PendingPythonStateEvents
+    global F8StopIntentPending, MainModeArmed, MainModeF8AwaitRelease
+    global PhysicalStopLatched
 
     ; 收集所有要删除的键
     keysToRemove := []
@@ -2445,9 +3091,12 @@ ClearAllConfigurableHooks() {
         keysToRemove.Push(key)
     }
 
+    allRemoved := true
     ; 删除所有键(UnregisterHook 已经为每个 special 键单独清理了 SpecialKeysPressed/Paused)
     for index, key in keysToRemove {
-        UnregisterHook(key)
+        if (!UnregisterHook(key)) {
+            allRemoved := false
+        }
     }
 
     ; 配置切换:所有 managed_keys 即将注销,残留 single-flight 锁/旧映射无意义
@@ -2469,14 +3118,49 @@ ClearAllConfigurableHooks() {
     ForceMoveActive := false
     PendingPythonStateEvents := Map()
 
+    ; 动态 Hook 已确认清完才解除物理 stop latch。先在 Critical 区内再次确认关闸
+    ; 和清场，最后才解锁；同一命令通道中排在 CLEAR_HOOKS 前的旧 true 无法复活。
+    if (allRemoved && RegisteredHooks.Count = 0) {
+        previousCritical := A_IsCritical
+        Critical "On"
+        try {
+            SetRuntimeActionGate(false)
+            ; 抑制状态已彻底归零：在 latch 仍为 true、闸门仍关闭时完成最终对齐。
+            ; STOPPED 路径下 desired 已空，这是幂等空转；不能放到解锁之后。
+            ReconcileSkillHoldKeys()
+            F8StopIntentPending := false
+            MainModeArmed := false
+            MainModeF8AwaitRelease := false
+            SetTimer(PollMainModeF8Release, 0)
+            PhysicalStopLatched := false
+        } finally {
+            if (previousCritical) {
+                Critical previousCritical
+            } else {
+                Critical "Off"
+            }
+        }
+    } else if (MainModeArmed) {
+        ; 主模式 Hook 只清掉一部分时保持 fail-closed。后续物理 F8 由 armed/latch
+        ; 继续编码为 stop-only，Python 在 STOPPED 重跑本幂等清理。
+        PhysicalStopLatched := true
+        SetRuntimeActionGate(false)
+    }
+
+    ; 可靠 FIFO 刻意保留:它可能包含紧随 F8 的另一个真实人工边沿。当前 F8 若已被
+    ; Python 处理,本次 SendMessage 返回后正常出队；若发送方超时则按 seq 重试并由
+    ; Python 去重。清空它反而会把 F7/F9 等后续用户意图静默吞掉。
+
     ; ⚠️ 刻意**不**整体清 InterceptKeysPressed:此刻用户可能正按着 F8(本次 STOPPED
     ; 的来源),清掉它的按下状态会让键盘自动重复立刻再发一条 intercept_key_down
     ; (把刚停下的状态又切回去)。可配置 intercept 键(Z/原地键/BOSS 键)已由上面的
     ; 逐键 UnregisterHook 清理;F8/F7/F9 永久注册,其 up 边沿始终存在,无残留风险。
 
-    ; 抑制状态已彻底归零:与期望集合对齐一次。
-    ; STOPPED 路径下 Python 已先下发空集合,此处为无操作;配置热切换时则补齐被推迟的 down。
-    ReconcileSkillHoldKeys()
+    ; 失败路径仍做安全方向的本地对齐；PhysicalStopLatched 保持 true，不能补按新键。
+    if (!allRemoved || RegisteredHooks.Count > 0) {
+        ReconcileSkillHoldKeys()
+    }
+    return allRemoved
 }
 
 ; ===============================================================================

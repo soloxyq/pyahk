@@ -7,6 +7,7 @@ hold_client/WinDLL,在非 Windows 上不可用),以便核心逻辑测试可在�
 """
 
 import importlib.util
+import json
 import os
 
 _KN_PATH = os.path.join(
@@ -109,6 +110,20 @@ def test_normalize_side_mouse_button_aliases():
     assert kn.normalize_key_name("button8") == "XButton1"
     assert kn.normalize_key_name("x2") == "XButton2"
     assert kn.normalize_key_name("button9") == "XButton2"
+
+
+def test_d4_druid_sequence_uses_explicit_delays_for_cadence():
+    path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "d4_druid.json"))
+    with open(path, encoding="utf-8") as fp:
+        global_config = json.load(fp)["global"]
+
+    steps = global_config["macro_steps"]
+    assert steps and len(steps) % 2 == 0
+    for index in range(0, len(steps), 2):
+        assert steps[index]["type"] == "press"
+        assert steps[index + 1]["type"] == "delay"
+        assert int(steps[index + 1]["ms"]) > 0
+    assert kn.steps_to_legacy_sequence(steps) == global_config["skill_sequence"]
 
 
 if __name__ == "__main__":

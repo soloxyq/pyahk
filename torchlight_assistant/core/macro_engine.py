@@ -26,6 +26,9 @@ CAPTURE_INTERVAL_DEFAULT_MS = 40
 SPECIAL_KEY_RESUME_DELAY_MIN_MS = 0
 SPECIAL_KEY_RESUME_DELAY_MAX_MS = 1000
 SPECIAL_KEY_RESUME_DELAY_DEFAULT_MS = 0
+KEY_PRESS_DURATION_MIN_MS = 1
+KEY_PRESS_DURATION_MAX_MS = 1000
+KEY_PRESS_DURATION_DEFAULT_MS = 10
 
 
 class MacroEngine:
@@ -45,9 +48,11 @@ class MacroEngine:
         self._state = MacroState.STOPPED
         self._prepared_mode = "none"  # 'none', 'combat', 'pathfinding'
         self._state_lock = threading.RLock()
-        self._transition_lock = threading.Lock()
+        # QTimer 调度失败会在当前状态转换栈内同步回退，因此必须允许重入。
+        self._transition_lock = threading.RLock()
         self._cleanup_lock = threading.Lock()
         self._cleanup_done = False
+        self._event_subscriptions = []
         self._skills_config: Dict[str, Any] = {}
         self._global_config: Dict[str, Any] = {}
         # 启动期加载失败的暂存:__init__ 里的 load_config 发布 config_load_result 时
@@ -55,8 +60,8 @@ class MacroEngine:
         # 失败结果存在这里,由 ui:request_current_config 握手时一次性重放。
         self._pending_load_error: Optional[Tuple[str, str]] = None
         self.current_config_file = self._resolve_initial_config_file(config_file)
-        # AHK 传输挂死锁:置位后 F8 拒绝进入 READY(见 _on_ahk_transport_failed),
-        # 只能重启应用解除 —— 挂死的 AHK 无法经命令恢复,也不能安全强杀。
+        # AHK 传输熔断:置位后 F8 先做一次有界 PING 探测，成功才解除。
+        # 超时消息不会重放；安全清理命令仍可 force 发送。
         self._ahk_transport_failed = False
         self._is_debug_mode_active = (
             False  # 跟踪当前是否处于调试模式（由配置和状态决定）
@@ -179,23 +184,49 @@ class MacroEngine:
             LOG_ERROR(f"[配置加载] 保存应用状态失败: {e}")
 
     def _setup_event_subscriptions(self):
-        event_bus.subscribe("ui:load_config_requested", self.load_config)
-        event_bus.subscribe("ui:save_full_config_requested", self.save_full_config)
-        event_bus.subscribe(
+        self._subscribe_event("ui:load_config_requested", self.load_config)
+        self._subscribe_event("ui:save_full_config_requested", self.save_full_config)
+        self._subscribe_event(
             "ui:sync_and_toggle_state_requested", self._handle_f8_press
         )  # F8 启动时的统一配置同步入口
-        event_bus.subscribe(
+        self._subscribe_event(
             "ui:request_current_config", self._handle_ui_request_current_config
         )
-        event_bus.subscribe("hotkey:z_press", self._handle_z_press)
-        event_bus.subscribe("engine:config_updated", self._on_config_updated)
+        self._subscribe_event("hotkey:z_press", self._handle_z_press)
+        self._subscribe_event("engine:config_updated", self._on_config_updated)
         # AHK 子进程意外退出 → 强制停机 + 告警。由 AHKInputHandler 在命令发送失败时探测到进程
         # 已退出后,经 ahk_signal_bridge 切回 GUI 线程发布本事件(故本 handler 已在主线程)。
-        event_bus.subscribe("ahk_process_died", self._on_ahk_process_died)
+        self._subscribe_event("ahk_process_died", self._on_ahk_process_died)
         # AHK 进程活着但消息循环挂死(命令 500ms 无响应):同样延迟停机,并锁定 READY 入口
-        event_bus.subscribe("ahk_transport_failed", self._on_ahk_transport_failed)
+        self._subscribe_event("ahk_transport_failed", self._on_ahk_transport_failed)
+        self._subscribe_event("ahk_transport_recovered", self._on_ahk_transport_recovered)
+        self._subscribe_event(
+            "skill_manager:input_sync_failed", self._on_skill_input_sync_failed
+        )
         # AHK 丢弃了待发动作(过载预算裁剪 / 等待过期),data 带两个累计计数
-        event_bus.subscribe("queue_drop", self._on_queue_drop)
+        self._subscribe_event("queue_drop", self._on_queue_drop)
+
+    def _subscribe_event(self, event_name: str, handler):
+        """订阅事件并登记释放信息，避免重建引擎后旧实例继续接收事件。"""
+        subscriptions = getattr(self, "_event_subscriptions", None)
+        if subscriptions is None:
+            subscriptions = []
+            self._event_subscriptions = subscriptions
+        subscription = (event_name, handler)
+        if subscription in subscriptions:
+            return
+        event_bus.subscribe(event_name, handler)
+        subscriptions.append(subscription)
+
+    def _unsubscribe_event_handlers(self):
+        """幂等注销 MacroEngine 自己登记的全部 EventBus handler。"""
+        subscriptions = getattr(self, "_event_subscriptions", [])
+        self._event_subscriptions = []
+        for event_name, handler in subscriptions:
+            try:
+                event_bus.unsubscribe(event_name, handler)
+            except Exception as e:
+                LOG_ERROR(f"[清理] 注销事件订阅失败 {event_name}: {e}")
 
     def _on_queue_drop(self, key: str = ""):
         """AHK 丢弃了待发动作。data 形如 "overload=12,expired=3"(**累计**计数)。
@@ -254,34 +285,41 @@ class MacroEngine:
             LOG_INFO("[热键管理] 注册永久根热键 (F8/F7/F9)...")
 
             for key in ("F8", "F7", "F9"):
-                result = self.input_handler.register_root_hook(key)
-                if result:
-                    LOG_INFO(f"[热键管理] [OK] 永久根热键注册成功: {key}")
-                else:
-                    LOG_ERROR(f"[热键管理] [FAIL] 永久根热键注册失败: {key}")
+                if not self.input_handler.register_root_hook(key):
+                    raise RuntimeError(f"永久根热键注册失败: {key}")
+                LOG_INFO(f"[热键管理] [OK] 永久根热键注册成功: {key}")
 
             # 订阅AHK拦截事件（系统热键）
-            event_bus.subscribe("intercept_key_down", self._handle_ahk_intercept_key)
+            self._subscribe_event("intercept_key_down", self._handle_ahk_intercept_key)
 
             # 🎯 订阅新的按键事件系统
             # 特殊按键事件（如space）- 持续状态检测
-            event_bus.subscribe("special_key_down", self._handle_ahk_special_key_down)
-            event_bus.subscribe("special_key_up", self._handle_ahk_special_key_up)
-            event_bus.subscribe("special_key_pause", self._handle_ahk_special_key_pause)
+            self._subscribe_event("special_key_down", self._handle_ahk_special_key_down)
+            self._subscribe_event("special_key_up", self._handle_ahk_special_key_up)
+            self._subscribe_event("special_key_pause", self._handle_ahk_special_key_pause)
 
             # 管理按键事件（如RButton/e）- 拦截+延迟+映射
-            event_bus.subscribe("managed_key_down", self._handle_ahk_managed_key_down)
-            event_bus.subscribe("managed_key_complete", self._handle_ahk_managed_key_complete)
+            self._subscribe_event("managed_key_down", self._handle_ahk_managed_key_down)
+            self._subscribe_event(
+                "managed_key_complete", self._handle_ahk_managed_key_complete
+            )
 
             # 兼容旧的优先级事件（逐步迁移）
             # priority_key_down/up 订阅已移除:AHK 端从不发送这两个事件(死代码)
 
             # 订阅AHK监控事件（交互键A等）
-            event_bus.subscribe("monitor_key_down", self._handle_ahk_monitor_key_down)
-            event_bus.subscribe("monitor_key_up", self._handle_ahk_monitor_key_up)
+            self._subscribe_event("monitor_key_down", self._handle_ahk_monitor_key_down)
+            self._subscribe_event("monitor_key_up", self._handle_ahk_monitor_key_up)
 
         except Exception as e:
             LOG_ERROR(f"[热键管理] 注册 F8/F7/F9 永久根热键时发生错误: {e}")
+            # 根热键是停机入口，缺任意一个都不能继续构造一个“看似可用”的引擎。
+            # 走完整分层清理，撤销各组件订阅并停止 AHK，清掉可能已注册的部分根键。
+            try:
+                self.cleanup()
+            except Exception as cleanup_error:
+                LOG_ERROR(f"[热键管理] 根热键失败后清理失败: {cleanup_error}")
+            raise RuntimeError("F8/F7/F9 永久根热键初始化失败") from e
 
     def _register_secondary_hotkeys(self):
         """注册所有动态热键（在READY状态时调用）
@@ -297,23 +335,28 @@ class MacroEngine:
                 LOG_INFO("[热键管理] [OK] 执行/暂停键 (z) 注册成功")
             else:
                 LOG_ERROR("[热键管理] [FAIL] 执行/暂停键 (z) 注册失败")
+                return False
 
             # 注册配置相关的动态热键（原地模式、交互模式等）
             LOG_INFO("[热键管理] 准备注册配置相关热键...")
-            self._register_config_based_hotkeys()
+            if not self._register_config_based_hotkeys():
+                return False
 
             LOG_INFO("[热键管理] ========== 动态热键注册完成 ==========")
+            return True
 
         except Exception as e:
             LOG_ERROR(f"[热键管理] 注册动态热键时发生错误: {e}")
             import traceback
 
             LOG_ERROR(f"[热键管理] 详细错误: {traceback.format_exc()}")
+            return False
 
     def _register_config_based_hotkeys(self):
         """根据当前配置注册热键"""
         try:
             LOG_INFO("[热键管理] 开始注册配置相关热键...")
+            registration_ok = True
 
             # 获取当前配置
             stationary_config = self._global_config.get("stationary_mode_config", {})
@@ -343,6 +386,7 @@ class MacroEngine:
                     )
                 else:
                     LOG_ERROR(f"[原地模式] 注册Hook失败: {stationary_key}")
+                    registration_ok = False
             else:
                 LOG_INFO("[热键管理] 未配置原地模式热键")
 
@@ -366,6 +410,7 @@ class MacroEngine:
                     )
                 else:
                     LOG_ERROR(f"[强制移动键] 注册Hook失败: {force_move_key}")
+                    registration_ok = False
             else:
                 LOG_INFO("[热键管理] 未配置强制移动键")
 
@@ -388,6 +433,7 @@ class MacroEngine:
                     LOG_INFO(f"[BOSS模式] 注册Hook成功: {boss_mode_key} (intercept)")
                 else:
                     LOG_ERROR(f"[BOSS模式] 注册Hook失败: {boss_mode_key}")
+                    registration_ok = False
             else:
                 LOG_INFO("[BOSS模式] 未配置 BOSS 模式热键")
 
@@ -416,6 +462,7 @@ class MacroEngine:
                         LOG_INFO(f"[特殊按键] 注册成功: {key} (special)")
                     else:
                         LOG_ERROR(f"[特殊按键] 注册失败: {key}")
+                        registration_ok = False
 
                 # 注册管理按键（如RButton/e键,程序代按）
                 managed_keys = priority_config.get("managed_keys", {})
@@ -435,33 +482,49 @@ class MacroEngine:
                         delay = config.get("delay", 0)
                         hold_ms = config.get("hold_ms", 0)
                         # 发送管理按键配置到AHK
-                        self.input_handler.set_managed_key_config(
+                        configured = self.input_handler.set_managed_key_config(
                             key, target, delay, hold_ms
                         )
-                        LOG_INFO(
-                            f"[管理按键] 注册成功: {key} -> {target} "
-                            f"(延迟: {delay}ms, 按住: {hold_ms}ms)"
-                        )
+                        if not configured:
+                            LOG_ERROR(f"[管理按键] 下发配置失败: {key}")
+                            registration_ok = False
+                        else:
+                            LOG_INFO(
+                                f"[管理按键] 注册成功: {key} -> {target} "
+                                f"(延迟: {delay}ms, 按住: {hold_ms}ms)"
+                            )
                     else:
                         LOG_ERROR(f"[管理按键] 注册失败: {key}")
+                        registration_ok = False
             else:
                 LOG_INFO("[热键管理] 优先级配置未启用")
 
             LOG_INFO("[热键管理] 配置相关热键注册完成")
+            return registration_ok
 
         except Exception as e:
             LOG_ERROR(f"[热键管理] 注册配置相关热键时发生错误: {e}")
             import traceback
 
             LOG_ERROR(f"[热键管理] 详细错误: {traceback.format_exc()}")
+            return False
 
     def _handle_ahk_intercept_key(self, key: str, **kwargs):
         """处理AHK拦截的系统热键（F8/F7/F9/Z）和原地模式按键"""
         key_lower = key.lower()
         LOG_INFO(f"[热键管理] 收到AHK拦截按键: {key}")
 
-        if key_lower == "f8":
+        if key_lower in ("f8", "f8_stop"):
             if self._state == MacroState.STOPPED:
+                if key_lower == "f8_stop":
+                    # AHK 在动态 Hook 存在时把 F8 标成 stop-only。
+                    # GUI 卡顿/主动停机后迟到的旧意图不得反向启动；但上一次
+                    # CLEAR_HOOKS 可能只完成了部分注销，AHK 此时会保持物理 stop
+                    # latch 并拒绝重新开闸。重跑幂等清理给瞬时失败一条恢复路径。
+                    LOG_INFO("[热键管理] STOPPED 收到 F8 停机意图，重试安全清理")
+                    with self._transition_lock:
+                        self._enter_stopped_state()
+                    return
                 # 启动时先由 MainWindow 采集当前控件值,再发布
                 # ui:sync_and_toggle_state_requested 回到 _handle_f8_press。
                 # 直接启动会绕过尚未保存的 GUI 修改,继续使用旧配置。
@@ -470,11 +533,22 @@ class MacroEngine:
                 # 停止是安全路径,不能依赖 GUI 配置采集:任何控件取值异常都不应
                 # 阻止用户用物理 F8 立即停机。
                 self._handle_f8_press()
-        elif key_lower == "f7":
+            return
+        if key_lower == "f7":
             self._on_f7_key_press()
-        elif key_lower == "f9":
+            return
+        if key_lower == "f9":
             self._on_f9_key_press()
-        elif key_lower == "z":
+            return
+
+        # 可靠 FIFO 会在 GUI 恢复后按顺序补发 F8 后的按键。F8 已进入
+        # STOPPED 时，随后到达的 Z/原地/BOSS 都是旧运行世代的动态事件；
+        # 让它们重新改写 AHK 状态会破坏 STOPPED 安全屏障。
+        if self._state == MacroState.STOPPED:
+            LOG_INFO(f"[热键管理] STOPPED 忽略迟到动态按键: {key}")
+            return
+
+        if key_lower == "z":
             self._on_z_key_press()
         elif key_lower == self._current_stationary_key:
             # 原地模式按键（X键）- 按一下切换状态
@@ -577,13 +651,14 @@ class MacroEngine:
                     return False
 
                 old_state = self._state
-                self._state = new_state
-                LOG_INFO(f"[状态转换] 状态转换成功: {old_state} → {new_state}")
-
-                # 音效播放由MainWindow统一处理，避免重复播放
-
+                # STOPPED 是安全方向：先提交本地状态，让 QueuedConnection 中迟到的
+                # monitor/special/managed down 立即被门禁丢弃。其入口清理逐项容错，
+                # 不会因单个组件异常留下“状态已停但清理被截断”的旧问题。
+                stopped_precommitted = new_state == MacroState.STOPPED
+                if stopped_precommitted:
+                    self._state = MacroState.STOPPED
                 try:
-                    self._on_state_enter(new_state, from_state=old_state)
+                    entered = self._on_state_enter(new_state, from_state=old_state)
                 except Exception as e:
                     LOG_ERROR(f"[状态转换] _on_state_enter 异常: {e}")
                     import traceback
@@ -591,13 +666,27 @@ class MacroEngine:
                     LOG_ERROR(
                         f"[状态转换] _on_state_enter 异常详情:\n{traceback.format_exc()}"
                     )
-                    # 即使_on_state_enter失败，也要继续发布事件
-                    pass
+                    if not stopped_precommitted:
+                        self._rollback_failed_state_entry(new_state, old_state)
+                    return False
+
+                if entered is False:
+                    LOG_ERROR(
+                        f"[状态转换] 状态入口拒绝转换: {old_state} → {new_state}"
+                    )
+                    return False
+
+                # 可运行状态在入口逻辑全部成功后才提交，外部观察者不会看到一个
+                # 尚未完成初始化的 READY/RUNNING 伪状态。
+                if not stopped_precommitted:
+                    self._state = new_state
+                LOG_INFO(f"[状态转换] 状态转换成功: {old_state} → {new_state}")
 
                 try:
                     event_bus.publish(
                         "engine:state_changed", new_state=new_state, old_state=old_state
                     )
+                    event_bus.publish(f"engine:macro_{new_state.name.lower()}")
                     # 在状态转换时，发布完整的状态更新
                     self._publish_status_update()
                 except Exception as e:
@@ -608,8 +697,11 @@ class MacroEngine:
                     # 即使事件发布失败，状态转换也算成功
                     pass
 
-                # 更新OSD可见性
-                self._update_osd_visibility()
+                # OSD/UI 通知失败不回滚已经完成的运行时转换。
+                try:
+                    self._update_osd_visibility()
+                except Exception as e:
+                    LOG_ERROR(f"[状态转换] 更新 OSD 可见性失败: {e}")
 
                 return True
         except Exception as e:
@@ -625,17 +717,18 @@ class MacroEngine:
         LOG_INFO(f"[状态转换] 进入状态: {state}")
 
         if state == MacroState.READY:
-            # 重新打开运行时闸门(STOPPED 时被关掉,见下方 STOPPED 分支第 0 步)。
-            # 失败 = AHK 不可达:拒绝进入可运行状态,延后回退 STOPPED(不能在
-            # _on_state_enter 内同步转换,会重入 _set_state)。
-            if not self._open_runtime_gate("进入 READY"):
-                return
+            # 两阶段 READY：先在 AHK 标记主模式已 armed，但保持输入闸门关闭。
+            # 物理 F8 从此刻起就是 stop-only，即使首个动态 Hook 尚未登记。
+            if not self._arm_main_mode("进入 READY"):
+                return False
 
             # 进入READY状态时注册所有动态热键
-            self._register_secondary_hotkeys()
+            if not self._register_secondary_hotkeys():
+                raise RuntimeError("动态热键注册未完整成功")
 
             # 激活目标窗口并做准备动作
-            self.input_handler.activate_target_window()
+            if self.input_handler.activate_target_window() is False:
+                raise RuntimeError("目标窗口激活失败")
             self.input_handler.start()
 
             self.skill_manager.prepare_border_only()  # 预计算边框
@@ -662,28 +755,57 @@ class MacroEngine:
                 else:
                     LOG_ERROR("[OCR锁定] READY阶段未获取到帧，跳过PaddleOCR数字框锁定")
 
+            # 所有 Hook 和可能较慢的捕获/OCR 准备完成后才开闸。失败 = AHK
+            # 不可达或期间已有物理 F8 stop latch；拒绝提交 READY 并延后清理。
+            if not self._open_runtime_gate("进入 READY"):
+                return False
+
         elif state == MacroState.RUNNING:
             # 开闸必须先于恢复生产者:resume/start 会重新声明**非空**持键集合并
             # START_MACRO,这两个命令在闸门关闭时会被 AHK 拒绝。
             # PAUSED 是关着闸的;READY→RUNNING 时闸门已开,重开是幂等空操作。
             if not self._open_runtime_gate("进入 RUNNING"):
-                return
+                return False
 
-            # 闸门关闭期间 AHK 拒绝 set_force_move_state(True)(防迟到激活复活替换);
-            # 用户按住强制移动键跨过 Z 恢复时,PAUSED 里的合法 true 也被拒了 ——
-            # 开闸后按 Python 账本重对齐一次。幂等,一条命令。
+            # AHK 在开闸时已按本地物理 monitor 账本恢复强制移动。
+            # Python 仍回发自己的 OSD 账本作纵深对齐；AHK 只触发重算，
+            # 不盲写迟到的 true/false，因此不会覆盖更新的物理边沿。
             if hasattr(self.input_handler, "set_force_move_state"):
-                self.input_handler.set_force_move_state(self._force_move_active)
+                force_move_synced = self.input_handler.set_force_move_state(
+                    self._force_move_active
+                )
+                if force_move_synced is False:
+                    raise RuntimeError("强制移动状态重对齐失败")
 
             # 如果是从暂停状态恢复，调用resume；否则启动子系统
             if from_state == MacroState.PAUSED:
                 LOG_INFO("[状态转换] 从暂停状态恢复")
                 if self._prepared_mode == "combat":
-                    self.skill_manager.resume()
+                    resumed = self.skill_manager.resume()
+                    if (
+                        resumed is False
+                        or getattr(self.skill_manager, "_is_running", True) is False
+                        or getattr(self.skill_manager, "_is_paused", False)
+                    ):
+                        raise RuntimeError("技能管理器恢复失败")
                 elif self._prepared_mode == "pathfinding":
                     self.pathfinding_manager.resume()
+                    pause_event = getattr(self.pathfinding_manager, "_pause_event", None)
+                    if (
+                        getattr(self.pathfinding_manager, "is_running", True) is False
+                        or (pause_event is not None and pause_event.is_set())
+                    ):
+                        raise RuntimeError("寻路管理器恢复失败")
                 self.resource_manager.resume()
                 self.border_manager.resume_capture()
+                if hasattr(self.resource_manager, "is_running"):
+                    if not self.resource_manager.is_running():
+                        raise RuntimeError("资源管理器恢复失败")
+                if (
+                    getattr(self.border_manager, "running", True) is False
+                    or getattr(self.border_manager, "paused", False)
+                ):
+                    raise RuntimeError("屏幕捕获恢复失败")
             else:
                 # 首次启动
                 self._start_subsystems_based_on_mode()
@@ -695,96 +817,150 @@ class MacroEngine:
             # (物理按键被 $Hook 吞掉,无输出 —— PAUSED 就是"完全停下")。
             # 旧的 clear_queue() 由屏障取代;skill_manager.pause() 的空集合声明
             # 与 stop_macro 属安全清理命令,闸门放行。
-            try:
-                if not self.input_handler.set_accepting_actions(False):
-                    LOG_ERROR("[暂停] 关闭运行时闸门失败(AHK 可能已退出)")
-            except Exception as e:
-                LOG_ERROR(f"[暂停] 关闭运行时闸门失败: {e}")
+            self._run_safety_step(
+                "[暂停] 关闭运行时闸门",
+                lambda: self.input_handler.set_accepting_actions(False),
+            )
             if self._prepared_mode == "combat":
-                self.skill_manager.pause()
+                self._run_safety_step("[暂停] 暂停技能管理器", self.skill_manager.pause)
             elif self._prepared_mode == "pathfinding":
-                self.pathfinding_manager.pause()
-            self.resource_manager.pause()
-            self.border_manager.pause_capture()
+                self._run_safety_step(
+                    "[暂停] 暂停寻路管理器", self.pathfinding_manager.pause
+                )
+            self._run_safety_step("[暂停] 暂停资源管理器", self.resource_manager.pause)
+            self._run_safety_step("[暂停] 暂停捕获", self.border_manager.pause_capture)
 
         elif state == MacroState.STOPPED:
-            # 🔧 停止顺序很关键(顺序错会留下卡键或停止后仍继续按键):
-            #   0) 关运行时闸门  1) 停生产者并等待其退出  2) 清 AHK 队列 + 停宏 + 释放持键
-            #   3) 注销 Hook  4) 再清一次队列(封住第 2~3 步之间 Hook 仍生效的窗口)
+            self._enter_stopped_state()
 
-            # 0) 先关闸门 = AHK 端**原子停止屏障**:同一条 WM_COPYDATA 内完成
-            #    关闸+清队(-1)+停宏+释放全部持键。此后 AHK 拒绝一切普通入队/启宏/
-            #    非空持键声明,MacroTick 也被闸门压住。
-            #    这是唯一能覆盖"调度线程 join 超时、在飞回调仍在跑"的手段 ——
-            #    UnifiedScheduler.stop() 只等 2 秒,OCR 等慢回调可能更久才返回,
-            #    仅靠"停生产者 + 事后清队列"必然留下先后窗口。
-            try:
-                if not self.input_handler.set_accepting_actions(False):
-                    LOG_ERROR("[停止] 关闭运行时闸门失败(AHK 可能已退出)")
-            except Exception as e:
-                LOG_ERROR(f"[停止] 关闭运行时闸门失败: {e}")
+        return True
 
-            # monitor/special 的物理 key-up 可能因 Hook 注销而永远不会产生。
-            # STOPPED 本地直接复位,避免下一轮仍显示/执行强制移动或继续丢弃普通技能。
-            self._force_move_active = False
-            if hasattr(self.input_handler, "set_drop_non_emergency"):
-                self.input_handler.set_drop_non_emergency(False)
-            # 说明:技能持键已改为声明式命令(CMD_SET_SKILL_HOLD_KEYS),不再经动作队列,
-            # 因此第 2 步清队列不会再把持键的释放动作一起清掉。
+    @staticmethod
+    def _run_safety_step(label: str, operation) -> bool:
+        """运行一个停机/回滚步骤；单步失败不得截断后续安全动作。"""
+        try:
+            result = operation()
+            if result is False:
+                LOG_ERROR(f"{label}失败")
+                return False
+            return True
+        except Exception as e:
+            LOG_ERROR(f"{label}失败: {e}")
+            return False
 
-            # 1) 停生产者(skill_manager.stop() 内部先 join 调度线程,再释放持键/停宏)
-            self.skill_manager.stop()
-            self.pathfinding_manager.stop()
-            self.resource_manager.stop()
+    def _enter_stopped_state(self):
+        """执行幂等 STOPPED 安全清理，任何单步异常都不会阻断后续步骤。"""
+        # 第一步必须是 AHK 原子屏障。set_accepting_actions(False) 内部强制发送，
+        # 在同一条消息里关闸、清队、停宏并释放全部持键。
+        self._run_safety_step(
+            "[停止] 关闭运行时闸门",
+            lambda: self.input_handler.set_accepting_actions(False),
+        )
 
-            # 2) 生产者已停:清空 AHK 四级队列,丢弃在飞回调残留的按键动作,
-            #    并由 ClearQueue(-1) 内部兜底 StopMacro + 释放技能持键
-            try:
-                self.input_handler.clear_queue()
-                LOG_INFO("[停止] 已清空 AHK 按键队列(含 emergency)")
-            except Exception as e:
-                LOG_ERROR(f"[停止] 清空 AHK 队列失败: {e}")
+        # Hook 注销可能吞掉物理 key-up；Python 本地账本也必须立即向安全方向复位。
+        self._force_move_active = False
+        self._stationary_mode_active = False
+        stationary_config = self._global_config.get("stationary_mode_config", {}) or {}
+        stationary_type = stationary_config.get("mode_type", "shift_modifier")
+        self._run_safety_step(
+            "[停止] 复位原地模式",
+            lambda: self.input_handler.set_stationary_mode(False, stationary_type),
+        )
+        if hasattr(self.input_handler, "set_drop_non_emergency"):
+            self._run_safety_step(
+                "[停止] 复位特殊键丢弃状态",
+                lambda: self.input_handler.set_drop_non_emergency(False),
+            )
 
-            self.border_manager.stop()
+        # 停生产者。每个组件独立保护，前一个 stop 抛错也不能阻止最终清场。
+        self._run_safety_step("[停止] 停止技能管理器", self.skill_manager.stop)
+        self._run_safety_step("[停止] 停止寻路管理器", self.pathfinding_manager.stop)
+        self._run_safety_step("[停止] 停止资源管理器", self.resource_manager.stop)
 
-            # 3) 注销所有动态热键（保留 F8/F7/F9 永久根热键）
-            try:
-                self.input_handler.clear_all_configurable_hooks()
-                LOG_INFO("[热键管理] 已清理所有动态热键（F8/F7/F9 永久根热键保留）")
-                LOG_INFO("[热键管理] AHK进程保持运行，F8/F7/F9 永久根热键保持监听")
-            except Exception as e:
-                LOG_ERROR(f"[热键管理] 清理动态热键失败: {e}")
+        if self._run_safety_step("[停止] 清空 AHK 队列", self.input_handler.clear_queue):
+            LOG_INFO("[停止] 已清空 AHK 按键队列(含 emergency)")
 
-            # 4) 补一次清队列:第 2 步到这里之间管理键/特殊键 Hook 仍是活的,
-            #    这段时间内的按键会被 HandleManagedKey 压进 emergency 队列并照常执行
-            #    (ProcessQueue 定时器永不停、emergency 不看 IsPaused)。
-            #    Hook 已注销后再清一次,确保"按了 F8 就不会再有键打进游戏"。
-            #    ClearQueue(-1) 幂等,此时账本已空,不会重复发键。
-            try:
-                self.input_handler.clear_queue()
-            except Exception as e:
-                LOG_ERROR(f"[停止] 注销 Hook 后补清队列失败: {e}")
-            self._set_boss_mode_active(False, notify=False)
-            # 注意：不调用 input_handler.cleanup()，保持AHK进程和F8热键运行
-            self._prepared_mode = "none"
+        self._run_safety_step("[停止] 停止捕获", self.border_manager.stop)
 
-            # 5) 统一重新应用干跑标志:运行中被拒绝的 DEBUG 变更只落在了 _global_config 里,
-            #    现在已回到 STOPPED,是安全的生效时机。不在这里补的话,下一次**物理 F8**
-            #    (不携带 full_config、不触发 config_updated)会继续用旧的 dry-run 状态,
-            #    也就是 set_debug_mode 里"下次启动生效"那句注释的兑现点。
-            try:
-                debug_enabled = bool(
-                    (self._global_config.get("debug_mode") or {}).get("enabled", False)
+        if self._run_safety_step(
+            "[热键管理] 清理动态热键",
+            self.input_handler.clear_all_configurable_hooks,
+        ):
+            LOG_INFO("[热键管理] 已清理所有动态热键（F8/F7/F9 永久根热键保留）")
+            LOG_INFO("[热键管理] AHK进程保持运行，F8/F7/F9 永久根热键保持监听")
+
+        # Hook 清理前仍可能有最后一条管理键动作入队，注销后再清一次封住窗口。
+        self._run_safety_step("[停止] 注销 Hook 后补清队列", self.input_handler.clear_queue)
+        self._run_safety_step(
+            "[停止] 复位 BOSS 模式",
+            lambda: self._set_boss_mode_active(False, notify=False),
+        )
+        self._prepared_mode = "none"
+
+        self._run_safety_step(
+            "[干跑模式] STOPPED 同步干跑标志", self._sync_stopped_debug_mode
+        )
+        LOG_INFO("[状态转换] STOPPED状态处理完成，等待F8重新启动")
+
+    def _sync_stopped_debug_mode(self):
+        debug_enabled = bool(
+            (self._global_config.get("debug_mode") or {}).get("enabled", False)
+        )
+        if bool(self.input_handler.dry_run_mode) != debug_enabled:
+            self.input_handler.set_dry_run_mode(debug_enabled)
+            LOG_INFO(f"[干跑模式] 已在 STOPPED 同步为配置值: {debug_enabled}")
+
+    def _rollback_failed_state_entry(
+        self, failed_state: MacroState, old_state: MacroState
+    ):
+        """补偿入口阶段已产生的副作用，同时保持已提交状态不变。"""
+        LOG_ERROR(f"[状态转换] 回滚未完成的状态入口: {old_state} → {failed_state}")
+
+        if failed_state == MacroState.READY:
+            # READY 只能从 STOPPED 进入；按完整 STOPPED 屏障撤销已注册 Hook、
+            # 已打开的闸门及可能启动的捕获准备动作。
+            self._enter_stopped_state()
+            return
+
+        if failed_state != MacroState.RUNNING:
+            return
+
+        # RUNNING 入口可能已经启动/恢复了部分生产者，先原子关闸止血。
+        self._run_safety_step(
+            "[状态回滚] 关闭运行时闸门",
+            lambda: self.input_handler.set_accepting_actions(False),
+        )
+
+        if old_state == MacroState.PAUSED:
+            if self._prepared_mode == "combat":
+                self._run_safety_step(
+                    "[状态回滚] 重新暂停技能管理器", self.skill_manager.pause
                 )
-                if bool(self.input_handler.dry_run_mode) != debug_enabled:
-                    self.input_handler.set_dry_run_mode(debug_enabled)
-                    LOG_INFO(f"[干跑模式] 已在 STOPPED 同步为配置值: {debug_enabled}")
-            except Exception as e:
-                LOG_ERROR(f"[干跑模式] STOPPED 同步干跑标志失败: {e}")
+            elif self._prepared_mode == "pathfinding":
+                self._run_safety_step(
+                    "[状态回滚] 重新暂停寻路管理器", self.pathfinding_manager.pause
+                )
+            self._run_safety_step(
+                "[状态回滚] 重新暂停资源管理器", self.resource_manager.pause
+            )
+            self._run_safety_step(
+                "[状态回滚] 重新暂停捕获", self.border_manager.pause_capture
+            )
+            return
 
-            LOG_INFO("[状态转换] STOPPED状态处理完成，等待F8重新启动")
-
-        event_bus.publish(f"engine:macro_{state.name.lower()}")
+        # READY → RUNNING 失败：停止任何已启动生产者，但保留 READY 的动态 Hook
+        # 与准备模式，最后重新打开 READY 应有的运行时闸门。
+        self._run_safety_step("[状态回滚] 停止技能管理器", self.skill_manager.stop)
+        self._run_safety_step("[状态回滚] 停止寻路管理器", self.pathfinding_manager.stop)
+        self._run_safety_step("[状态回滚] 停止资源管理器", self.resource_manager.stop)
+        self._run_safety_step("[状态回滚] 停止捕获", self.border_manager.stop)
+        self._run_safety_step(
+            "[状态回滚] 清空 AHK 队列", self.input_handler.clear_queue
+        )
+        self._run_safety_step(
+            "[状态回滚] 恢复 READY 运行时闸门",
+            lambda: self._open_runtime_gate("RUNNING 入口失败后恢复 READY"),
+        )
 
     def _capture_interval_ms(self) -> int:
         """「图像捕获间隔」的唯一读取口径:10..1000ms,默认 40。
@@ -817,20 +993,32 @@ class MacroEngine:
         self.border_manager.start_capture_loop(
             interval_ms=self._capture_interval_ms(), capture_region=None
         )
+        if getattr(self.border_manager, "running", True) is False:
+            raise RuntimeError("屏幕捕获启动失败")
 
         if self._prepared_mode == "combat":
             LOG_INFO("[状态转换] 启动技能管理器")
             self._set_boss_mode_active(False, notify=False)
-            self.skill_manager.start()
+            started = self.skill_manager.start()
+            if (
+                started is False
+                or getattr(self.skill_manager, "_is_running", True) is False
+            ):
+                raise RuntimeError("技能管理器启动失败")
         elif self._prepared_mode == "pathfinding":
             LOG_INFO("[状态转换] 启动寻路管理器")
             self.pathfinding_manager.start()
+            if getattr(self.pathfinding_manager, "is_running", True) is False:
+                raise RuntimeError("寻路管理器启动失败")
 
         # 恢复捕获（如果之前是暂停状态）
         self.border_manager.resume_capture()
 
         # 启动资源管理器（如果有启用配置）
         self.resource_manager.start()
+        if hasattr(self.resource_manager, "is_running"):
+            if not self.resource_manager.is_running():
+                raise RuntimeError("资源管理器启动失败")
 
         LOG_INFO("[状态转换] 子系统启动完成")
 
@@ -889,12 +1077,12 @@ class MacroEngine:
             LOG_INFO(f"[热键] 是否有配置: {full_config is not None}")
             with self._transition_lock:
                 if self._state == MacroState.STOPPED:
-                    # 🔒 AHK 传输挂死后禁止重新进入 READY:命令通道已不可用,
-                    # 进 READY 只会"看着在跑、键全没发"。不自动重启,请用户重启应用。
-                    if self._ahk_transport_failed:
+                    # timeout 不等于 AHK 没执行。熔断后只允许一次无副作用 PING
+                    # 探测恢复；失败继续 fail-closed，成功后才允许 READY 初始化。
+                    if not self._recover_ahk_transport_for_start():
                         LOG_ERROR(
-                            "[MacroEngine] AHK 通信已挂死并被锁定,无法启动。"
-                            "请重启本应用(不会自动重启 AHK)。"
+                            "[MacroEngine] AHK 通信仍不可用或处于恢复冷却期，"
+                            "本次启动已拒绝；请稍后重试，持续失败时重启应用。"
                         )
                         return
                     # 🔧 三模式硬互斥(combat/pathfinding/洗练):洗练运行时拒绝启动主功能,
@@ -1149,6 +1337,29 @@ class MacroEngine:
                 )
             # 始终下发 0,否则从带保护窗口的配置切换到默认配置会在 AHK 留下旧值。
             batch_config["special_key_resume_delay_ms"] = clamped_resume_delay
+
+            raw_key_press_duration = global_config.get(
+                "key_press_duration", KEY_PRESS_DURATION_DEFAULT_MS
+            )
+            try:
+                key_press_duration = int(raw_key_press_duration)
+            except (TypeError, ValueError):
+                LOG_ERROR(
+                    f"[按键持续时间] 配置值非法({raw_key_press_duration!r}),"
+                    f"回退默认 {KEY_PRESS_DURATION_DEFAULT_MS}ms"
+                )
+                key_press_duration = KEY_PRESS_DURATION_DEFAULT_MS
+            clamped_key_press_duration = min(
+                max(key_press_duration, KEY_PRESS_DURATION_MIN_MS),
+                KEY_PRESS_DURATION_MAX_MS,
+            )
+            if clamped_key_press_duration != key_press_duration:
+                LOG_ERROR(
+                    f"[按键持续时间] 配置值 {key_press_duration}ms 超出合法范围 "
+                    f"{KEY_PRESS_DURATION_MIN_MS}..{KEY_PRESS_DURATION_MAX_MS}ms,"
+                    f"已钳制为 {clamped_key_press_duration}ms"
+                )
+            batch_config["key_press_duration"] = clamped_key_press_duration
             
             # 只有在有配置更新时才发送
             if batch_config and hasattr(self.input_handler, "batch_update_config"):
@@ -1257,20 +1468,44 @@ class MacroEngine:
             ok = False
         if not ok:
             LOG_ERROR(f"[闸门] {context}: 打开运行时闸门失败,拒绝进入可运行状态")
-            try:
-                from PySide6.QtCore import QTimer
-
-                QTimer.singleShot(0, self._force_stopped_after_gate_failure)
-            except Exception as e:
-                LOG_ERROR(f"[闸门] 调度回退 STOPPED 失败,直接停机: {e}")
-                self._force_stopped_after_gate_failure()
+            self._schedule_stopped_after_gate_failure()
         return ok
+
+    def _arm_main_mode(self, context: str) -> bool:
+        """在不开闸的前提下武装主模式；失败时重施 STOPPED 安全屏障。"""
+        try:
+            ok = bool(self.input_handler.arm_main_mode())
+        except Exception as e:
+            LOG_ERROR(f"[闸门] {context}: 武装主模式异常: {e}")
+            ok = False
+        if not ok:
+            # SendMessageTimeoutW 超时不代表 AHK 没执行。即使 arm_main 随后迟到
+            # 生效，也必须再发一轮幂等 STOPPED 清理把 armed 标记和动态 Hook 清掉。
+            LOG_ERROR(f"[闸门] {context}: 武装主模式失败,拒绝进入可运行状态")
+            self._schedule_stopped_after_gate_failure()
+        return ok
+
+    def _schedule_stopped_after_gate_failure(self):
+        """延后重施 STOPPED 屏障，避免在状态入口内同步重入状态机。"""
+        try:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, self._force_stopped_after_gate_failure)
+        except Exception as e:
+            LOG_ERROR(f"[闸门] 调度回退 STOPPED 失败,直接停机: {e}")
+            self._force_stopped_after_gate_failure()
 
     def _force_stopped_after_gate_failure(self):
         """闸门打开失败后的回退(主线程,延后执行):强制切回 STOPPED。"""
         try:
-            if self._state != MacroState.STOPPED:
-                self._set_state(MacroState.STOPPED)
+            with self._transition_lock:
+                if self._state != MacroState.STOPPED:
+                    self._set_state(MacroState.STOPPED)
+                else:
+                    # STOPPED→READY 的开闸消息可能已投递、只是发送方 500ms 超时。
+                    # 本地状态从未提交 READY，此处仍必须再发一次 force=false 屏障；
+                    # 否则迟到的 true 会在 Python 显示 STOPPED 时把 AHK 闸门重新打开。
+                    self._enter_stopped_state()
         except Exception as e:
             LOG_ERROR(f"[闸门] 回退 STOPPED 失败: {e}")
 
@@ -1319,16 +1554,15 @@ class MacroEngine:
     def _on_ahk_transport_failed(self, key: str = ""):
         """AHK 传输挂死(进程活着但命令 500ms 无响应)的应急处理(已在 GUI 线程)。
 
-        与 ahk_process_died 汇入同一个延迟 STOPPED 流程,但额外**锁定 READY 入口**:
-        挂死的 AHK 既不能自动重启(TerminateProcess 会跳过 OnExit,可能把按住的键
-        永久留在游戏里),也无法通过命令恢复 —— 用户重启应用是唯一干净出路,
-        在此之前允许 F8 重新进 READY 只会制造"看着在跑、键全没发"的假象。
+        与 ahk_process_died 汇入同一个延迟 STOPPED 流程,并暂时熔断 READY 入口。
+        冷却后 F8 只发送无副作用 PING；成功才恢复，不自动重放超时业务命令，
+        也不通过 TerminateProcess 强杀可能仍持键的 AHK。
         """
         self._ahk_transport_failed = True
         reason = key or "unknown"
         LOG_ERROR(
-            f"[引擎] ⚠️ AHK 通信失效({reason})。已停止主功能并锁定启动入口:"
-            "不会自动重启或强杀 AHK,请重启本应用。"
+            f"[引擎] ⚠️ AHK 通信失效({reason})。已停止主功能并暂时熔断启动入口；"
+            "冷却后再次按 F8 会先探测通信，持续失败请重启本应用。"
         )
         try:
             import winsound
@@ -1353,6 +1587,51 @@ class MacroEngine:
         except Exception as e:
             LOG_ERROR(f"[引擎] 调度 AHK 挂死停机失败,改为直接停机: {e}")
             self._stop_due_to_ahk_death()
+
+    def _recover_ahk_transport_for_start(self) -> bool:
+        """在 STOPPED→READY 前解除可恢复熔断，不发送任何业务动作。"""
+        if not self._ahk_transport_failed:
+            return True
+
+        recover = getattr(self.input_handler, "recover_transport", None)
+        if not callable(recover):
+            return False
+        try:
+            recovered = bool(recover())
+        except Exception as e:
+            LOG_ERROR(f"[引擎] AHK 通信恢复探测异常: {e}")
+            return False
+        if not recovered:
+            return False
+
+        self._ahk_transport_failed = False
+        LOG_INFO("[引擎] AHK 通信探测成功，已解除启动熔断")
+        return True
+
+    def _on_ahk_transport_recovered(self, key: str = ""):
+        """同步输入层的恢复结果；幂等安全。"""
+        if self._ahk_transport_failed:
+            LOG_INFO("[引擎] 收到 AHK 通信恢复通知")
+        self._ahk_transport_failed = False
+
+    def _on_skill_input_sync_failed(self, reason: str = ""):
+        """运行中输入配置提交失败：延后进入 STOPPED，避免嵌套事件重入状态转换。"""
+        LOG_ERROR(f"[引擎] 技能输入状态同步失败({reason or 'unknown'})，强制停止主功能")
+        try:
+            from PySide6.QtCore import QTimer
+
+            QTimer.singleShot(0, self._stop_due_to_skill_input_failure)
+        except Exception as e:
+            LOG_ERROR(f"[引擎] 调度输入同步失败停机异常，改为直接停机: {e}")
+            self._stop_due_to_skill_input_failure()
+
+    def _stop_due_to_skill_input_failure(self):
+        """输入热更新失败后的实际停机回调。"""
+        try:
+            if self._state != MacroState.STOPPED:
+                self.stop_macro()
+        except Exception as e:
+            LOG_ERROR(f"[引擎] 输入同步失败后强制停止异常: {e}")
 
     def toggle_pause_resume(self) -> bool:
         try:
@@ -1578,6 +1857,7 @@ class MacroEngine:
             "queue_processor_interval": 50,
             "cooldown_checker_interval": 100,
             "capture_interval": 40,
+            "key_press_duration": KEY_PRESS_DURATION_DEFAULT_MS,
             "special_key_resume_delay_ms": 0,
             "sound_feedback_enabled": False,
             "boss_mode_hotkey": "",
@@ -1620,6 +1900,9 @@ class MacroEngine:
             self._cleanup_done = True
 
         LOG_INFO("[清理] 开始执行分层清理...")
+
+        # 先断开外部事件入口，避免组件释放过程中旧引擎再次响应 F8/AHK/config 事件。
+        self._unsubscribe_event_handlers()
 
         # 定义清理层级，从上层业务逻辑到底层系统资源
         cleanup_layers = [
