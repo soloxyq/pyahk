@@ -15,6 +15,11 @@ mouse_right 这类别名作为输入,但归一化后统一为标准名。详见 
 
 from typing import Any, Dict, List, Optional
 
+try:
+    from .config_values import config_int
+except ImportError:  # 支持测试/迁移脚本按文件路径直接加载本模块
+    from torchlight_assistant.utils.config_values import config_int
+
 # 别名(统一小写) → AHK 标准名。与历史 GUI 实现保持一致。
 _KEY_ALIAS_MAP = {
     # 鼠标键
@@ -53,9 +58,9 @@ def normalize_key_name(key: Optional[str]) -> str:
     未命中别名表的键名仅做小写+去空格返回(AHK 的 Send/Hotkey 键名大小写不敏感,
     故普通键小写是安全且统一的)。空值返回空字符串。
     """
-    if not key:
+    if not isinstance(key, str) or not key:
         return ""
-    normalized = str(key).lower().strip()
+    normalized = key.lower().strip()
     return _KEY_ALIAS_MAP.get(normalized, normalized)
 
 
@@ -65,10 +70,10 @@ def normalize_key_field(value: Any) -> Any:
     - 单键(如 "Lbutton")→ normalize_key_name → "LButton"
     - 逗号序列(如 "delay50,Rbutton,2")→ 逐段归一化后重新拼接。delayN token 不在
       别名表里,小写返回(harmless,AHK InStr 大小写不敏感);键名/别名正常归一化。
-    - 非字符串原样返回(防御性)。
+    - 非字符串返回空串。JSON 数字/布尔不是合法按键名，不能被悄悄转成 ``1``/``true``。
     """
-    if not value or not isinstance(value, str):
-        return value
+    if not isinstance(value, str) or not value:
+        return ""
     if "," in value:
         parts = []
         for part in value.split(","):
@@ -99,7 +104,7 @@ def normalize_macro_steps(steps: Any) -> List[Dict[str, Any]]:
             continue
         if stype == "delay":
             try:
-                ms = int(s.get("ms", 0))
+                ms = config_int(s.get("ms", 0))
             except (TypeError, ValueError):
                 continue
             result.append({"type": "delay", "ms": max(ms, 0)})
@@ -114,7 +119,7 @@ def normalize_macro_steps(steps: Any) -> List[Dict[str, Any]]:
 def migrate_skill_sequence_to_steps(seq: Any) -> List[Dict[str, Any]]:
     """旧 CSV 序列 → 通用宏步骤列表(向后兼容)。
 
-    与 AHK 序列展开 / 旧 delayN 约定保持一致:仅 ``delay<数字>`` 识别为延时步骤,
+    与 AHK 序列 token 解析 / 旧 delayN 约定保持一致:仅 ``delay<数字>`` 识别为延时步骤,
     其余(含畸形 delay token)按普通键转成 press 步骤。
     """
     steps: List[Dict[str, Any]] = []
@@ -152,7 +157,7 @@ def steps_to_legacy_sequence(steps: Any) -> str:
             tokens.append(str(k))
         elif stype == "delay":
             try:
-                tokens.append("delay" + str(int(s.get("ms", 0))))
+                tokens.append("delay" + str(config_int(s.get("ms", 0))))
             except (TypeError, ValueError):
                 return ""
         else:
@@ -186,9 +191,12 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
                 if "AltKey" in skill:
                     skill["AltKey"] = normalize_key_field(skill["AltKey"])
                 if "BossOnly" in skill:
-                    skill["BossOnly"] = bool(skill["BossOnly"])
+                    # JSON 布尔字段只接受真正的 true。``"false"`` 在 Python
+                    # 中 truthy，旧写法会把它反向归一成 True。
+                    value = skill["BossOnly"]
+                    skill["BossOnly"] = value is True
                     try:
-                        trigger_mode = int(skill.get("TriggerMode", 0))
+                        trigger_mode = config_int(skill.get("TriggerMode", 0))
                     except (TypeError, ValueError):
                         trigger_mode = 0
                     if trigger_mode == 2:
@@ -202,8 +210,10 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(glob.get("skill_sequence"), str):
             glob["skill_sequence"] = normalize_key_field(glob["skill_sequence"])
 
-        if isinstance(glob.get("boss_mode_hotkey"), str) and glob["boss_mode_hotkey"]:
-            glob["boss_mode_hotkey"] = normalize_key_name(glob["boss_mode_hotkey"])
+        if "boss_mode_hotkey" in glob:
+            glob["boss_mode_hotkey"] = normalize_key_name(
+                glob.get("boss_mode_hotkey")
+            )
 
         # --- global.macro_steps (通用宏步骤) ---
         # 迁移:仅当 macro_steps 键缺失 且 skill_sequence 非空时,从旧 CSV 合成。
@@ -221,12 +231,18 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(pk, dict):
             special = pk.get("special_keys")
             if isinstance(special, list):
-                pk["special_keys"] = [normalize_key_name(k) for k in special]
+                pk["special_keys"] = [
+                    normalized
+                    for key in special
+                    if (normalized := normalize_key_name(key))
+                ]
             managed = pk.get("managed_keys")
             if isinstance(managed, dict):
                 new_managed: Dict[str, Any] = {}
                 for k, cfg in managed.items():
                     nk = normalize_key_name(k)
+                    if not nk:
+                        continue
                     if isinstance(cfg, dict) and "target" in cfg:
                         cfg["target"] = normalize_key_name(cfg.get("target"))
                     new_managed[nk] = cfg
@@ -236,12 +252,14 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         smc = glob.get("stationary_mode_config")
         if isinstance(smc, dict):
             for field in ("hotkey", "force_move_hotkey", "force_move_replacement_key"):
-                if isinstance(smc.get(field), str) and smc[field]:
-                    smc[field] = normalize_key_name(smc[field])
+                if field in smc:
+                    smc[field] = normalize_key_name(smc.get(field))
             passthrough = smc.get("force_move_passthrough_keys")
             if isinstance(passthrough, list):
                 smc["force_move_passthrough_keys"] = [
-                    normalize_key_name(k) for k in passthrough
+                    normalize_key_name(k)
+                    for k in passthrough
+                    if isinstance(k, str) and k.strip()
                 ]
 
         # --- global.resource_management 的 hp/mp 按键 ---
@@ -249,8 +267,8 @@ def normalize_config_keys(config: Dict[str, Any]) -> Dict[str, Any]:
         if isinstance(rm, dict):
             for sub in ("hp_config", "mp_config"):
                 node = rm.get(sub)
-                if isinstance(node, dict) and isinstance(node.get("key"), str) and node["key"]:
-                    node["key"] = normalize_key_name(node["key"])
+                if isinstance(node, dict) and "key" in node:
+                    node["key"] = normalize_key_name(node.get("key"))
     except Exception:
         # 归一化是加固层,任何异常都不应阻断配置加载
         pass

@@ -72,6 +72,42 @@ def test_normalize_drops_and_clamps():
     ]
 
 
+def test_macro_delay_rejects_json_boolean_and_fraction():
+    assert kn.normalize_macro_steps(
+        [
+            {"type": "delay", "ms": True},
+            {"type": "delay", "ms": 1.5},
+            {"type": "delay", "ms": 20},
+        ]
+    ) == [{"type": "delay", "ms": 20}]
+
+
+def test_numeric_and_boolean_key_fields_fail_closed():
+    assert kn.normalize_key_name(True) == ""
+    assert kn.normalize_key_field(1) == ""
+
+    config = {
+        "skills": {"bad": {"Key": True, "AltKey": 2}},
+        "global": {
+            "boss_mode_hotkey": 1,
+            "priority_keys": {
+                "special_keys": [True, "space"],
+                "managed_keys": {True: {"target": False}, "e": {"target": 3}},
+            },
+            "resource_management": {"hp_config": {"key": True}},
+        },
+    }
+    kn.normalize_config_keys(config)
+    assert config["skills"]["bad"]["Key"] == ""
+    assert config["skills"]["bad"]["AltKey"] == ""
+    assert config["global"]["boss_mode_hotkey"] == ""
+    assert config["global"]["priority_keys"]["special_keys"] == ["space"]
+    assert config["global"]["priority_keys"]["managed_keys"] == {
+        "e": {"target": ""}
+    }
+    assert config["global"]["resource_management"]["hp_config"]["key"] == ""
+
+
 def test_config_migrate_when_absent():
     cfg = {"global": {"skill_sequence": "1,delay50,Rbutton"}}
     kn.normalize_config_keys(cfg)
@@ -95,8 +131,12 @@ def test_config_normalizes_boss_mode_fields():
         "global": {"boss_mode_hotkey": "xbutton1"},
     }
     kn.normalize_config_keys(cfg)
-    assert cfg["skills"]["Skill1"]["BossOnly"] is True
+    assert cfg["skills"]["Skill1"]["BossOnly"] is False
     assert cfg["global"]["boss_mode_hotkey"] == "XButton1"
+
+    cfg["skills"]["Skill1"]["BossOnly"] = "false"
+    kn.normalize_config_keys(cfg)
+    assert cfg["skills"]["Skill1"]["BossOnly"] is False
 
 
 def test_config_disables_boss_only_for_hold_mode():

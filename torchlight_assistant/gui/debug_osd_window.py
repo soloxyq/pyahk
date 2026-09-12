@@ -1,10 +1,15 @@
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QGridLayout
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter
 from ..core.event_bus import event_bus
 from ..utils.debug_log import LOG_INFO
 
 class DebugOsdWindow(QWidget):
+    _show_requested = Signal()
+    _hide_requested = Signal()
+    _ready_requested = Signal()
+    _state_update_requested = Signal(object)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
@@ -16,6 +21,12 @@ class DebugOsdWindow(QWidget):
 
         self._setup_ui()
         self.current_state = {}
+        # EventBus 是同步的，发布者可能是调度/OCR 工作线程。只在 handler 中
+        # emit Qt signal，实际 QWidget 操作由本对象所属 GUI 线程执行。
+        self._show_requested.connect(self.show)
+        self._hide_requested.connect(self.hide)
+        self._ready_requested.connect(self._show_ready_state)
+        self._state_update_requested.connect(self._apply_state_update)
         
         self._setup_event_subscriptions()
         self.hide() # Start hidden
@@ -147,17 +158,15 @@ class DebugOsdWindow(QWidget):
 
     def _safe_show(self):
         """线程安全的显示方法"""
-        if not self.isVisible():
-            QTimer.singleShot(0, self.show)
+        self._show_requested.emit()
 
     def _safe_hide(self):
         """线程安全的隐藏方法"""
-        if self.isVisible():
-            QTimer.singleShot(0, self.hide)
+        self._hide_requested.emit()
 
     def _on_ready_state(self):
         """处理READY状态，显示准备提示"""
-        QTimer.singleShot(0, self._show_ready_state)
+        self._ready_requested.emit()
 
     def _show_ready_state(self):
         """显示DEBUG OSD READY状态"""
@@ -172,10 +181,14 @@ class DebugOsdWindow(QWidget):
 
     def _on_debug_osd_update(self, state_data):
         """线程安全的状态更新"""
+        payload = dict(state_data or {})
+        self._state_update_requested.emit(payload)
+        LOG_INFO(f"[DebugOsdWindow] 收到状态更新: HP={payload.get('hp')}, MP={payload.get('mp')}, Skills={len(payload.get('skills', {}))}")
+
+    def _apply_state_update(self, state_data):
+        """GUI 线程中的不可变快照提交。"""
         self.current_state = state_data
-        # 使用QTimer确保在主线程中更新UI
-        QTimer.singleShot(0, self._update_display_from_state)
-        LOG_INFO(f"[DebugOsdWindow] 收到状态更新: HP={state_data.get('hp')}, MP={state_data.get('mp')}, Skills={len(state_data.get('skills', {}))}")
+        self._update_display_from_state()
 
     def _update_state_data(self, state_data):
         """在主线程中更新状态数据"""

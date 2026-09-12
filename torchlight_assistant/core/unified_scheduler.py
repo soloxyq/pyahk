@@ -10,6 +10,7 @@ import threading
 from typing import Dict, Any, Callable, Optional
 from collections import defaultdict
 import heapq
+import math
 from dataclasses import dataclass
 from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 
@@ -34,8 +35,23 @@ class ScheduledTask:
         return self.next_run_time < other.next_run_time
 
 
+@dataclass
+class _SchedulerRun:
+    """一次调度线程的私有停止令牌。
+
+    ``stop()`` 的 join 有超时，旧 callback 可能还没有返回。令牌不能复用，否则下一次
+    ``start()`` 清掉共享停止状态时，旧线程会跟着新线程一起恢复执行。
+    """
+
+    generation: int
+    stop_event: threading.Event
+    thread: Optional[threading.Thread] = None
+
+
 class UnifiedScheduler:
     """统一调度器 - 使用单线程管理所有定时任务"""
+
+    STOP_JOIN_TIMEOUT_SECONDS = 2.0
 
     def __init__(self):
         self._tasks = {}  # task_id -> ScheduledTask
@@ -43,6 +59,8 @@ class UnifiedScheduler:
         self._running = False
         self._paused = False
         self._scheduler_thread = None
+        self._active_run: Optional[_SchedulerRun] = None
+        self._next_generation = 0
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
 
@@ -72,9 +90,14 @@ class UnifiedScheduler:
         Returns:
             是否添加成功
         """
-        if interval <= 0:
-            LOG_ERROR(f"[统一调度器] 任务 '{task_id}' 间隔必须大于0: {interval}")
+        try:
+            normalized_interval = float(interval)
+        except (TypeError, ValueError, OverflowError):
+            normalized_interval = math.nan
+        if not math.isfinite(normalized_interval) or normalized_interval <= 0:
+            LOG_ERROR(f"[统一调度器] 任务 '{task_id}' 间隔必须是有限正数: {interval}")
             return False
+        interval = normalized_interval
             
         try:
             with self._condition:
@@ -115,14 +138,23 @@ class UnifiedScheduler:
 
     def update_task_interval(self, task_id: str, new_interval: float) -> bool:
         """更新任务执行间隔"""
+        try:
+            normalized_interval = float(new_interval)
+        except (TypeError, ValueError, OverflowError):
+            normalized_interval = math.nan
+        if not math.isfinite(normalized_interval) or normalized_interval <= 0:
+            LOG_ERROR(
+                f"[统一调度器] 任务 '{task_id}' 新间隔必须是有限正数: "
+                f"{new_interval}"
+            )
+            return False
         with self._condition:
             if task_id in self._tasks:
                 task = self._tasks[task_id]
-                old_interval = task.interval
-                task.interval = new_interval
+                task.interval = normalized_interval
 
                 # 重新计算下次执行时间
-                task.next_run_time = self._now() + new_interval
+                task.next_run_time = self._now() + normalized_interval
                 # 重新构建堆（简单方式）
                 self._rebuild_heap()
                 self._condition.notify()
@@ -155,28 +187,69 @@ class UnifiedScheduler:
             if self._running:
                 return False
 
+            # 调度 callback 是任意第三方代码：一旦已经进入 callback，调度器无法在
+            # callback 内部再做世代检查。若上一代 join 超时仍活着，此时启动新一代会
+            # 让旧 callback 与新 callback 并行，并可能在新 AHK 闸门打开后发迟到动作。
+            # 因此这里选择 fail-closed；等旧 callback 返回、worker finally 清理后再试。
+            previous_run = self._active_run
+            if (
+                previous_run is not None
+                and previous_run.thread is not None
+                and previous_run.thread.is_alive()
+            ):
+                LOG_ERROR(
+                    f"[统一调度器] 第 {previous_run.generation} 代 callback 尚未退出，"
+                    "拒绝启动新一代"
+                )
+                return False
+            if previous_run is not None:
+                self._active_run = None
+                self._scheduler_thread = None
+
+            self._next_generation += 1
+            run = _SchedulerRun(self._next_generation, threading.Event())
             self._running = True
             self._paused = False
-            self._scheduler_thread = threading.Thread(
-                target=self._scheduler_loop, name="UnifiedScheduler", daemon=True
+            run.thread = threading.Thread(
+                target=self._scheduler_loop,
+                args=(run,),
+                name=f"UnifiedScheduler-{run.generation}",
+                daemon=True,
             )
-            self._scheduler_thread.start()
+            self._active_run = run
+            self._scheduler_thread = run.thread
+            run.thread.start()
             return True
 
     def stop(self) -> bool:
         """停止调度器"""
         with self._condition:
-            if not self._running:
+            run = self._active_run
+            if run is None:
                 return False
 
+            was_running = self._running
             self._running = False
-            self._condition.notify()
+            run.stop_event.set()
+            self._condition.notify_all()
 
-        # 等待调度线程结束
-        if self._scheduler_thread and self._scheduler_thread.is_alive():
-            self._scheduler_thread.join(timeout=2.0)
+        # callback 是第三方代码，无法强杀。超时后旧线程持有的私有 stop_event
+        # 永远保持 set，callback 一返回就会退出；在它真正退出前 start() 会
+        # fail-closed，避免两代 callback 并行跨越上层输入闸门。
+        thread = run.thread
+        if (
+            thread is not None
+            and thread is not threading.current_thread()
+            and thread.is_alive()
+        ):
+            thread.join(timeout=self.STOP_JOIN_TIMEOUT_SECONDS)
+            if thread.is_alive():
+                LOG_ERROR(
+                    f"[统一调度器] 第 {run.generation} 代线程停止超时，"
+                    "已隔离；它返回后不会再执行回调"
+                )
 
-        return True
+        return was_running or bool(thread and thread.is_alive())
 
     def pause(self) -> bool:
         """暂停所有任务执行"""
@@ -244,60 +317,88 @@ class UnifiedScheduler:
         self._task_heap = [task for task in self._tasks.values() if task.enabled]
         heapq.heapify(self._task_heap)
 
-    def _scheduler_loop(self):
+    def _is_current_run_locked(self, run: _SchedulerRun) -> bool:
+        return (
+            self._active_run is run
+            and self._running
+            and not run.stop_event.is_set()
+        )
+
+    def _scheduler_loop(self, run: _SchedulerRun):
         """调度器主循环 - 优化版本"""
         disabled_task_cleanup_counter = 0
         max_disabled_tasks = 10  # 累积这么多个禁用任务后才清理
-        
-        while True:
-            with self._condition:
-                # 检查是否应该停止
-                if not self._running:
-                    break
 
-                # 如果暂停或没有任务，等待
-                if self._paused or not self._task_heap:
-                    self._condition.wait(timeout=0.1)
+        try:
+            while True:
+                with self._condition:
+                    # 世代身份和私有停止令牌都必须匹配。只检查共享 _running 会让 join
+                    # 超时的旧线程在下一次 start() 后重新进入循环。
+                    if not self._is_current_run_locked(run):
+                        break
+
+                    # 如果暂停或没有任务，等待
+                    if self._paused or not self._task_heap:
+                        self._condition.wait(timeout=0.1)
+                        continue
+
+                    # 批量清理已禁用的任务（减少频繁清理）
+                    while self._task_heap and not self._task_heap[0].enabled:
+                        heapq.heappop(self._task_heap)
+                        disabled_task_cleanup_counter += 1
+
+                    # 如果清理了太多禁用任务，重建堆以优化性能
+                    if disabled_task_cleanup_counter >= max_disabled_tasks:
+                        self._rebuild_heap()
+                        disabled_task_cleanup_counter = 0
+
+                    if not self._task_heap:
+                        self._condition.wait(timeout=0.1)
+                        continue
+
+                    # 获取下一个要执行的任务
+                    next_task = self._task_heap[0]
+                    current_time = self._now()
+
+                    # 如果还没到执行时间，等待
+                    if next_task.next_run_time > current_time:
+                        wait_time = min(next_task.next_run_time - current_time, 0.1)
+                        self._condition.wait(timeout=wait_time)
+                        continue
+
+                    # 执行任务
+                    task = heapq.heappop(self._task_heap)
+
+                    # 重新安排下一次执行
+                    if task.enabled and task.task_id in self._tasks:
+                        task.next_run_time = current_time + task.interval
+                        heapq.heappush(self._task_heap, task)
+
+                # 在锁外执行回调，避免死锁。取出任务后再做一次世代检查，覆盖 stop()
+                # 恰好发生在出锁与回调调用之间的常见竞态窗口。
+                with self._condition:
+                    callback_allowed = (
+                        self._is_current_run_locked(run)
+                        and task.enabled
+                        and self._tasks.get(task.task_id) is task
+                    )
+                if not callback_allowed:
                     continue
 
-                # 批量清理已禁用的任务（减少频繁清理）
-                while self._task_heap and not self._task_heap[0].enabled:
-                    heapq.heappop(self._task_heap)
-                    disabled_task_cleanup_counter += 1
-                    
-                # 如果清理了太多禁用任务，重建堆以优化性能
-                if disabled_task_cleanup_counter >= max_disabled_tasks:
-                    self._rebuild_heap()
-                    disabled_task_cleanup_counter = 0
-
-                if not self._task_heap:
-                    self._condition.wait(timeout=0.1)
-                    continue
-
-                # 获取下一个要执行的任务
-                next_task = self._task_heap[0]
-                current_time = self._now()
-
-                # 如果还没到执行时间，等待
-                if next_task.next_run_time > current_time:
-                    wait_time = min(next_task.next_run_time - current_time, 0.1)
-                    self._condition.wait(timeout=wait_time)
-                    continue
-
-                # 执行任务
-                task = heapq.heappop(self._task_heap)
-
-                # 重新安排下次执行
-                if task.enabled and task.task_id in self._tasks:
-                    task.next_run_time = current_time + task.interval
-                    heapq.heappush(self._task_heap, task)
-
-            # 在锁外执行回调，避免死锁
-            try:
-                if task.enabled:
+                try:
                     task.callback(*task.args, **task.kwargs)
-            except Exception as e:
-                LOG_ERROR(f"[统一调度器] 任务 '{task.task_id}' 回调执行异常: {e}")
+                except Exception as e:
+                    LOG_ERROR(
+                        f"[统一调度器] 任务 '{task.task_id}' 回调执行异常: {e}"
+                    )
+        finally:
+            with self._condition:
+                # 旧世代迟到退出时不得覆盖新世代的运行状态/线程引用。
+                if self._active_run is run:
+                    self._running = False
+                    self._active_run = None
+                    self._scheduler_thread = None
+                self._condition.notify_all()
 
     def __del__(self):
         """析构函数，确保资源清理"""

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Tuple
 
+from .config_values import config_int
+
 
 ScreenRect = Tuple[int, int, int, int]
 
@@ -30,14 +32,17 @@ def parse_screen_rect(
         return None
 
     try:
-        x1, y1, x2, y2 = (int(value) for value in raw_values)
-    except (TypeError, ValueError, OverflowError):
+        x1, y1, x2, y2 = (config_int(value) for value in raw_values)
+    except ValueError:
         return None
 
-    if x1 < 0 or y1 < 0 or x1 >= x2 or y1 >= y2:
+    # Screen coordinates use Windows virtual-desktop pixels.  Secondary
+    # displays may legitimately occupy negative x/y; frame-relative bounds,
+    # when requested by a caller with a local coordinate system, remain valid.
+    if x1 >= x2 or y1 >= y2:
         return None
-    if frame_width is not None and x2 > int(frame_width):
+    if frame_width is not None and x2 > config_int(frame_width):
         return None
-    if frame_height is not None and y2 > int(frame_height):
+    if frame_height is not None and y2 > config_int(frame_height):
         return None
     return x1, y1, x2, y2

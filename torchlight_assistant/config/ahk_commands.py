@@ -13,8 +13,8 @@ CMD_PAUSE = 6           # 暂停队列处理
 CMD_RESUME = 7          # 恢复队列处理
 CMD_HOOK_REGISTER = 8   # 注册Hook
 CMD_HOOK_UNREGISTER = 9 # 取消Hook
-CMD_SEND_KEY = 10       # 发送单个按键
-CMD_SEND_SEQUENCE = 11  # 发送按键序列
+CMD_SEND_KEY = 10       # 保留的协议墓碑；AHK 不处理，不得复用 ID
+CMD_SEND_SEQUENCE = 11  # 保留的协议墓碑；序列统一走 CMD_ENQUEUE
 CMD_SET_STATIONARY = 12 # 设置原地模式
 CMD_SET_FORCE_MOVE_KEY = 13 # 设置强制移动键
 CMD_SET_FORCE_MOVE_STATE = 14 # 设置强制移动状态
@@ -31,6 +31,8 @@ CMD_STOP_MACRO = 24       # 停止 AHK 端宏循环并释放宏持键
 CMD_SET_SKILL_HOLD_KEYS = 25  # 声明式设置 TriggerMode=2 期望持键集合(空=全部释放)
 CMD_SET_ACCEPTING_ACTIONS = 26  # 运行时闸门:false=原子停止屏障,清场并封住所有输入生产路径(安全清理命令仍放行)
 CMD_SHUTDOWN = 27  # 优雅关闭:AHK 自行释放所有持键后退出(terminate 不触发 OnExit)
+CMD_RESET_RUNTIME = 28  # 单条原子 STOPPED 屏障:关闸/清队/释放持键/清动态 Hook
+CMD_SET_RUNTIME_OWNER = 29  # 设置输入闸门所有者 owner:epoch
 
 # 命令名称映射（用于调试）
 CMD_NAMES = {
@@ -61,6 +63,8 @@ CMD_NAMES = {
     CMD_SET_SKILL_HOLD_KEYS: "SET_SKILL_HOLD_KEYS",
     CMD_SET_ACCEPTING_ACTIONS: "SET_ACCEPTING_ACTIONS",
     CMD_SHUTDOWN: "SHUTDOWN",
+    CMD_RESET_RUNTIME: "RESET_RUNTIME",
+    CMD_SET_RUNTIME_OWNER: "SET_RUNTIME_OWNER",
 }
 
 def get_command_name(cmd_id: int) -> str:

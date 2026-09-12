@@ -127,15 +127,9 @@
             "enabled": false
         },
         "input_mode": "direct",
-        "queue_processor_interval": 35,
         "key_press_duration": 10,
-        "mouse_click_duration": 5,
         "cooldown_checker_interval": 125,
-        "sequence_timer_interval": 1000,
         "capture_interval": 55,
-        "hp_cooldown": 1000,
-        "mp_cooldown": 1000,
-        "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
@@ -160,7 +154,6 @@
             "close_button_coord": null
         },
         "pathfinding_config": {
-            "hotkey": "",
             "minimap_area": [
                 0,
                 0,
@@ -181,18 +174,7 @@
                 "region_x1": 148,
                 "region_y1": 901,
                 "region_x2": 162,
-                "region_y2": 1023,
-                "colors": [
-                    {
-                        "name": "Color1",
-                        "target_h": 0,
-                        "target_s": 80,
-                        "target_v": 50,
-                        "tolerance_h": 10,
-                        "tolerance_s": 40,
-                        "tolerance_v": 60
-                    }
-                ]
+                "region_y2": 1023
             },
             "mp_config": {
                 "enabled": true,
@@ -206,18 +188,7 @@
                 "region_x1": 1755,
                 "region_y1": 909,
                 "region_x2": 1769,
-                "region_y2": 1026,
-                "colors": [
-                    {
-                        "name": "Color1",
-                        "target_h": 104,
-                        "target_s": 80,
-                        "target_v": 58,
-                        "tolerance_h": 10,
-                        "tolerance_s": 40,
-                        "tolerance_v": 60
-                    }
-                ]
+                "region_y2": 1026
             },
             "check_interval": 200
         },

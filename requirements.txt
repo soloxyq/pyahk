@@ -10,3 +10,4 @@ pywin32>=306
 # 需另行安装 paddlepaddle / paddlepaddle-gpu(走官方索引,见 https://www.paddlepaddle.org.cn/),
 # 例: pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
 paddleocr>=3.7.0
+pytesseract>=0.3.10  # 可选 Tesseract OCR 引擎的 Python 包装；仍需另装 tesseract.exe

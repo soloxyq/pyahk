@@ -27,7 +27,8 @@ class SoundManager:
 
     def update_config(self, global_config: Dict[str, Any]):
         """根据全局配置更新声音管理器的状态。"""
-        self.enabled = global_config.get("sound_feedback_enabled", False)
+        global_config = global_config if isinstance(global_config, dict) else {}
+        self.enabled = global_config.get("sound_feedback_enabled") is True
         LOG(f"[声音管理器] 配置更新，声音提示已 {'启用' if self.enabled else '禁用'}")
 
     def play(self, sound_name: str):

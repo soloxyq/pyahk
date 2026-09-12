@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QFrame,
 )
+from PySide6.QtCore import QSignalBlocker
+from copy import deepcopy
 from typing import Dict, Any
 
 from .custom_widgets import (
@@ -20,6 +22,8 @@ from .custom_widgets import (
     ConfigCheckBox,
     ConfigComboBox,
 )
+from ..utils.config_values import config_int
+from ..utils.key_names import normalize_key_name
 
 
 class WindowActivationWidget(QWidget):
@@ -28,6 +32,7 @@ class WindowActivationWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.widgets = {}
+        self._config_snapshot: Dict[str, Any] = {}
         self._setup_ui()
 
     def _setup_ui(self):
@@ -49,7 +54,9 @@ class WindowActivationWidget(QWidget):
         grid_layout.addWidget(QLabel("进程名:"), 1, 2)
         self.widgets["exe"] = ConfigComboBox()
         self.widgets["exe"].setMaximumHeight(26)
-        self.widgets["exe"].setEditable(False)
+        # 目标进程可能在编辑配置时尚未启动。保持可编辑，才能保留 JSON 中
+        # 不在当前进程枚举结果里的 ahk_exe，而不是悄悄换成列表第一项。
+        self.widgets["exe"].setEditable(True)
         grid_layout.addWidget(self.widgets["exe"], 1, 3)
 
         # 按钮
@@ -105,24 +112,49 @@ class WindowActivationWidget(QWidget):
 
     def get_config(self) -> Dict[str, Any]:
         """获取配置"""
-        return {
-            "window_activation": {
+        window_config = deepcopy(self._config_snapshot)
+        window_config.update(
+            {
                 "enabled": self.widgets["enabled"].isChecked(),
                 "ahk_class": self.widgets["class"].text().strip(),
                 "ahk_exe": self.widgets["exe"].currentText().strip(),
             }
+        )
+        return {
+            "window_activation": window_config
         }
 
     def update_from_config(self, config: Dict[str, Any]):
         """从配置更新UI"""
-        win_config = config.get("window_activation", {})
+        raw_win_config = (
+            config.get("window_activation", {}) if isinstance(config, dict) else {}
+        )
+        win_config = raw_win_config if isinstance(raw_win_config, dict) else {}
+        self._config_snapshot = deepcopy(win_config)
 
-        self.widgets["enabled"].setChecked(win_config.get("enabled", False))
-        self.widgets["class"].setText(win_config.get("ahk_class", ""))
+        self.widgets["enabled"].setChecked(win_config.get("enabled") is True)
+        self.widgets["class"].setText(str(win_config.get("ahk_class", "") or ""))
 
-        exe_name = win_config.get("ahk_exe", "")
-        if exe_name:
-            self.widgets["exe"].setCurrentText(exe_name)
+        exe_name = str(win_config.get("ahk_exe", "") or "")
+        combo = self.widgets["exe"]
+        blocker = QSignalBlocker(combo)
+        try:
+            if exe_name and combo.findText(exe_name) < 0:
+                combo.addItem(exe_name)
+            # 可编辑下拉框在 setCurrentText("") 时可能保留当前枚举项。
+            # 显式写编辑框，并阻断“用户选择进程”信号，防止加载配置时
+            # 自动探测逻辑反过来覆盖刚加载的 ahk_class。
+            combo.setEditText(str(exe_name or ""))
+        finally:
+            del blocker
+
+        if win_config.get("ahk_class") or win_config.get("ahk_exe"):
+            self.widgets["status_label"].setText("已加载目标窗口配置")
+        else:
+            self.widgets["status_label"].setText("当前未设置窗口激活")
+        # 进程探测失败时状态标签会临时变红。切换 profile 属于一次完整状态
+        # 替换，文字和样式必须一起复位，不能让上一份配置的错误样式串过来。
+        self.widgets["status_label"].setStyleSheet("color: gray; font-size: 8pt;")
 
 
 class StationaryModeWidget(QWidget):
@@ -131,6 +163,7 @@ class StationaryModeWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.widgets = {}
+        self._config_snapshot: Dict[str, Any] = {}
         self._setup_ui()
 
     def _setup_ui(self):
@@ -199,60 +232,86 @@ class StationaryModeWidget(QWidget):
 
     def get_config(self) -> Dict[str, Any]:
         """获取配置"""
-        stationary_hotkey = self.hotkey_entry.text().strip().lower()
-        force_move_hotkey = self.force_move_hotkey_entry.text().strip().lower()
-        force_move_replacement_key = self.force_move_replacement_key_entry.text().strip().lower()
+        stationary_hotkey = normalize_key_name(self.hotkey_entry.text())
+        force_move_hotkey = normalize_key_name(self.force_move_hotkey_entry.text())
+        force_move_replacement_key = normalize_key_name(
+            self.force_move_replacement_key_entry.text()
+        )
         force_move_passthrough_keys = self._parse_force_move_passthrough_keys()
 
-        return {
-            "stationary_mode_config": {
+        stationary_config = deepcopy(self._config_snapshot)
+        if self.mode_combo.currentIndex() == 0:
+            mode_type = "shift_modifier"
+        elif self.mode_combo.currentIndex() == 1:
+            mode_type = "block_mouse"
+        else:
+            # 未知枚举保持原值，交给运行时拒绝；只有用户主动选择受支持项
+            # 才迁移。这样加载/保存不会把未来值静默改成另一种输入语义。
+            mode_type = str(
+                self._config_snapshot.get("mode_type", "block_mouse")
+            )
+
+        stationary_config.update(
+            {
                 "hotkey": stationary_hotkey if stationary_hotkey else "",
-                "mode_type": (
-                    "shift_modifier"
-                    if self.mode_combo.currentIndex() == 0
-                    else "block_mouse"
-                ),
+                "mode_type": mode_type,
                 "force_move_hotkey": force_move_hotkey if force_move_hotkey else "",
                 "force_move_replacement_key": force_move_replacement_key if force_move_replacement_key else "f",
                 "force_move_passthrough_keys": force_move_passthrough_keys,
             }
-        }
+        )
+        return {"stationary_mode_config": stationary_config}
 
     def update_from_config(self, config: Dict[str, Any]):
         """从配置更新UI"""
-        stationary_config = config.get(
-            "stationary_mode_config",
-            {
-                "hotkey": "",
-                "mode_type": "block_mouse",
-                "force_move_hotkey": "",
-                "force_move_replacement_key": "f",
-                "force_move_passthrough_keys": [],
-            },
+        raw_stationary_config = (
+            config.get("stationary_mode_config", {})
+            if isinstance(config, dict)
+            else {}
         )
+        stationary_config = (
+            raw_stationary_config
+            if isinstance(raw_stationary_config, dict)
+            else {}
+        )
+        self._config_snapshot = deepcopy(stationary_config)
 
-        self.hotkey_entry.setText(stationary_config.get("hotkey", ""))
+        self.hotkey_entry.setText(normalize_key_name(stationary_config.get("hotkey")))
         self.force_move_hotkey_entry.setText(
-            stationary_config.get("force_move_hotkey", "")
+            normalize_key_name(stationary_config.get("force_move_hotkey"))
         )
         self.force_move_replacement_key_entry.setText(
-            stationary_config.get("force_move_replacement_key", "f")
+            normalize_key_name(
+                stationary_config.get("force_move_replacement_key", "f")
+            )
         )
+        raw_passthrough = stationary_config.get("force_move_passthrough_keys", [])
+        passthrough = raw_passthrough if isinstance(raw_passthrough, list) else []
         self.force_move_passthrough_keys_entry.setText(
-            ", ".join(stationary_config.get("force_move_passthrough_keys", []) or [])
+            ", ".join(
+                normalized
+                for value in passthrough
+                if (normalized := normalize_key_name(value))
+            )
         )
 
-        mode_type = stationary_config.get("mode_type", "block_mouse")
-        self.mode_combo.setCurrentIndex(0 if mode_type == "shift_modifier" else 1)
+        mode_type = str(stationary_config.get("mode_type", "block_mouse") or "")
+        mode_index = {"shift_modifier": 0, "block_mouse": 1}.get(mode_type, -1)
+        self.mode_combo.setCurrentIndex(mode_index)
 
         # 更新状态显示
-        hotkey = stationary_config.get("hotkey", "")
-        force_move_hotkey = stationary_config.get("force_move_hotkey", "")
+        hotkey = normalize_key_name(stationary_config.get("hotkey"))
+        force_move_hotkey = normalize_key_name(
+            stationary_config.get("force_move_hotkey")
+        )
 
         if not hotkey and not force_move_hotkey:
             self.status_label.setText("当前未设置")
         else:
-            mode_desc = "Shift修饰符" if mode_type == "shift_modifier" else "阻止鼠标键"
+            mode_desc = {
+                "shift_modifier": "Shift修饰符",
+                "block_mouse": "阻止鼠标键",
+            }.get(mode_type, f"无效模式:{mode_type}")
             status_parts = []
             if hotkey:
                 status_parts.append(f"原地模式: {hotkey.upper()}")
@@ -274,28 +333,8 @@ class StationaryModeWidget(QWidget):
         return keys
 
     def _normalize_passthrough_key(self, key: str) -> str:
-        """把常见鼠标别名归一为 AHK 标准名。"""
-        if not key:
-            return ""
-
-        normalized = key.lower().strip()
-        key_mapping = {
-            "left_mouse": "LButton",
-            "leftmouse": "LButton",
-            "mouse_left": "LButton",
-            "lbutton": "LButton",
-            "leftclick": "LButton",
-            "right_mouse": "RButton",
-            "rightmouse": "RButton",
-            "mouse_right": "RButton",
-            "rbutton": "RButton",
-            "rightclick": "RButton",
-            "middle_mouse": "MButton",
-            "middlemouse": "MButton",
-            "mouse_middle": "MButton",
-            "mbutton": "MButton",
-        }
-        return key_mapping.get(normalized, key.strip())
+        """委托给全项目唯一的 AHK 按键名归一化器。"""
+        return normalize_key_name(key)
 
 
 class PathfindingWidget(QWidget):
@@ -304,6 +343,7 @@ class PathfindingWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.widgets = {}
+        self._path_config: Dict[str, Any] = {}
         self._setup_ui()
 
     def _setup_ui(self):
@@ -311,10 +351,8 @@ class PathfindingWidget(QWidget):
         group = QGroupBox("自动寻路设置")
         grid = QGridLayout(group)
 
-        grid.addWidget(QLabel("寻路热键:"), 0, 0)
-        self.widgets["hotkey"] = ConfigLineEdit()
-        self.widgets["hotkey"].setText("f9")
-        grid.addWidget(self.widgets["hotkey"], 0, 1)
+        fixed_hotkey = QLabel("寻路热键: F9（永久根热键，不可配置）")
+        grid.addWidget(fixed_hotkey, 0, 0, 1, 2)
 
         grid.addWidget(QLabel("小地图区域 (X, Y, W, H):"), 1, 0, 1, 2)
         self.widgets["minimap_x"] = ConfigSpinBox()
@@ -322,9 +360,11 @@ class PathfindingWidget(QWidget):
         self.widgets["minimap_w"] = ConfigSpinBox()
         self.widgets["minimap_h"] = ConfigSpinBox()
 
-        for w in self.widgets.values():
-            if isinstance(w, ConfigSpinBox):
-                w.setRange(0, 8000)
+        # x/y 使用虚拟桌面绝对坐标，左侧或上方副屏可以为负；尺寸仍不可为负。
+        self.widgets["minimap_x"].setRange(-32768, 32767)
+        self.widgets["minimap_y"].setRange(-32768, 32767)
+        self.widgets["minimap_w"].setRange(0, 32767)
+        self.widgets["minimap_h"].setRange(0, 32767)
 
         coords_layout = QHBoxLayout()
         coords_layout.addWidget(self.widgets["minimap_x"])
@@ -337,24 +377,36 @@ class PathfindingWidget(QWidget):
         layout.addStretch()
 
     def get_config(self) -> Dict[str, Any]:
+        path_config = deepcopy(self._path_config)
+        # 旧版曾展示一个实际无人读取的 hotkey 输入框；运行时始终由永久 F9
+        # 根热键驱动，保存时迁移掉该伪配置，避免给用户可定制的错觉。
+        path_config.pop("hotkey", None)
+        path_config["minimap_area"] = [
+            self.widgets["minimap_x"].value(),
+            self.widgets["minimap_y"].value(),
+            self.widgets["minimap_w"].value(),
+            self.widgets["minimap_h"].value(),
+        ]
         return {
-            "pathfinding_config": {
-                "hotkey": self.widgets["hotkey"].text().strip().lower(),
-                "minimap_area": [
-                    self.widgets["minimap_x"].value(),
-                    self.widgets["minimap_y"].value(),
-                    self.widgets["minimap_w"].value(),
-                    self.widgets["minimap_h"].value(),
-                ],
-            }
+            "pathfinding_config": path_config
         }
 
     def update_from_config(self, config: Dict[str, Any]):
-        path_config = config.get("pathfinding_config", {})
-        self.widgets["hotkey"].setText(path_config.get("hotkey", "f9"))
+        raw_path_config = (
+            config.get("pathfinding_config", {}) if isinstance(config, dict) else {}
+        )
+        path_config = raw_path_config if isinstance(raw_path_config, dict) else {}
+        self._path_config = deepcopy(path_config)
         minimap_area = path_config.get("minimap_area", [0, 0, 0, 0])
-        if len(minimap_area) == 4:
-            self.widgets["minimap_x"].setValue(minimap_area[0])
-            self.widgets["minimap_y"].setValue(minimap_area[1])
-            self.widgets["minimap_w"].setValue(minimap_area[2])
-            self.widgets["minimap_h"].setValue(minimap_area[3])
+        values = [0, 0, 0, 0]
+        if isinstance(minimap_area, (list, tuple)) and len(minimap_area) == 4:
+            try:
+                candidate = [config_int(value) for value in minimap_area]
+                if candidate[2] >= 0 and candidate[3] >= 0:
+                    values = candidate
+            except ValueError:
+                pass
+        for name, value in zip(
+            ("minimap_x", "minimap_y", "minimap_w", "minimap_h"), values
+        ):
+            self.widgets[name].setValue(value)

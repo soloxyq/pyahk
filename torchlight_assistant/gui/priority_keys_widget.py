@@ -20,6 +20,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
 )
 from PySide6.QtCore import Qt, QTimer, QObject, Signal, QEvent
+from copy import deepcopy
 from typing import Dict, Any, Set, List, Union
 import json
 import time
@@ -27,6 +28,15 @@ import time
 from .custom_widgets import ConfigCheckBox
 from ..utils.debug_log import LOG_INFO, LOG_ERROR
 from ..utils.key_names import normalize_key_name as _normalize_key_name_shared
+from ..utils.config_values import config_int
+
+
+def _nonnegative_config_int(value) -> int:
+    """Parse a persisted delay without accepting JSON booleans as 0/1 ms."""
+    try:
+        return max(0, config_int(value))
+    except ValueError:
+        return 0
 
 # 导入按键监听相关
 try:
@@ -56,6 +66,7 @@ class PriorityKeysWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.widgets = {}
+        self._config_snapshot: Dict[str, Any] = {}
         # 支持映射配置的按键存储: {key_name: delay_ms 或 {target: str, delay: int}}
         self.priority_keys_config: Dict[str, Union[int, Dict[str, Union[str, int]]]] = {
             'space': 50,
@@ -101,7 +112,7 @@ class PriorityKeysWidget(QWidget):
 
         # 启用开关
         self.widgets["enabled"] = ConfigCheckBox("启用优先级按键系统")
-        self.widgets["enabled"].setChecked(True)
+        self.widgets["enabled"].setChecked(False)
         group_layout.addWidget(self.widgets["enabled"])
 
         # 按键列表区域
@@ -813,32 +824,63 @@ class PriorityKeysWidget(QWidget):
                 if isinstance(config, dict):
                     # 映射/管理按键：保持/输出对象格式
                     target = self._normalize_key_name(str(config.get('target', normalized_key)).strip()) or normalized_key
-                    delay = int(config.get('delay', 0))
+                    delay = _nonnegative_config_int(config.get('delay', 0))
                     key_config = {"target": target, "delay": delay}
-                    hold_ms = int(config.get('hold_ms', 0))
+                    hold_ms = _nonnegative_config_int(config.get('hold_ms', 0))
                     if hold_ms > 0:
                         key_config["hold_ms"] = hold_ms
                     managed_keys_config[normalized_key] = key_config
                 else:
                     # 兼容：将简单延迟转换为对象格式（默认自映射）
-                    managed_keys_config[normalized_key] = {"target": normalized_key, "delay": int(config)}
+                    managed_keys_config[normalized_key] = {
+                        "target": normalized_key,
+                        "delay": _nonnegative_config_int(config),
+                    }
             elif normalized_key in special_keys:
                 special_keys_config.add(normalized_key)
 
-        return {
-            "enabled": self.widgets["enabled"].isChecked(),
-            "special_keys": sorted(special_keys_config),
-            "managed_keys": managed_keys_config,
-        }
+        result = deepcopy(self._config_snapshot)
+        old_managed = result.get("managed_keys", {})
+        old_managed = old_managed if isinstance(old_managed, dict) else {}
+        merged_managed = {}
+        for key, current in managed_keys_config.items():
+            previous = old_managed.get(key)
+            if isinstance(previous, dict):
+                merged = deepcopy(previous)
+                merged.update(current)
+                if "hold_ms" not in current:
+                    merged.pop("hold_ms", None)
+                merged_managed[key] = merged
+            else:
+                merged_managed[key] = current
+        result.update(
+            {
+                "enabled": self.widgets["enabled"].isChecked(),
+                "special_keys": sorted(special_keys_config),
+                "managed_keys": merged_managed,
+            }
+        )
+        return result
 
     def set_config(self, config: Dict[str, Any]):
         """设置配置 - 解析 special/managed 两类"""
-        if "enabled" in config:
-            self.widgets["enabled"].setChecked(config["enabled"])
+        config = config if isinstance(config, dict) else {}
+        self._config_snapshot = deepcopy(config)
+
+        # 缺失配置段不能继承上一份 profile，也不能靠 UI 初值自动启用 Hook。
+        self.widgets["enabled"].setChecked(config.get("enabled") is True)
 
         # 新格式：分层配置
-        special_keys = config.get("special_keys", [])
-        managed_keys_config = config.get("managed_keys", {})
+        raw_special_keys = config.get("special_keys", [])
+        special_keys = (
+            raw_special_keys
+            if isinstance(raw_special_keys, (list, tuple, set))
+            else []
+        )
+        raw_managed_keys = config.get("managed_keys", {})
+        managed_keys_config = (
+            raw_managed_keys if isinstance(raw_managed_keys, dict) else {}
+        )
 
         # 重建priority_keys_config
         self.priority_keys_config = {}
@@ -847,7 +889,7 @@ class PriorityKeysWidget(QWidget):
 
         # 特殊按键：延迟设为0
         for key in special_keys:
-            normalized_key = self._normalize_key_name(str(key))
+            normalized_key = self._normalize_key_name(key)
             if not normalized_key:
                 continue
             self.priority_keys_config[normalized_key] = 0
@@ -855,19 +897,25 @@ class PriorityKeysWidget(QWidget):
 
         # 管理按键：规范为对象格式
         for key, val in managed_keys_config.items():
-            normalized_key = self._normalize_key_name(str(key))
+            normalized_key = self._normalize_key_name(key)
             if not normalized_key:
                 continue
             if isinstance(val, dict):
-                target = self._normalize_key_name(str(val.get('target', normalized_key)).strip()) or normalized_key
-                delay = int(val.get('delay', 0))
+                target = (
+                    self._normalize_key_name(val.get('target', normalized_key))
+                    or normalized_key
+                )
+                delay = _nonnegative_config_int(val.get('delay', 0))
                 key_config = {"target": target, "delay": delay}
-                hold_ms = int(val.get('hold_ms', 0))
+                hold_ms = _nonnegative_config_int(val.get('hold_ms', 0))
                 if hold_ms > 0:
                     key_config["hold_ms"] = hold_ms
                 self.priority_keys_config[normalized_key] = key_config
             else:
-                self.priority_keys_config[normalized_key] = {"target": normalized_key, "delay": int(val)}
+                self.priority_keys_config[normalized_key] = {
+                    "target": normalized_key,
+                    "delay": _nonnegative_config_int(val),
+                }
             self.managed_keys.add(normalized_key)
             self.special_keys.discard(normalized_key)
 

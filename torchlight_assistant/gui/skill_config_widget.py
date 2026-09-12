@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (
     QPushButton,
 )
 from PySide6.QtCore import Qt, QTimer
+from copy import deepcopy
 from typing import Dict, Any
 
 
@@ -19,6 +20,8 @@ from .custom_widgets import (
 )
 from ..core.event_bus import event_bus
 from ..utils.debug_log import LOG_ERROR, LOG_INFO  # Import LOG_ERROR / LOG_INFO
+from ..utils.config_values import config_int
+from ..utils.key_names import normalize_key_field
 
 
 _BOSS_ONLY_TOOLTIP = "仅 BOSS 模式开启时自动触发。普通技能不受影响。"
@@ -38,7 +41,7 @@ class SimplifiedSkillWidget(QWidget):
         super().__init__(parent)
         self.skill_name = skill_name
         self.event_bus = event_bus_instance
-        self._skills_config_snapshot = initial_skill_config.copy()
+        self._skills_config_snapshot = deepcopy(initial_skill_config)
 
         self._ui_widgets: Dict[str, QWidget] = {}
         self._updating_ui = False
@@ -279,15 +282,19 @@ class SimplifiedSkillWidget(QWidget):
 
     def get_current_config(self) -> Dict[str, Any]:
         """Synchronously gets the current configuration from the UI widgets."""
-        changes = {}
+        # UI 只展示常用字段；从完整快照合并，才能保留 ColorTolerance
+        # 以及未来新增但旧版 UI 尚未认识的嵌套字段。
+        changes = deepcopy(self._skills_config_snapshot)
         try:
             changes["Enabled"] = self._ui_widgets["Enabled"].isChecked()
-            changes["Key"] = self._ui_widgets["Key"].text()
+            changes["Key"] = normalize_key_field(self._ui_widgets["Key"].text())
             changes["Priority"] = self._ui_widgets["Priority"].isChecked()
             changes["Timer"] = int(self._ui_widgets["Timer"].text() or 0)
             # 触发方式：0=定时, 1=冷却, 2=按住
             trigger_text = self._ui_widgets["TriggerModeCombo"].currentText()
-            changes["TriggerMode"] = {"定时": 0, "冷却": 1, "按住": 2}.get(trigger_text, 0)
+            trigger_modes = {"定时": 0, "冷却": 1, "按住": 2}
+            if trigger_text in trigger_modes:
+                changes["TriggerMode"] = trigger_modes[trigger_text]
             changes["BossOnly"] = (
                 self._ui_widgets["BossOnly"].isChecked()
                 and changes["TriggerMode"] != 2
@@ -300,11 +307,14 @@ class SimplifiedSkillWidget(QWidget):
             )
             changes["CooldownSize"] = int(self._ui_widgets["CooldownSize"].text() or 0)
             # InternalCooldown 字段已移除 - 该功能未实现
-            changes["ExecuteCondition"] = {
+            condition_modes = {
                 "无限制": 0,
                 "BUFF限制": 1,
                 "资源条件": 2,
-            }.get(self._ui_widgets["ExecuteCondition"].currentText(), 0)
+            }
+            condition_text = self._ui_widgets["ExecuteCondition"].currentText()
+            if condition_text in condition_modes:
+                changes["ExecuteCondition"] = condition_modes[condition_text]
             # 普通条件检测配置
             if "ConditionCoordX" in self._ui_widgets:
                 changes["ConditionCoordX"] = int(
@@ -325,70 +335,106 @@ class SimplifiedSkillWidget(QWidget):
             # 区域资源检测配置已移至独立的"智能药剂"配置
             # 不再在skill配置中保存resource相关字段
 
-            changes["AltKey"] = self._ui_widgets["AltKey"].text()
+            changes["AltKey"] = normalize_key_field(
+                self._ui_widgets["AltKey"].text()
+            )
         except (ValueError, TypeError) as e:
             LOG_ERROR(
                 f"Error gathering config for skill '{self.skill_name}': {e}"
             )  # Log the error
             return (
-                self._skills_config_snapshot
+                deepcopy(self._skills_config_snapshot)
             )  # Return last known good config on error
         return changes
 
     def refresh(self, skill_config: Dict[str, Any]):
         self._updating_ui = True
-        self._skills_config_snapshot = skill_config.copy()
+        config = skill_config if isinstance(skill_config, dict) else {}
+        self._skills_config_snapshot = deepcopy(config)
+
+        def displayed_int(name: str, default: int) -> int:
+            """Do not turn JSON booleans/non-finite values into editable numbers."""
+            try:
+                return config_int(config.get(name, default))
+            except ValueError:
+                return default
+
         try:
-            config = skill_config
-            if not config:
-                return
+            self._ui_widgets["Enabled"].setChecked(config.get("Enabled") is True)
+            self._ui_widgets["Key"].setText(str(config.get("Key", "") or ""))
+            self._ui_widgets["Priority"].setChecked(config.get("Priority") is True)
+            self._ui_widgets["BossOnly"].setChecked(config.get("BossOnly") is True)
+            self._ui_widgets["Timer"].setText(str(displayed_int("Timer", 1000)))
 
-            self._ui_widgets["Enabled"].setChecked(config.get("Enabled", False))
-            self._ui_widgets["Key"].setText(config.get("Key", ""))
-            self._ui_widgets["Priority"].setChecked(config.get("Priority", False))
-            self._ui_widgets["BossOnly"].setChecked(config.get("BossOnly", False))
-            self._ui_widgets["Timer"].setText(str(config.get("Timer", 1000)))
-
-            trigger_mode = config.get("TriggerMode", 0)
+            try:
+                trigger_mode = config_int(config.get("TriggerMode", 0))
+            except ValueError:
+                trigger_mode = None
+            if trigger_mode not in (0, 1, 2):
+                trigger_mode = None
             trigger_map = {0: "定时", 1: "冷却", 2: "按住"}
-            self._ui_widgets["TriggerModeCombo"].setCurrentText(trigger_map.get(trigger_mode, "定时"))
+            if trigger_mode is None:
+                self._ui_widgets["TriggerModeCombo"].setCurrentIndex(-1)
+            else:
+                self._ui_widgets["TriggerModeCombo"].setCurrentText(
+                    trigger_map[trigger_mode]
+                )
 
             self._ui_widgets["CooldownCoordX"].setText(
-                str(config.get("CooldownCoordX", 0))
+                str(displayed_int("CooldownCoordX", 0))
             )
             self._ui_widgets["CooldownCoordY"].setText(
-                str(config.get("CooldownCoordY", 0))
+                str(displayed_int("CooldownCoordY", 0))
             )
             self._ui_widgets["CooldownSize"].setText(
-                str(config.get("CooldownSize", 12))
+                str(displayed_int("CooldownSize", 12))
             )
             # InternalCooldown 字段已移除
 
             condition_map = {0: "无限制", 1: "BUFF限制", 2: "资源条件"}
-            self._ui_widgets["ExecuteCondition"].setCurrentText(
-                condition_map.get(config.get("ExecuteCondition", 0), "无限制")
-            )
+            try:
+                execute_condition = config_int(config.get("ExecuteCondition", 0))
+            except ValueError:
+                execute_condition = None
+            if execute_condition not in (0, 1, 2):
+                execute_condition = None
+            if execute_condition is None:
+                self._ui_widgets["ExecuteCondition"].setCurrentIndex(-1)
+            else:
+                self._ui_widgets["ExecuteCondition"].setCurrentText(
+                    condition_map[execute_condition]
+                )
 
             # 普通条件检测配置
             if "ConditionCoordX" in self._ui_widgets:
                 self._ui_widgets["ConditionCoordX"].setText(
-                    str(config.get("ConditionCoordX", 0))
+                    str(displayed_int("ConditionCoordX", 0))
                 )
             if "ConditionCoordY" in self._ui_widgets:
                 self._ui_widgets["ConditionCoordY"].setText(
-                    str(config.get("ConditionCoordY", 0))
+                    str(displayed_int("ConditionCoordY", 0))
                 )
             if "ConditionColor" in self._ui_widgets:
+                try:
+                    condition_color = config_int(config.get("ConditionColor", 0))
+                except ValueError:
+                    condition_color = 0
                 self._ui_widgets["ConditionColor"].setText(
-                    f"0x{config.get('ConditionColor', 0):06X}"
+                    f"0x{condition_color:06X}"
                 )
 
             # 区域资源检测配置已移至独立的“智能药剂”选项卡
             # 此处不再需要加载相关UI元素
 
-            self._ui_widgets["AltKey"].setText(config.get("AltKey", ""))
+            self._ui_widgets["AltKey"].setText(str(config.get("AltKey", "") or ""))
 
-            self._update_ui_visibility(config)
+            self._update_ui_visibility(
+                {
+                    **config,
+                    "TriggerMode": trigger_mode,
+                    "ExecuteCondition": execute_condition,
+                }
+            )
         finally:
             self._updating_ui = False
 
@@ -404,7 +450,7 @@ class SimplifiedSkillWidget(QWidget):
         self._update_boss_only_availability(is_hold_mode)
 
         condition = config.get("ExecuteCondition", 0)
-        self.condition_frame.setVisible(condition != 0)
+        self.condition_frame.setVisible(condition in (1, 2))
 
         # 普通条件检测UI（所有条件类型都使用相同的UI）
         if hasattr(self, 'normal_condition_frame'):

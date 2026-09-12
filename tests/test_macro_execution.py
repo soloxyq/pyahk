@@ -375,6 +375,22 @@ def test_boss_only_skips_until_boss_mode_enabled():
     assert ("normal", "R") in sm.input_handler.calls
 
 
+def test_string_false_priority_does_not_escalate_skill_queue():
+    sm = _make_sm(sequence_enabled=False)
+    skill = {
+        "Enabled": True,
+        "TriggerMode": 0,
+        "Key": "R",
+        "Priority": "false",
+        "ExecuteCondition": 0,
+    }
+
+    sm._try_execute_skill("Normal", skill, object())
+
+    assert ("normal", "R") in sm.input_handler.calls
+    assert ("high", "R") not in sm.input_handler.calls
+
+
 _HOLD_SKILLS = {
     # 键盘持键在配置里排在鼠标键之前,验证下发时被重排为"鼠标键优先"
     "Skill1": {"Enabled": True, "TriggerMode": 2, "Key": "q"},
@@ -431,6 +447,19 @@ def test_stop_declares_empty_set_after_scheduler_stopped():
         if c[0] == "skill_hold" and c[1] == []
     )
     assert stop_idx < release_idx, sm.input_handler.calls
+
+
+def test_stop_can_skip_redundant_ahk_cleanup_after_atomic_runtime_reset():
+    """上层原子 reset 后只停 Python 生产者，不再叠加跨进程清理超时。"""
+    sm = _make_sm(sequence_enabled=False, scheduler_running=True)
+    sm._skills_config = dict(_HOLD_SKILLS)
+    sm._is_running = True
+
+    sm.stop(cleanup_input=False)
+
+    assert sm.unified_scheduler.stopped is True
+    assert _hold_sets(sm) == []
+    assert not _calls(sm, "stop_macro")
 
 
 def test_switch_skill_to_macro_releases_hold_keys():

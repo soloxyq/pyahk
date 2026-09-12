@@ -55,12 +55,16 @@ global InterceptKeysPressed := Map()
 ; 键至多"死"1.1 秒,不会永久失效。
 global INTERCEPT_REPEAT_WINDOW_MS := 1100
 ; 特殊键松开后只延迟**自动输入恢复**,物理 key-up 与 special_key_up 事件仍立即透传/回发。
-; 0 = 旧行为(立即恢复);D4 序列模式可配 50ms,避免宏复位后的 LButton 抢占闪避输入。
+; 0 = 旧行为(立即恢复);D4 序列模式当前配 125ms,避免宏复位后的 LButton 抢占闪避输入。
 global SpecialKeyResumeDelayMs := 0
 
 ; 🎯 新增：管理按键配置存储
 global ManagedKeysConfig := Map()   ; 存储管理按键的延迟和映射配置
 global TargetWin := "" ; 目标窗口标识符
+; direct/SendInput 是全局输入。显式配置目标后，每个新 down/click 都必须复核目标仍在
+; 前台；ProcessQueue 还会在切走时释放所有在飞全局按键，避免它们粘到新前台应用。
+; 空目标保留旧的“当前前台窗口”兼容语义。
+global DirectTargetInputSuspended := false
 
 ; 🎯 新增：紧急按键缓存（Master方案学习）
 global CachedHpKey := ""     ; 缓存的HP按键
@@ -85,6 +89,28 @@ global ForceMovePassthroughKeys := Map()  ; 强制移动期间不被替换的白
 global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控件发送(ControlSend)
 ; 普通 press 动作的 down→up 持续时间。由 Python 的 key_press_duration 批量同步。
 global KeyPressDurationMs := 10
+; press 不得在 ProcessQueue/MacroTick 中 Sleep：同步等待会阻塞 HP/MP 紧急队列，
+; 而 F8/shutdown 中断 Sleep 后还可能在 ExitApp 前永久丢失 up。每个实际键以
+; route+key 为维度记录最晚释放时刻；重叠 press 仍每次发 down，但只在最后
+; 一个保持窗口到期后发 up，避免早到 up 剪断后到 down。
+global TransientPressKeys := Map()
+global TransientPressOrder := []
+; 显式 down/up 的路由账本。control 模式的持久键必须在同一个目标窗口上配对
+; ControlSend up；direct 模式则配对全局 Send up。只按 key 记一条，是因为现有
+; 技能/宏/管理键账本本就把同一物理键视为单一所有权。
+global PersistentPressRoutes := Map()
+
+; 运行时闸门所有者。epoch 是 Python 分配的世代号，用于拒绝同一 owner
+; 的迟到旧命令。不同 owner 只能在关闸时交接；真正开闸可再携带
+; owner+epoch 复核，从而不会让旧洗练/寻路回调打开新模式的闸门。
+global RuntimeOwner := "none"
+global RuntimeOwnerEpoch := 0
+; 每个 owner 的最高已接受世代是停止后仍保留的 tombstone。RESET 只清当前
+; owner，不清这张表；否则超时后迟到的旧 owner:epoch 会在 STOPPED 里重新被接受。
+global RuntimeOwnerEpochs := Map("main", 0, "affix", 0, "pathfinding", 0)
+; F7 对洗练 owner 的本地 stop latch。与 PhysicalStopLatched(F8/主模式)分开，
+; 但两者都拒绝后续 true，只有完整 RESET_RUNTIME 成功才解锁。
+global RuntimeOwnerStopLatched := false
 
 ; 🎯 异步延迟机制
 ; 管理键独占延迟(delay_clear:)的结束时刻(单调毫秒),0 = 无。
@@ -127,7 +153,7 @@ global CoordinateMouseHoldPriority := -1
 ; 它之后仍可能继续下发命令,而此时 Python 侧的停止流程已经走完。
 ; 关闸 = 原子停止屏障(CMD_SET_ACCEPTING_ACTIONS(false) 同一条消息内 ClearQueue(-1)),
 ; 且闸门封住**所有**输入生产路径:EnqueueAction(最深卡点,覆盖 CMD_ENQUEUE/管理键/
-; sequence 展开)、MacroTick、HandleManagedKey、CMD_START_MACRO、非空持键声明,
+; sequence 逐原子推进)、MacroTick、HandleManagedKey、CMD_START_MACRO、非空持键声明,
 ; 以及 IsSkillHoldSuppressed(压住 Reconcile 的补按环节)。
 ; 清队列/停宏/释放持键/空持键声明等安全清理命令永远放行,释放(up)永不被闸门拦截。
 ; 进程启动必须 fail-closed：只有主状态机进入 READY/RUNNING，或独立
@@ -297,6 +323,12 @@ ProcessQueue() {
     global QueueStats, IsPaused, SpecialKeysPaused, RuntimeAcceptingActions
     global PendingOverloadNotify, STALE_MS
 
+    ; direct 模式的目标窗口安全边界也负责释放“切走前已经按下”的键。
+    ; 放在空队列快速返回之前，才能覆盖 TriggerMode=2 持键但当前没有排队动作的情况。
+    if (!RefreshDirectTargetSafety()) {
+        return
+    }
+
     ; 物理 F8 / PAUSED 的关闸可能中断一个较早的 timer 线程。入口先挡住后续 tick；
     ; ClearQueue(-1) 与 ExecuteAction 的纵深检查负责已经在飞的那一个 tick。
     if (!RuntimeAcceptingActions) {
@@ -462,9 +494,13 @@ SetTimer(FlushPendingPythonEvents, 100)
 OnExit(AhkOnExitHandler)
 AhkOnExitHandler(reason, code) {
     try {
-        ReleaseAllSkillHoldKeys()
+        ReleaseAllTransientPressKeys(false)
     } catch {
         ; 退出路径不再抛错
+    }
+    try {
+        ReleaseAllSkillHoldKeys()
+    } catch {
     }
     try {
         ReleaseMacroHeldKeys()
@@ -472,6 +508,10 @@ AhkOnExitHandler(reason, code) {
     }
     try {
         ReleaseAllManagedHoldTargets()
+    } catch {
+    }
+    try {
+        ReleaseAllPersistentPressKeys()
     } catch {
     }
     return 0  ; 允许退出
@@ -542,6 +582,12 @@ StopMacro() {
 MacroTick() {
     global MacroSteps, MacroActive, MacroIndex, MacroDueTime
     global MacroSpecialSuppressed, MacroManagedSuppressed, RuntimeAcceptingActions
+
+    ; 目标窗口被切走时从第 1 步安全暂停；ProcessQueue 通常会先发现，但这里
+    ; 自身也做检查，不能依赖两个 timer 的触发顺序。
+    if (!RefreshDirectTargetSafety()) {
+        return
+    }
 
     ; 闸门关闭时宏必须静默:正常关闸走 ClearQueue(-1)→StopMacro 已置 MacroActive=false,
     ; 这里是防御第二层 —— 关闸与本 tick 之间不留任何"再发一键"的窗口
@@ -733,6 +779,11 @@ ReconcileSkillHoldKeys() {
         if (SkillHeldKeys.Has(key)) {
             continue
         }
+        ; 普通 press 的延迟 up 还未到期时不能补按同名持键：否则
+        ; 当前 Reconcile 发出的 down 会被之后的临时 up 立即剪断。
+        if (IsTransientGlobalPressActive(key)) {
+            continue
+        }
         ; 只在**真正发出** down 之后才记账:block_mouse 原地模式会吞掉鼠标键的 down,
         ; 若无条件记账,账本就会谎报"已按住",此后 Reconcile 永远跳过它 → 技能静默失效。
         ; 不记账则该键留在 desired 里,下一次 Reconcile(含关闭原地模式时)会重试。
@@ -751,13 +802,24 @@ ReconcileSkillHoldKeys() {
 ForgetSkillHeldKey(key) {
     global SkillHeldKeys, SkillHeldOrder
 
-    if (!SkillHeldKeys.Has(key)) {
+    ; AHK 键名不区分大小写，但 Map 默认区分。Python 配置归一化会
+    ; 把 shift 保存为小写，而修饰键序列解析为 Shift；必须按物理键语义
+    ; 不区分大小写地污染账本，否则临时 up 后持键会永久丢失。
+    lower := CachedStrLower(key)
+    heldKey := ""
+    for candidate, _ in SkillHeldKeys {
+        if (CachedStrLower(candidate) = lower) {
+            heldKey := candidate
+            break
+        }
+    }
+    if (heldKey = "") {
         return false
     }
-    SkillHeldKeys.Delete(key)
+    SkillHeldKeys.Delete(heldKey)
     idx := SkillHeldOrder.Length
     while (idx > 0) {
-        if (SkillHeldOrder[idx] = key) {
+        if (CachedStrLower(SkillHeldOrder[idx]) = lower) {
             SkillHeldOrder.RemoveAt(idx)
         }
         idx -= 1
@@ -844,7 +906,7 @@ AhkShutdownNow() {
 }
 
 ; 安全收尾:LIFO 释放全部技能持键,并清空期望+实际账本(清空后不会被 Reconcile 重新按下)。
-ReleaseAllSkillHoldKeys() {
+ReleaseAllSkillHoldKeys(clearDesired := true) {
     global SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
 
     released := Map()
@@ -864,7 +926,9 @@ ReleaseAllSkillHoldKeys() {
         }
     }
 
-    SkillHoldDesiredOrder := []
+    if (clearDesired) {
+        SkillHoldDesiredOrder := []
+    }
     SkillHeldKeys := Map()
     SkillHeldOrder := []
 }
@@ -900,9 +964,9 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         case CMD_SET_TARGET:
             ; SET_TARGET - 设置目标窗口
             global TargetWin
-            if (param != "") {
-                TargetWin := param
-            }
+            ; 空值是有意义的清理操作：切换到未配置目标的配置时，不能继续
+            ; 沿用上一份配置的窗口并把 ControlSend 发到旧进程。
+            TargetWin := param
             return 1
 
         case CMD_ACTIVATE:
@@ -947,12 +1011,9 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 关闸 = **原子停止屏障**:同一条消息内完成 关闸+清队+停宏+释放全部持键。
             ; 只关闸不清场是不够的:已入队的动作仍会被 ProcessQueue 消费,
             ; MacroTick 仍会在下一次 poll 真实发键 —— 靠 Python 侧后续命令补清必然有空窗。
-            if (param != "true" && param != "false") {
-                return AHK_RESULT_REJECTED
-            }
-            ; SetRuntimeActionGate 自身检查 PhysicalStopLatched。返回 rejected 很重要：
-            ; Python 必须知道这条迟到的开闸没有生效，不能继续恢复生产者。
-            return SetRuntimeActionGate(param = "true") ? 1 : AHK_RESULT_REJECTED
+            ; 兼容旧参数 true/false；新路径使用 true:owner:epoch 在开闸的
+            ; 最后一个临界点复核所有者，拒绝旧世代回调打开新运行的闸门。
+            return SetRuntimeActionGateFromParam(param) ? 1 : AHK_RESULT_REJECTED
 
         case CMD_SHUTDOWN:
             ; SHUTDOWN - 优雅关闭。Python 的 Popen.terminate() 在 Windows 上是
@@ -960,11 +1021,20 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 必须先原子清场:若只释放持键不清队列,本消息返回后、退出定时器触发前,
             ; 已到期的 ProcessQueue 可能先执行一次旧队列 → 退出前多发按键。
             ; ClearQueue(-1) 已包含 停宏(含宏持键)+队列级临时持键+技能持键 三类释放。
-            SetRuntimeActionGate(false)
+            ResetRuntime()
             ; 不在消息处理函数里直接 ExitApp:先让本次 SendMessage 正常返回 1,
             ; 再由一次性定时器退出,先让 Python 的 SendMessageTimeoutW 正常返回。
             SetTimer(AhkShutdownNow, -1)
             return 1
+
+        case CMD_RESET_RUNTIME:
+            ; 单条原子 STOPPED 事务：一次有界 WM_COPYDATA 即完成所有
+            ; AHK 安全清理，不再让 Python 在真挂死时串行等待多个 500ms。
+            return ResetRuntime() ? 1 : AHK_RESULT_REJECTED
+
+        case CMD_SET_RUNTIME_OWNER:
+            ; 参数 owner:epoch，owner ∈ none/main/affix/pathfinding。
+            return SetRuntimeOwner(param) ? 1 : AHK_RESULT_REJECTED
 
         case CMD_PAUSE:
             ; PAUSE - 暂停队列处理
@@ -1006,8 +1076,13 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             parts := CachedStrSplit(param, ":")
             if (parts.Length >= 2) {
                 global StationaryModeActive, StationaryModeType
-                StationaryModeActive := (parts[1] = "true")
-                StationaryModeType := parts[2]
+                nextActive := (parts[1] = "true")
+                nextModeType := CachedStrLower(Trim(parts[2]))
+                ; 激活是危险方向，只接受已知模式；关闭始终安全放行并清掉旧类型。
+                if (nextActive && !IsSupportedStationaryMode(nextModeType))
+                    return AHK_RESULT_REJECTED
+                StationaryModeActive := nextActive
+                StationaryModeType := nextActive ? nextModeType : ""
                 ; block_mouse 会吞掉鼠标键的 down(此时账本刻意不记账)。
                 ; 关闭原地模式后必须补按,否则鼠标持久持键要等到下次 Z/F8 才恢复。
                 ReconcileSkillHoldKeys()
@@ -1438,7 +1513,9 @@ UpdateBatchConfig(configString) {
                 case "mp_key":
                     CachedMpKey := CachedStrLower(value)
                 case "stationary_type":
-                    StationaryModeType := value
+                    ; 批量配置只预置类型，不激活。未知/空值都清空，不能沿用旧 profile。
+                    normalizedMode := CachedStrLower(value)
+                    StationaryModeType := IsSupportedStationaryMode(normalizedMode) ? normalizedMode : ""
                 case "special_key_resume_delay_ms":
                     if (IsInteger(value)) {
                         SpecialKeyResumeDelayMs := Min(Max(Integer(value), 0), 1000)
@@ -1500,7 +1577,7 @@ EnqueueAction(priority, action) {
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue, QueueStats
     global RuntimeAcceptingActions
 
-    ; 🚧 最深的统一卡点:闸门关闭时任何来源(WM_COPYDATA / 管理键 / sequence 展开 /
+    ; 🚧 最深的统一卡点:闸门关闭时任何来源(WM_COPYDATA / 管理键 / sequence 逐原子推进 /
     ; 未来新增调用方)都不得向队列写入。关闸即"完全停下",队列必须保持空。
     if (!RuntimeAcceptingActions) {
         return
@@ -1704,6 +1781,9 @@ ClearQueue(priority) {
             ; 队列已全空,继续保留管理键独占延迟语义不干净:窗口残留会在下次入队前
             ; 继续清掉非紧急队列(包括 hold 模式 resume 时的 hold:N)
             ManagedDelayUntil := 0
+            ; press down 已脱离队列，其延迟 up 在独立账本里。完全清场必须
+            ; 先立即释放，不能等原定时器，否则 F8 后仍有在飞 key-up/卡键窗口。
+            ReleaseAllTransientPressKeys(false)
             StopMacro()
             ; 先释放队列级临时持键:被丢弃的 release:target 不会再执行,只有这里能补 up。
             ; 这里刻意**不**补按持久持键 —— 紧随其后的 ReleaseAllSkillHoldKeys() 就要全部释放。
@@ -1711,6 +1791,9 @@ ClearQueue(priority) {
             ; 技能持久按住键与队列无关(走声明式命令),但 ClearQueue(-1) 语义是"完全停下",
             ; 必须同步释放并清空账本,否则 PAUSED 后仍有键按住
             ReleaseAllSkillHoldKeys()
+            ; 纵深兜底：任何在 SendDown 成功与上层账本登记之间被异常打断的 route
+            ; 也必须配平，不能跨 STOPPED 残留。
+            ReleaseAllPersistentPressKeys()
         case -2:
             ; 🔧 清空所有非紧急队列(保留 emergency,用于管理按键期间保护 HP/MP 救命动作)
             ; emergency 不动 → cleanup:key 仍会执行 → ActiveManagedKeys 不需手动清
@@ -1950,42 +2033,86 @@ SendKeyInternal(key) {
     ; 内部发送函数 - 根据模式选择发送方式
     global SendKeyMode, TargetWin
 
-    if (SendKeyMode = "control" && TargetWin != "") {
-        ; ControlSend模式 - 直接发送到目标窗口
-        try {
-            ControlSend FormatKeyForSend(key), , TargetWin
-            ; ControlSend 只投递窗口消息,不改变全局键态 → 不影响持键账本
-            return false
-        } catch {
-            ; 如果ControlSend失败，回退到直接模式
-            return SendDirect(key)
-        }
+    preferredMode := (SendKeyMode = "control" && TargetWin != "") ? "control" : "direct"
+    usedDirect := false
+    if (!StartTransientPress(key, preferredMode, TargetWin, &usedDirect)) {
+        return false
     }
-    ; 直接发送模式 (SendInput)
-    return SendDirect(key)
+    ; ControlSend 只投递目标窗口，不改变全局键态。返回值继续
+    ; 表示“key 本身是否写入了全局输入流”，供持键账本调用方判定。
+    return usedDirect
 }
 
 SendDirect(key) {
-    ; 直接发送模式 - 使用SendInput
-    global KeyPressDurationMs
-    ; 🔧 BUG修复(#3): 必须区分 "+1"(Shift+主键) 与 "+"(字面加号键,如管理按键 target="+")
-    if (StrLen(key) > 1 && SubStr(key, 1, 1) = "+") {
-        ; "+1" → "+{1}" (Shift 修饰符 + 主键花括号包装)
-        Send "+{" SubStr(key, 2) "}"
-    } else if (key = "+") {
-        ; 字面加号键(管理按键映射 target="+" 时的场景)
-        Send "{+}"
-    } else if (InStr(key, "+")) {
-        ; 其他形如 "ctrl+x" 的组合键(罕见,sequence 中可能出现)
-        Send key
-    } else {
-        ; 普通按键
-        Send "{" key " down}"
-        Sleep KeyPressDurationMs
-        Send "{" key " up}"
+    ; 直接发送也走同一套非阻塞 press 账本，不再有“普通键支持时长，
+    ; 修饰键/鼠标键却隐式瞬时”的分支差异。
+    global TargetWin
+
+    usedDirect := false
+    return StartTransientPress(key, "direct", TargetWin, &usedDirect) && usedDirect
+}
+
+CanEmitDirectInput(target := "") {
+    ; SendInput/Click 修改的是系统全局输入流。配置了目标选择器时，目标不在
+    ; 前台就必须 fail-closed；未配置目标时保留 direct 的传统前台语义。
+    if (target = "") {
+        return true
     }
-    ; 所有分支的净效果都是"key 最终处于抬起状态"
+    try {
+        return WinActive(target) != 0
+    } catch {
+        return false
+    }
+}
+
+RefreshDirectTargetSafety() {
+    global RuntimeAcceptingActions, SendKeyMode, TargetWin
+    global DirectTargetInputSuspended
+
+    targetInactive := RuntimeAcceptingActions
+        && TargetWin != ""
+        && !CanEmitDirectInput(TargetWin)
+    shouldSuspend := targetInactive
+        && (SendKeyMode = "direct" || HasGlobalInputInFlight())
+
+    if (shouldSuspend) {
+        if (!DirectTargetInputSuspended) {
+            DirectTargetInputSuspended := true
+            ; up 永远不受目标前台检查：切走时必须把已经写入全局键态的边沿
+            ; 立刻配平。技能 desired 保留，切回后只补当前仍期望的持键。
+            ReleaseAllTransientPressKeys(false)
+            AbortMacroRuntime()
+            ReleaseAllManagedHoldTargets()
+            ReleaseAllSkillHoldKeys(false)
+        }
+        ; control/ControlSend 可以继续向后台目标发送；这里只禁止仍会写系统
+        ; 全局输入流的路径。direct 模式则暂停消费，等用户切回目标。
+        return SendKeyMode != "direct"
+    }
+
+    if (DirectTargetInputSuspended) {
+        DirectTargetInputSuspended := false
+        if (RuntimeAcceptingActions) {
+            ReconcileSkillHoldKeys()
+        }
+    }
     return true
+}
+
+HasGlobalInputInFlight() {
+    global TransientPressKeys, PersistentPressRoutes
+
+    for id, entry in TransientPressKeys {
+        if (entry.affectsGlobal) {
+            return true
+        }
+    }
+    for id, entry in PersistentPressRoutes {
+        if (entry.mode = "direct") {
+            return true
+        }
+    }
+    return false
 }
 
 FormatKeyForSend(key) {
@@ -2001,19 +2128,368 @@ FormatKeyForSend(key) {
     }
 }
 
-SendDown(key) {
-    ; 按住按键
+; 把 AHK 标准修饰符前缀拆成真实按下顺序。支持 +/^/!/#
+; (Shift/Ctrl/Alt/Win) 及组合前缀；单独 "+" 仍是字面加号键。
+; "Ctrl+X" 这类文本别名不是仓库的 AHK 标准键名，旧代码会把它当作
+; 混合文本发出。这种语义无法可靠配对 up，因此安全拒绝，调用方改用 ^x。
+ParseTransientPressKeys(key) {
+    key := Trim(key)
+    if (key = "") {
+        return false
+    }
+    if (key = "+") {
+        return ["+"]
+    }
+
+    keys := []
+    index := 1
+    while (index < StrLen(key)) {
+        symbol := SubStr(key, index, 1)
+        modifierKey := ""
+        switch symbol {
+            case "+":
+                modifierKey := "Shift"
+            case "^":
+                modifierKey := "Ctrl"
+            case "!":
+                modifierKey := "Alt"
+            case "#":
+                modifierKey := "LWin"
+        }
+        if (modifierKey = "") {
+            break
+        }
+        keys.Push(modifierKey)
+        index += 1
+    }
+
+    baseKey := SubStr(key, index)
+    if (baseKey = "" || InStr(baseKey, "+") || InStr(baseKey, "^")
+        || InStr(baseKey, "!") || InStr(baseKey, "#")) {
+        return false
+    }
+    keys.Push(baseKey)
+    return keys
+}
+
+TransientPressId(mode, target, key) {
+    return mode "|" target "|" CachedStrLower(key)
+}
+
+IsTransientModifierKey(key) {
+    lower := CachedStrLower(key)
+    return lower = "shift" || lower = "ctrl" || lower = "alt"
+        || lower = "lwin" || lower = "rwin"
+}
+
+SendTransientKeyEdge(mode, target, key, isDown) {
+    edge := isDown ? "down" : "up"
+    try {
+        if (mode = "control") {
+            ; ControlSend 只投递键盘消息；鼠标按钮须使用 ControlClick 的
+            ; D/U 边沿，并用 NA 保持后台目标不激活。
+            buttons := Map("lbutton", "Left", "rbutton", "Right",
+                "mbutton", "Middle", "xbutton1", "X1", "xbutton2", "X2")
+            lower := StrLower(key)
+            if (buttons.Has(lower)) {
+                ; 保持时间由 press 账本/显式 up 控制，不使用 ControlClick 的隐式 Sleep。
+                previousDelay := SetControlDelay(-1)
+                try {
+                    ControlClick , target, , buttons[lower], 1, isDown ? "NA D" : "NA U"
+                } finally {
+                    SetControlDelay previousDelay
+                }
+            } else {
+                ControlSend "{" key " " edge "}", , target
+            }
+        } else {
+            Send "{" key " " edge "}"
+        }
+        return true
+    } catch {
+        return false
+    }
+}
+
+TrackTransientPressKey(mode, target, key, dueAt, affectsGlobal) {
+    global TransientPressKeys, TransientPressOrder
+
+    id := TransientPressId(mode, target, key)
+    if (TransientPressKeys.Has(id)) {
+        entry := TransientPressKeys[id]
+        entry.due := Max(entry.due, dueAt)
+        return
+    }
+    TransientPressKeys[id] := {
+        mode: mode,
+        target: target,
+        key: key,
+        due: dueAt,
+        affectsGlobal: affectsGlobal
+    }
+    TransientPressOrder.Push(id)
+}
+
+StartTransientPress(key, preferredMode, target, &usedDirect) {
+    global KeyPressDurationMs
+
+    usedDirect := false
+    keys := ParseTransientPressKeys(key)
+    if (!IsObject(keys) || keys.Length = 0) {
+        return false
+    }
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        mode := preferredMode
+        routeTarget := (mode = "control") ? target : ""
+        sentKeys := []
+
+        ; ControlSend 中途失败时，先在同一目标上 LIFO 补 up，再将整个
+        ; chord 回退到 direct。不允许把半条 Control chord 留在目标窗口里。
+        if (mode = "control") {
+            for index, actualKey in keys {
+                if (!SendTransientKeyEdge(mode, routeTarget, actualKey, true)) {
+                    idx := sentKeys.Length
+                    while (idx > 0) {
+                        SendTransientKeyEdge(mode, routeTarget, sentKeys[idx], false)
+                        idx -= 1
+                    }
+                    mode := "direct"
+                    routeTarget := ""
+                    sentKeys := []
+                    break
+                }
+                sentKeys.Push(actualKey)
+            }
+        }
+
+        if (mode = "direct") {
+            ; ControlSend 失败后可以退回 direct，但只有目标此刻仍在前台才安全。
+            ; 超时/失败不应把按键改投到用户正在操作的其他应用。
+            if (!CanEmitDirectInput(target)) {
+                return false
+            }
+            for index, actualKey in keys {
+                if (!SendTransientKeyEdge(mode, "", actualKey, true)) {
+                    idx := sentKeys.Length
+                    while (idx > 0) {
+                        SendTransientKeyEdge(mode, "", sentKeys[idx], false)
+                        idx -= 1
+                    }
+                    return false
+                }
+                sentKeys.Push(actualKey)
+            }
+            usedDirect := true
+        }
+
+        dueAt := MonotonicMs() + KeyPressDurationMs
+        for index, actualKey in keys {
+            TrackTransientPressKey(mode, routeTarget, actualKey, dueAt, usedDirect)
+        }
+
+        ; 临时 press 的最终 up 会剪断同一 route 上的键。不仅 base，
+        ; Shift/Ctrl/Alt/Win 修饰键也可能同时是 TriggerMode=2 持键；先让
+        ; 所有参与本次 chord 的持键账本失忆，release timer 才能补按。
+        for index, actualKey in keys {
+            ForgetSkillHeldKey(actualKey)
+        }
+        ScheduleTransientPressRelease()
+        return true
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
+}
+
+ScheduleTransientPressRelease() {
+    global TransientPressKeys
+
+    SetTimer(ReleaseDueTransientPressKeys, 0)
+    if (TransientPressKeys.Count = 0) {
+        return
+    }
+    now := MonotonicMs()
+    nextDue := 0
+    for id, entry in TransientPressKeys {
+        if (nextDue = 0 || entry.due < nextDue) {
+            nextDue := entry.due
+        }
+    }
+    SetTimer(ReleaseDueTransientPressKeys, -Max(nextDue - now, 1))
+}
+
+ReleaseDueTransientPressKeys() {
+    global TransientPressKeys, TransientPressOrder
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        now := MonotonicMs()
+        reconcileNeeded := false
+        ; 即使一条 chord 的 base 在更早的重叠 press 中已存在，释放时也必须
+        ; 先抬普通键、后抬 modifier。不能单纯依赖“首次出现顺序”做 LIFO。
+        loop 2 {
+            releaseModifiers := (A_Index = 2)
+            idx := TransientPressOrder.Length
+            while (idx > 0) {
+                id := TransientPressOrder[idx]
+                if (!TransientPressKeys.Has(id)) {
+                    TransientPressOrder.RemoveAt(idx)
+                    idx -= 1
+                    continue
+                }
+                entry := TransientPressKeys[id]
+                if (entry.due <= now
+                    && IsTransientModifierKey(entry.key) = releaseModifiers) {
+                    SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
+                    reconcileNeeded := true
+                    TransientPressKeys.Delete(id)
+                    TransientPressOrder.RemoveAt(idx)
+                }
+                idx -= 1
+            }
+        }
+        ScheduleTransientPressRelease()
+        if (reconcileNeeded) {
+            ReconcileSkillHoldKeys()
+        }
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
+}
+
+ReleaseAllTransientPressKeys(reconcile := true) {
+    global TransientPressKeys, TransientPressOrder
+
+    SetTimer(ReleaseDueTransientPressKeys, 0)
+    reconcileNeeded := false
+    loop 2 {
+        releaseModifiers := (A_Index = 2)
+        idx := TransientPressOrder.Length
+        while (idx > 0) {
+            id := TransientPressOrder[idx]
+            if (TransientPressKeys.Has(id)) {
+                entry := TransientPressKeys[id]
+                if (IsTransientModifierKey(entry.key) = releaseModifiers) {
+                    SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
+                    reconcileNeeded := true
+                }
+            }
+            idx -= 1
+        }
+    }
+    TransientPressKeys := Map()
+    TransientPressOrder := []
+    if (reconcile && reconcileNeeded) {
+        ReconcileSkillHoldKeys()
+    }
+}
+
+IsTransientGlobalPressActive(key) {
+    global TransientPressKeys
+
+    lower := CachedStrLower(key)
+    for id, entry in TransientPressKeys {
+        if (CachedStrLower(entry.key) = lower) {
+            return true
+        }
+    }
+    return false
+}
+
+PersistentPressId(key) {
+    return CachedStrLower(key)
+}
+
+TrackPersistentPressRoute(key, mode, target) {
+    global PersistentPressRoutes, TransientPressKeys, TransientPressOrder
+
+    PersistentPressRoutes[PersistentPressId(key)] := {
+        key: key,
+        mode: mode,
+        target: target
+    }
+    ; 成功的显式 down 接管同一路由的临时 press，最终 up 由持键所有者负责。
+    ; 只撤销该键的旧 release；同一 chord 的其他键、其他目标仍按原时刻释放。
+    transientId := TransientPressId(mode, target, key)
+    if (TransientPressKeys.Has(transientId)) {
+        TransientPressKeys.Delete(transientId)
+        for index, id in TransientPressOrder {
+            if (id = transientId) {
+                TransientPressOrder.RemoveAt(index)
+                break
+            }
+        }
+        ScheduleTransientPressRelease()
+    }
+}
+
+ReleaseAllPersistentPressKeys() {
+    global PersistentPressRoutes
+
+    for id, entry in PersistentPressRoutes {
+        SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
+    }
+    PersistentPressRoutes := Map()
+}
+
+SendDown(key, forceDirect := false, directTarget := "") {
+    ; 按住按键。control 模式也必须记录 route，后续 release/STOPPED 才能在
+    ; 原目标上配对 up，而不是误向当前前台窗口发送全局边沿。
+    global TargetWin, SendKeyMode
+
     if (ShouldBlockMouseInStationary(key)) {
         return false   ; 被原地模式吞掉 → 调用方不得记账,否则账本谎报"已按下"
     }
-    Send "{" key " down}"
-    return true
+    ; down 和接管必须原子完成，旧 release timer 不能插在实际 down 与记账之间。
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        if (!forceDirect && SendKeyMode = "control" && TargetWin != "") {
+            if (SendTransientKeyEdge("control", TargetWin, key, true)) {
+                TrackPersistentPressRoute(key, "control", TargetWin)
+                return true
+            }
+            ; ControlSend 失败只能在目标仍是前台时回退 global SendInput。
+        }
+        targetForDirect := directTarget != "" ? directTarget : TargetWin
+        if (!CanEmitDirectInput(targetForDirect)
+            || !SendTransientKeyEdge("direct", "", key, true)) {
+            return false
+        }
+        TrackPersistentPressRoute(key, "direct", "")
+        return true
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
 }
 
 SendUp(key) {
-    ; 释放按键(永不被任何模式拦截,否则就是卡键)
-    Send "{" key " up}"
-    return true
+    ; 释放永不被目标/抑制门禁拦截。优先沿 down 的真实 route 配对；没有账本
+    ; 时仍发一个全局 up 作为历史状态/异常路径的防卡键兜底。
+    global PersistentPressRoutes
+
+    id := PersistentPressId(key)
+    if (PersistentPressRoutes.Has(id)) {
+        entry := PersistentPressRoutes[id]
+        PersistentPressRoutes.Delete(id)
+        return SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
+    }
+    return SendTransientKeyEdge("direct", "", key, false)
 }
 
 ShouldAddShiftModifier(key) {
@@ -2048,6 +2524,11 @@ IsMouseButtonKey(key) {
     return (lower = "lbutton") || (lower = "rbutton") || (lower = "left") || (lower = "right")
 }
 
+IsSupportedStationaryMode(modeType) {
+    normalized := CachedStrLower(Trim(modeType))
+    return normalized = "shift_modifier" || normalized = "block_mouse"
+}
+
 ; 滚轮"键":没有 up 边沿(实测 "$WheelUp up" 可注册但永远不触发),也没有键盘
 ; 自动重复 —— 每个刻度都是独立的用户动作。intercept 去重与 up 配对都必须跳过它,
 ; 否则 up 永远不来,连续滚动会被 1.1s 兜底窗口吞掉(BOSS 键/原地键配滚轮时)。
@@ -2062,10 +2543,24 @@ IsWheelKey(key) {
 
 ExecuteMouseClick(data) {
     ; 鼠标点击: "left" 或 "right" 或 "middle"
+    global TargetWin, SendKeyMode
+
     if (ShouldBlockMouseInStationary(data)) {
-        return
+        return false
+    }
+    if (SendKeyMode = "control" && TargetWin != "") {
+        buttons := Map("left", "LButton", "right", "RButton", "middle", "MButton")
+        button := buttons.Has(CachedStrLower(data))
+            ? buttons[CachedStrLower(data)]
+            : data
+        usedDirect := false
+        return StartTransientPress(button, "control", TargetWin, &usedDirect)
+    }
+    if (!CanEmitDirectInput(TargetWin)) {
+        return false
     }
     Click data
+    return true
 }
 
 IsValidQueuedAction(action) {
@@ -2103,15 +2598,25 @@ ParseMouseClickAt(data, &x, &y, &holdMs) {
 }
 
 ExecuteMouseClickAt(data, priority) {
-    global ACTION_RELEASE
+    global ACTION_RELEASE, TargetWin
     global ManagedHoldTargets, CoordinateMouseHoldActive, CoordinateMouseHoldPriority
 
     if (!ParseMouseClickAt(data, &x, &y, &holdMs)) {
         return false
     }
 
+    ; Python 入队前已核对目标，但动作可能在 AHK 队列里稍后才执行。执行时
+    ; 再做一次 fail-closed 校验：坐标点击必须有显式目标，目标仍是前台窗口，
+    ; 且屏幕坐标仍位于该窗口当前客户区的半开边界内。
+    ; 捕获本动作的目标：WM_COPYDATA 可以重入 timer 线程并更新全局
+    ; TargetWin，后续的 click/down 不得悄然改用另一个目标的校验结果。
+    target := TargetWin
+    if (!IsPointInsideTargetClient(target, x, y)) {
+        return false
+    }
+
     if (holdMs = 0) {
-        return ClickMouseAtOnce(x, y)
+        return ClickMouseAtOnce(x, y, target)
     }
 
     ; 同一物理 LButton 不能同时存在两条待释放账本；跨优先级重叠会让较早
@@ -2122,7 +2627,7 @@ ExecuteMouseClickAt(data, priority) {
 
     ; down 后把不可丢 release 放回同一优先级队首并设置 notBefore。
     ; 不用 Sleep，因此其它优先级与 HP/MP 在保持窗口内仍可运行。
-    if (!PressMouseAt(x, y)) {
+    if (!PressMouseAt(x, y, target)) {
         return false
     }
     MarkManagedHoldTarget("LButton")
@@ -2132,20 +2637,50 @@ ExecuteMouseClickAt(data, priority) {
     return true
 }
 
-ClickMouseAtOnce(x, y) {
+IsPointInsideTargetClient(target, x, y) {
+    ; WinGetClientPos 返回虚拟桌面屏幕坐标，所以左/上副屏的负坐标
+    ; 不需要特别转换。先用 WinActive 取得确切的前台匹配 HWND，避免
+    ; 同一 selector 匹配多个窗口时从 WinExist 取到另一个客户区。
+    if (target = "") {
+        return false
+    }
+    try {
+        hwnd := WinActive(target)
+        if (!hwnd) {
+            return false
+        }
+        WinGetClientPos(&clientX, &clientY, &clientWidth, &clientHeight,
+            "ahk_id " hwnd)
+        return clientWidth > 0 && clientHeight > 0
+            && x >= clientX && x < clientX + clientWidth
+            && y >= clientY && y < clientY + clientHeight
+    } catch {
+        return false
+    }
+}
+
+ClickMouseAtOnce(x, y, target) {
     if (ShouldBlockMouseInStationary("LButton")) {
+        return false
+    }
+    ; 靠近真实 Click 再复核一次，缩小入队校验与全局输入之间的时间窗。
+    if (!IsPointInsideTargetClient(target, x, y)) {
         return false
     }
     Click x, y
     return true
 }
 
-PressMouseAt(x, y) {
+PressMouseAt(x, y, target) {
     if (ShouldBlockMouseInStationary("LButton")) {
         return false
     }
+    if (!IsPointInsideTargetClient(target, x, y)) {
+        return false
+    }
     MouseMove x, y, 0
-    return SendDown("LButton")
+    ; SendDown 也使用这份已捕获 target 做最后的前台检查，不读可重入更新的全局值。
+    return SendDown("LButton", true, target)
 }
 
 ; ===============================================================================
@@ -2383,12 +2918,15 @@ HandleInterceptKey(key) {
     ; 拦截模式 - 按键按下
     global InterceptKeysPressed, INTERCEPT_REPEAT_WINDOW_MS, RegisteredHooks
     global MainModeArmed, MainModeF8AwaitRelease, PhysicalStopLatched
+    global RuntimeOwner
 
     ; 活跃 F8 必须在通用重复去重前判定，且本次判定随后不再重读 Hook 数量。
     ; STOPPED→READY 的启动 F8 若丢了 up，InterceptKeysPressed 会残留上一世代 down；
     ; 新世代第一条 stop 必须无条件覆盖这个 stale down，不能在 1.1s 窗口内被吞。
-    isActiveF8Stop := StrUpper(key) = "F8"
-        && (PhysicalStopLatched || MainModeArmed || RegisteredHooks.Count > 0)
+    keyUpper := StrUpper(key)
+    isActiveF8Stop := keyUpper = "F8"
+        && (PhysicalStopLatched || MainModeArmed || RegisteredHooks.Count > 0
+            || RuntimeOwner != "none")
     if (isActiveF8Stop && MainModeF8AwaitRelease) {
         ; 这是触发 STOPPED→READY 的同一次物理长按产生的 auto-repeat。
         ; 只有永久 up 边沿或物理键态轮询确认释放后，新 down 才能成为 stop。
@@ -2415,7 +2953,17 @@ HandleInterceptKey(key) {
         InterceptKeysPressed[key] := now
     }
 
-    ; 动态 Hook 存在表示主模式正在 READY/RUNNING/PAUSED。此时物理 F8
+    ; 洗练/寻路的 owner 协议让各自的第二次根热键先在 AHK 当地关闸清场，
+    ; 然后才可靠回发停止意图。判定放在通用重复去重之后，避免启动时的同一次
+    ; 长按因键盘 auto-repeat 立即又停掉新一轮。
+    isOwnerStop := (keyUpper = "F7" && RuntimeOwner = "affix")
+        || (keyUpper = "F9" && RuntimeOwner = "pathfinding")
+    if (isOwnerStop) {
+        LatchRuntimeOwnerStop("intercept_key_down:" key)
+        return
+    }
+
+    ; 动态 Hook/明确 RuntimeOwner 表示某个输入模式正在武装或运行。此时物理 F8
     ; 必须先在 AHK 当地止血，不等 Python GUI 线程：即使事件通道连续超时，
     ; 本边也已关闸+清队+停宏+释放全部持键。STOPPED 的 F8 启动和独立
     ; F7 洗练都没有动态 Hook，不会被这条路径误关闸。
@@ -2633,6 +3181,116 @@ ReconcileForceMoveState() {
         && MonitorKeysState[key_upper]
 }
 
+SetRuntimeOwner(param) {
+    global RuntimeOwner, RuntimeOwnerEpoch, RuntimeOwnerEpochs, RuntimeAcceptingActions
+
+    parts := StrSplit(param, ":", , 2)
+    if (parts.Length != 2) {
+        return false
+    }
+    owner := StrLower(Trim(parts[1]))
+    epochText := Trim(parts[2])
+    if ((owner != "none" && owner != "main" && owner != "affix"
+        && owner != "pathfinding") || !IsInteger(epochText)) {
+        return false
+    }
+    epoch := Integer(epochText)
+    if (epoch < 0) {
+        return false
+    }
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        ; owner 交接与新世代建立都必须发生在关闸期。开闸中只接受
+        ; 完全相同的幂等重发，不允许偷换运行所有权。
+        if (RuntimeAcceptingActions
+            && (owner != RuntimeOwner || epoch != RuntimeOwnerEpoch)) {
+            return false
+        }
+        ; 每个 owner 的 epoch 跨 RESET 保留单调 tombstone。当前 owner 允许
+        ; 完全相同的幂等重发；停止后再来的同世代则必须拒绝。
+        if (owner != "none") {
+            lastEpoch := RuntimeOwnerEpochs[owner]
+            if ((owner = RuntimeOwner && epoch < lastEpoch)
+                || (owner != RuntimeOwner && epoch <= lastEpoch)) {
+                return false
+            }
+            RuntimeOwnerEpochs[owner] := epoch
+        }
+        RuntimeOwner := owner
+        RuntimeOwnerEpoch := epoch
+        return true
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
+}
+
+RuntimeOwnerMatches(owner, epochText) {
+    global RuntimeOwner, RuntimeOwnerEpoch
+
+    owner := StrLower(Trim(owner))
+    epochText := Trim(epochText)
+    return IsInteger(epochText)
+        && Integer(epochText) >= 0
+        && owner = RuntimeOwner
+        && Integer(epochText) = RuntimeOwnerEpoch
+}
+
+SetRuntimeActionGateFromParam(param) {
+    parts := StrSplit(param, ":", , 3)
+    if (parts.Length = 1) {
+        if (param != "true" && param != "false") {
+            return false
+        }
+        return SetRuntimeActionGate(param = "true")
+    }
+    if (parts.Length != 3 || (parts[1] != "true" && parts[1] != "false")
+        || !RuntimeOwnerMatches(parts[2], parts[3])) {
+        return false
+    }
+    return SetRuntimeActionGate(parts[1] = "true")
+}
+
+ResetRuntime() {
+    global RuntimeAcceptingActions, RuntimeOwner
+    global IsPaused, StationaryModeActive, PhysicalStopLatched, RuntimeOwnerStopLatched
+    global DirectTargetInputSuspended
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        ; 必须先写关闸，再触碰任何可能被当前 timer/hotkey 观察的状态。
+        RuntimeAcceptingActions := false
+        DirectTargetInputSuspended := false
+        ReconcileForceMoveState()
+        ClearQueue(-1)
+        IsPaused := false
+        StationaryModeActive := false
+
+        ; ClearQueue(-1) 已完成关闸/持键释放，清 Hook 时不再重跑屏障。
+        hooksCleared := ClearAllConfigurableHooks(true)
+        if (hooksCleared) {
+            RuntimeOwner := "none"
+            RuntimeOwnerStopLatched := false
+        } else {
+            ; 部分 Hook 注销失败时保持 latch，后续开闸只能被拒绝。
+            PhysicalStopLatched := true
+        }
+        return hooksCleared
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
+}
+
 ArmMainMode() {
     ; READY 的两阶段入口：先 armed，完成 Hook/捕获准备后才由 Python 真正开闸。
     ; 已有物理 stop latch 时拒绝重新 armed，入口会按正常失败路径回退 STOPPED。
@@ -2723,15 +3381,33 @@ LatchPhysicalStop(event) {
     }
 }
 
-SetRuntimeActionGate(accepting) {
-    ; 运行时输入闸门的唯一写入点。Python 命令、物理 F8 止血和 shutdown
-    ; 共用同一条原子语义，避免新的持键/队列类型只在某条停机路径释放。
-    global RuntimeAcceptingActions, PhysicalStopLatched
+LatchRuntimeOwnerStop(event) {
+    global RuntimeOwnerStopLatched
 
     previousCritical := A_IsCritical
     Critical "On"
     try {
-        if (accepting && PhysicalStopLatched) {
+        RuntimeOwnerStopLatched := true
+        SetRuntimeActionGate(false)
+        return QueuePythonReliableEvent(event)
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
+    }
+}
+
+SetRuntimeActionGate(accepting) {
+    ; 运行时输入闸门的唯一写入点。Python 命令、物理 F8 止血和 shutdown
+    ; 共用同一条原子语义，避免新的持键/队列类型只在某条停机路径释放。
+    global RuntimeAcceptingActions, PhysicalStopLatched, RuntimeOwnerStopLatched
+
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        if (accepting && (PhysicalStopLatched || RuntimeOwnerStopLatched)) {
             return false
         }
 
@@ -3077,7 +3753,7 @@ ActivateTargetWindow() {
 ; ===============================================================================
 ; Hook清理函数
 ; ===============================================================================
-ClearAllConfigurableHooks() {
+ClearAllConfigurableHooks(barrierAlreadyApplied := false) {
     ; 简化版本：清空所有记录的 Hook
     ; F8/F7/F9 永久根热键不在 RegisteredHooks 中,自动被保留(见 RegisterHook 的 key_upper 检查)
     global ActiveManagedKeys, SpecialKeysPressed, SpecialKeysPaused, ManagedKeysConfig
@@ -3124,7 +3800,9 @@ ClearAllConfigurableHooks() {
         previousCritical := A_IsCritical
         Critical "On"
         try {
-            SetRuntimeActionGate(false)
+            if (!barrierAlreadyApplied) {
+                SetRuntimeActionGate(false)
+            }
             ; 抑制状态已彻底归零：在 latch 仍为 true、闸门仍关闭时完成最终对齐。
             ; STOPPED 路径下 desired 已空，这是幂等空转；不能放到解锁之后。
             ReconcileSkillHoldKeys()

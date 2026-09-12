@@ -6,11 +6,15 @@ import threading
 from types import SimpleNamespace
 from unittest import mock
 
+import pytest
+
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import torchlight_assistant.core.macro_engine as macro_mod
 from torchlight_assistant.core.macro_engine import MacroEngine
 from torchlight_assistant.core.states import MacroState
+from torchlight_assistant.utils.window_utils import WindowUtils
+from torchlight_assistant.utils.border_frame_manager import BorderFrameManager
 
 
 def _raise(message):
@@ -22,6 +26,8 @@ def _bare_engine(state):
     engine._state = state
     engine._state_lock = threading.RLock()
     engine._transition_lock = threading.RLock()
+    engine._runtime_owner = "main"
+    engine._runtime_owner_epoch = 1
     engine._publish_status_update = mock.Mock()
     engine._update_osd_visibility = mock.Mock()
     return engine
@@ -160,13 +166,15 @@ def test_ready_arms_main_mode_before_hooks_and_opens_gate_after_preparation():
         start=lambda: order.append("input_start"),
     )
     engine._arm_main_mode = lambda context: order.append(("arm", context)) or True
+    engine._sync_ahk_send_mode = lambda: order.append("send_mode") or True
+    engine._prepare_target_window_for_ready = lambda: order.append("target") or True
     engine._register_secondary_hotkeys = lambda: order.append("hooks") or True
     engine.skill_manager = SimpleNamespace(
         prepare_border_only=lambda: order.append("prepare_border")
     )
     engine.border_manager = SimpleNamespace(
         enable_debug_save=lambda: order.append("debug_save"),
-        capture_once_for_debug_and_cache=lambda *args: order.append("capture") or None,
+        capture_once_for_debug_and_cache=lambda *args: order.append("capture") or object(),
     )
     engine.resource_manager = None
     engine._collect_resource_regions = lambda: {}
@@ -175,20 +183,240 @@ def test_ready_arms_main_mode_before_hooks_and_opens_gate_after_preparation():
 
     assert engine._on_state_enter(MacroState.READY) is True
     assert order[0] == ("arm", "进入 READY")
-    assert order.index(("arm", "进入 READY")) < order.index("hooks") < order.index("capture")
+    assert (
+        order.index(("arm", "进入 READY"))
+        < order.index("send_mode")
+        < order.index("target")
+        < order.index("hooks")
+        < order.index("capture")
+    )
     assert order[-1] == ("gate", "进入 READY")
+
+
+def test_ready_capture_failure_never_opens_runtime_gate():
+    engine = object.__new__(MacroEngine)
+    engine._arm_main_mode = mock.Mock(return_value=True)
+    engine._sync_ahk_send_mode = mock.Mock(return_value=True)
+    engine._prepare_target_window_for_ready = mock.Mock(return_value=True)
+    engine._register_secondary_hotkeys = mock.Mock(return_value=True)
+    engine.input_handler = SimpleNamespace(start=lambda: None)
+    engine.skill_manager = SimpleNamespace(prepare_border_only=lambda: None)
+    engine.border_manager = SimpleNamespace(
+        enable_debug_save=lambda: None,
+        capture_once_for_debug_and_cache=lambda *args: None,
+    )
+    engine.resource_manager = None
+    engine._collect_resource_regions = lambda: {}
+    engine._capture_interval_ms = lambda: 40
+    engine._open_runtime_gate = mock.Mock(return_value=True)
+
+    with pytest.raises(RuntimeError, match="READY 初始化捕获失败"):
+        engine._on_state_enter(MacroState.READY)
+
+    engine._open_runtime_gate.assert_not_called()
+
+
+def test_ready_rejects_invalid_or_unsynchronized_send_mode_before_target():
+    engine = object.__new__(MacroEngine)
+    engine._arm_main_mode = mock.Mock(return_value=True)
+    engine._prepare_target_window_for_ready = mock.Mock(return_value=True)
+    engine._register_secondary_hotkeys = mock.Mock(return_value=True)
+    engine._sync_ahk_send_mode = mock.Mock(return_value=False)
+
+    with pytest.raises(RuntimeError, match="输入模式"):
+        engine._on_state_enter(MacroState.READY)
+
+    engine._prepare_target_window_for_ready.assert_not_called()
+    engine._register_secondary_hotkeys.assert_not_called()
+
+
+def test_send_mode_validation_is_strict_and_propagates_ahk_rejection():
+    engine = object.__new__(MacroEngine)
+    engine._global_config = {"input_mode": "invalid"}
+    engine.input_handler = SimpleNamespace(set_send_mode=mock.Mock(return_value=True))
+    assert engine._sync_ahk_send_mode() is False
+    engine.input_handler.set_send_mode.assert_not_called()
+
+    engine._global_config = {"input_mode": "control"}
+    engine.input_handler.set_send_mode.return_value = False
+    assert engine._sync_ahk_send_mode() is False
+    engine.input_handler.set_send_mode.assert_called_once_with("control")
 
 
 def test_main_mode_arm_failure_schedules_stopped_barrier():
     from PySide6.QtCore import QTimer
 
     engine = object.__new__(MacroEngine)
-    engine.input_handler = SimpleNamespace(arm_main_mode=lambda: False)
+    engine._prepared_mode = "combat"
+    engine.input_handler = SimpleNamespace(
+        arm_main_mode=lambda: False,
+        set_runtime_owner=lambda owner, epoch: True,
+    )
 
     with mock.patch.object(QTimer, "singleShot") as single_shot:
         assert engine._arm_main_mode("进入 READY") is False
 
-    single_shot.assert_called_once_with(0, engine._force_stopped_after_gate_failure)
+    single_shot.assert_called_once()
+    assert single_shot.call_args.args[0] == 0
+    assert callable(single_shot.call_args.args[1])
+    assert engine._runtime_attempt_epoch == 1
+
+
+def test_old_gate_failure_callback_cannot_stop_a_new_runtime_owner():
+    engine = object.__new__(MacroEngine)
+    engine._state = MacroState.STOPPED
+    engine._transition_lock = threading.RLock()
+    engine._runtime_attempt_epoch = 2
+    engine._enter_stopped_state = mock.Mock()
+    engine._set_state = mock.Mock()
+
+    engine._force_stopped_after_gate_failure(1)
+
+    engine._enter_stopped_state.assert_not_called()
+    engine._set_state.assert_not_called()
+
+
+def test_window_target_combines_class_and_executable_without_losing_either():
+    assert WindowUtils.build_ahk_target(
+        {"ahk_class": "UnrealWindow", "ahk_exe": "Game.exe"}
+    ) == "ahk_class UnrealWindow ahk_exe Game.exe"
+    assert WindowUtils.build_ahk_target(
+        {"ahk_class": "", "ahk_exe": "PathOfExile.exe"}
+    ) == "ahk_exe PathOfExile.exe"
+
+
+def test_malformed_explicit_window_target_never_becomes_foreground_fallback():
+    assert not WindowUtils.is_target_config_valid(
+        {"ahk_class": "", "ahk_exe": ["Game.exe"]}
+    )
+    assert not WindowUtils.is_target_config_valid(
+        {"ahk_class": "", "ahk_exe": "Game\n.exe"}
+    )
+    assert not WindowUtils.is_target_config_valid({"ahk_exe": "\nGame.exe"})
+
+    engine = object.__new__(MacroEngine)
+    engine.input_handler = SimpleNamespace(
+        set_target_window=mock.Mock(return_value=True),
+        activate_target_window=mock.Mock(return_value=True),
+    )
+    engine._prepared_mode = "combat"
+    engine._global_config = {
+        "input_mode": "direct",
+        "window_activation": {
+            "enabled": False,
+            "ahk_class": "",
+            "ahk_exe": "Game\n.exe",
+        },
+    }
+
+    assert engine._prepare_target_window_for_ready() is False
+    engine.input_handler.set_target_window.assert_not_called()
+
+    manager = object.__new__(BorderFrameManager)
+    manager.set_window_activation_config(engine._global_config["window_activation"])
+    with mock.patch.object(WindowUtils, "find_target_window") as find:
+        assert manager._get_target_window_handle() is None
+        find.assert_not_called()
+
+
+def test_target_lookup_fallback_applies_only_to_unconfigured_target():
+    from torchlight_assistant.utils import window_utils as window_mod
+    fake_gui = SimpleNamespace(GetForegroundWindow=mock.Mock(return_value=4321))
+    with mock.patch.object(window_mod, "win32gui", fake_gui), mock.patch.object(
+        WindowUtils, "find_window_by_process_name", return_value=None
+    ):
+        assert WindowUtils.find_target_window({"ahk_exe": "absent.exe"}, fallback_to_foreground=True) is None
+        assert WindowUtils.find_target_window({"ahk_exe": False}, fallback_to_foreground=True) is None
+        fake_gui.GetForegroundWindow.assert_not_called()
+        assert WindowUtils.find_target_window({}, fallback_to_foreground=True) == 4321
+
+
+def test_complete_config_validation_rejects_malformed_window_target():
+    with pytest.raises(ValueError, match="window_activation"):
+        MacroEngine._validated_config_sections(
+            {
+                "skills": {},
+                "global": {
+                    "window_activation": {
+                        "enabled": False,
+                        "ahk_class": "",
+                        "ahk_exe": {"name": "Game.exe"},
+                    }
+                },
+            }
+        )
+
+
+def test_ready_target_syncs_exe_but_only_activates_when_enabled():
+    calls = []
+    engine = object.__new__(MacroEngine)
+    engine.input_handler = SimpleNamespace(
+        set_target_window=lambda target: calls.append(("target", target)) or True,
+        activate_target_window=lambda: calls.append(("activate",)) or True,
+    )
+    engine._global_config = {
+        "input_mode": "direct",
+        "window_activation": {
+            "enabled": False,
+            "ahk_class": "",
+            "ahk_exe": "PathOfExile.exe",
+        },
+    }
+
+    assert engine._prepare_target_window_for_ready() is True
+    assert calls == [("target", "ahk_exe PathOfExile.exe")]
+
+    engine._global_config["window_activation"]["enabled"] = True
+    assert engine._prepare_target_window_for_ready() is True
+    assert calls[-2:] == [
+        ("target", "ahk_exe PathOfExile.exe"),
+        ("activate",),
+    ]
+
+
+def test_control_mode_without_target_fails_closed_before_ready():
+    engine = object.__new__(MacroEngine)
+    engine.input_handler = SimpleNamespace(
+        set_target_window=mock.Mock(return_value=True),
+        activate_target_window=mock.Mock(return_value=True),
+    )
+    engine._global_config = {
+        "input_mode": "control",
+        "window_activation": {"enabled": False, "ahk_class": "", "ahk_exe": ""},
+    }
+
+    assert engine._prepare_target_window_for_ready() is False
+    engine.input_handler.set_target_window.assert_not_called()
+    engine.input_handler.activate_target_window.assert_not_called()
+
+
+def test_explicit_capture_target_miss_never_falls_back_to_foreground():
+    manager = object.__new__(BorderFrameManager)
+    manager.window_activation_config = {
+        "enabled": False,
+        "ahk_class": "",
+        "ahk_exe": "missing-game.exe",
+    }
+
+    with mock.patch.object(WindowUtils, "find_target_window", return_value=None) as find:
+        assert manager._get_target_window_handle() is None
+
+    find.assert_called_once_with(manager.window_activation_config)
+
+
+def test_empty_capture_target_retains_foreground_compatibility():
+    manager = object.__new__(BorderFrameManager)
+    manager.window_activation_config = {}
+
+    with mock.patch.object(
+        WindowUtils, "find_target_window", side_effect=[None, 4321]
+    ) as find:
+        assert manager._get_target_window_handle() == 4321
+
+    assert find.call_args_list == [
+        mock.call({}),
+        mock.call({}, fallback_to_foreground=True),
+    ]
 
 
 def test_root_hook_failure_aborts_initialization_and_stops_partial_ahk():
@@ -231,6 +459,106 @@ def test_stopped_ignores_dynamic_intercept_delivered_after_f8():
     engine._on_z_key_press.assert_not_called()
 
 
+def test_pathfinding_ready_does_not_register_or_swallow_boss_hotkey():
+    engine = object.__new__(MacroEngine)
+    engine._prepared_mode = "pathfinding"
+    engine._global_config = {
+        "sequence_enabled": False,
+        "boss_mode_hotkey": "XButton2",
+        "stationary_mode_config": {},
+        "priority_keys": {},
+    }
+    engine.input_handler = SimpleNamespace(register_hook=mock.Mock(return_value=True))
+
+    assert engine._register_config_based_hotkeys() is True
+    engine.input_handler.register_hook.assert_not_called()
+    assert engine._current_boss_mode_key == ""
+
+
+def test_start_snapshot_is_validated_before_engine_commit():
+    engine = object.__new__(MacroEngine)
+    engine._skills_config = {"old": {}}
+    engine._global_config = {"old": True}
+    engine.sound_manager = SimpleNamespace(update_config=mock.Mock())
+
+    assert engine._apply_start_config_snapshot({"skills": [], "global": {}}, "F9") is False
+    assert engine._skills_config == {"old": {}}
+    assert engine._global_config == {"old": True}
+
+    snapshot = {
+        "skills": {"Skill1": {"Enabled": True, "Key": "right_mouse"}},
+        "global": {"input_mode": "direct"},
+    }
+    with mock.patch.object(macro_mod.event_bus, "publish") as publish:
+        assert engine._apply_start_config_snapshot(snapshot, "F9") is True
+
+    assert engine._skills_config["Skill1"]["Key"] == "RButton"
+    assert engine._global_config == {"input_mode": "direct"}
+    engine.sound_manager.update_config.assert_called_once_with(engine._global_config)
+    publish.assert_called_once_with(
+        "engine:config_updated", engine._skills_config, engine._global_config
+    )
+
+
+def test_f9_start_recovers_transport_before_preparing():
+    engine = object.__new__(MacroEngine)
+    engine._state = MacroState.STOPPED
+    engine._transition_lock = threading.RLock()
+    engine.affix_reroll_manager = SimpleNamespace(
+        status=SimpleNamespace(is_running=False)
+    )
+    engine._recover_ahk_transport_for_start = mock.Mock(return_value=False)
+    engine._apply_start_config_snapshot = mock.Mock(return_value=True)
+    engine.prepare_border_only = mock.Mock(return_value=True)
+
+    engine._on_f9_key_press({"skills": {}, "global": {}})
+
+    engine._apply_start_config_snapshot.assert_not_called()
+    engine.prepare_border_only.assert_not_called()
+
+    engine._recover_ahk_transport_for_start.return_value = True
+    snapshot = {"skills": {}, "global": {}}
+    engine._on_f9_key_press(snapshot)
+    engine._apply_start_config_snapshot.assert_called_once_with(snapshot, "F9")
+    engine.prepare_border_only.assert_called_once_with()
+    assert engine._prepared_mode == "pathfinding"
+
+
+def test_stationary_toggle_commits_only_after_ahk_accepts():
+    engine = object.__new__(MacroEngine)
+    engine._global_config = {
+        "stationary_mode_config": {"mode_type": "block_mouse"}
+    }
+    engine._stationary_mode_active = False
+    engine._publish_status_update = mock.Mock()
+    engine.input_handler = SimpleNamespace(set_stationary_mode=mock.Mock(return_value=False))
+
+    engine._on_stationary_key_press()
+    assert engine._stationary_mode_active is False
+    engine._publish_status_update.assert_not_called()
+
+    engine.input_handler.set_stationary_mode.return_value = True
+    engine._on_stationary_key_press()
+    assert engine._stationary_mode_active is True
+    engine._publish_status_update.assert_called_once_with()
+
+
+def test_unknown_stationary_mode_fails_closed_before_send():
+    engine = object.__new__(MacroEngine)
+    engine._global_config = {
+        "stationary_mode_config": {"mode_type": "future_mode"}
+    }
+    engine._stationary_mode_active = False
+    engine._publish_status_update = mock.Mock()
+    engine.input_handler = SimpleNamespace(set_stationary_mode=mock.Mock(return_value=True))
+
+    engine._on_stationary_key_press()
+
+    engine.input_handler.set_stationary_mode.assert_not_called()
+    engine._publish_status_update.assert_not_called()
+    assert engine._stationary_mode_active is False
+
+
 def test_stopped_cleanup_continues_after_component_exception():
     order = []
 
@@ -241,7 +569,7 @@ def test_stopped_cleanup_continues_after_component_exception():
 
         return run
 
-    def failing_skill_stop():
+    def failing_skill_stop(**kwargs):
         order.append("skill_stop")
         raise RuntimeError("scheduler stuck")
 
@@ -254,13 +582,8 @@ def test_stopped_cleanup_continues_after_component_exception():
         "stationary_mode_config": {"mode_type": "block_mouse"},
     }
     engine.input_handler = SimpleNamespace(
-        set_accepting_actions=step("gate", True),
-        set_stationary_mode=lambda active, mode: order.append(
-            ("stationary", active, mode)
-        ) or True,
+        reset_runtime=step("reset", True),
         set_drop_non_emergency=step("drop_off"),
-        clear_queue=step("clear", True),
-        clear_all_configurable_hooks=step("clear_hooks", True),
         dry_run_mode=False,
         set_dry_run_mode=step("dry_run"),
     )
@@ -272,14 +595,12 @@ def test_stopped_cleanup_continues_after_component_exception():
 
     assert engine._on_state_enter(MacroState.STOPPED) is True
 
-    assert order[0] == "gate", "AHK 原子停止屏障必须是第一条安全动作"
+    assert order[0] == "reset", "AHK 原子 STOPPED 事务必须是第一条安全动作"
     assert "path_stop" in order and "resource_stop" in order
-    assert "clear_hooks" in order
-    assert order.count("clear") == 2
-    assert order.index("clear_hooks") < max(i for i, item in enumerate(order) if item == "clear")
+    assert order.count("reset") == 1
+    assert "clear" not in order and "clear_hooks" not in order
     assert engine._force_move_active is False
     assert engine._stationary_mode_active is False
-    assert ("stationary", False, "block_mouse") in order
     assert engine._prepared_mode == "none"
 
 
@@ -291,11 +612,10 @@ def test_running_entry_exception_rolls_back_to_ready():
     engine._open_runtime_gate = lambda context: order.append(("open", context)) or True
     engine.input_handler = SimpleNamespace(
         set_force_move_state=lambda active: True,
-        set_accepting_actions=lambda enabled: order.append(("gate", enabled)) or True,
-        clear_queue=lambda: order.append("clear") or True,
+        set_accepting_actions=lambda enabled, **kwargs: order.append(("gate", enabled)) or True,
     )
     engine._start_subsystems_based_on_mode = lambda: _raise("resource start failed")
-    engine.skill_manager = SimpleNamespace(stop=lambda: order.append("skill_stop"))
+    engine.skill_manager = SimpleNamespace(stop=lambda **kwargs: order.append("skill_stop"))
     engine.pathfinding_manager = SimpleNamespace(stop=lambda: order.append("path_stop"))
     engine.resource_manager = SimpleNamespace(stop=lambda: order.append("resource_stop"))
     engine.border_manager = SimpleNamespace(stop=lambda: order.append("border_stop"))
@@ -306,7 +626,7 @@ def test_running_entry_exception_rolls_back_to_ready():
     assert engine._state == MacroState.READY
     publish.assert_not_called()
     assert ("gate", False) in order
-    assert "skill_stop" in order and "clear" in order
+    assert "skill_stop" in order and "clear" not in order
     assert ("open", "RUNNING 入口失败后恢复 READY") in order
 
 
@@ -317,11 +637,10 @@ def test_running_rollback_cannot_reopen_gate_after_physical_f8_latch():
     engine = _bare_engine(MacroState.READY)
     engine._prepared_mode = "combat"
     engine.input_handler = SimpleNamespace(
-        set_accepting_actions=lambda enabled: order.append(("gate", enabled))
+        set_accepting_actions=lambda enabled, **kwargs: order.append(("gate", enabled))
         or (not enabled),
-        clear_queue=lambda: order.append("clear") or True,
     )
-    engine.skill_manager = SimpleNamespace(stop=lambda: order.append("skill_stop"))
+    engine.skill_manager = SimpleNamespace(stop=lambda **kwargs: order.append("skill_stop"))
     engine.pathfinding_manager = SimpleNamespace(stop=lambda: order.append("path_stop"))
     engine.resource_manager = SimpleNamespace(stop=lambda: order.append("resource_stop"))
     engine.border_manager = SimpleNamespace(stop=lambda: order.append("border_stop"))
@@ -331,7 +650,9 @@ def test_running_rollback_cannot_reopen_gate_after_physical_f8_latch():
 
     assert order[0] == ("gate", False)
     assert order[-1] == ("gate", True)
-    single_shot.assert_called_once_with(0, engine._force_stopped_after_gate_failure)
+    single_shot.assert_called_once()
+    assert single_shot.call_args.args[0] == 0
+    assert callable(single_shot.call_args.args[1])
     assert engine._state == MacroState.READY
 
 
@@ -344,10 +665,11 @@ def test_silent_pathfinding_start_failure_does_not_commit_running():
     engine._open_runtime_gate = lambda context: True
     engine.input_handler = SimpleNamespace(
         set_force_move_state=lambda active: True,
-        set_accepting_actions=lambda enabled: True,
-        clear_queue=lambda: True,
+        set_accepting_actions=lambda enabled, **kwargs: True,
     )
-    engine.skill_manager = SimpleNamespace(stop=lambda: order.append("skill_stop"))
+    engine.skill_manager = SimpleNamespace(
+        stop=lambda **kwargs: order.append("skill_stop")
+    )
     engine.pathfinding_manager = SimpleNamespace(
         is_running=False,
         start=lambda: order.append("path_start"),
@@ -436,9 +758,14 @@ def test_affix_mode_owns_runtime_gate_across_start_click_and_stop():
         calls.append("recover")
         return True
 
-    def set_accepting_actions(enabled):
+    def set_accepting_actions(enabled, **kwargs):
         calls.append(f"gate:{enabled}")
         gate["open"] = enabled
+        return True
+
+    def reset_runtime():
+        calls.append("reset")
+        gate["open"] = False
         return True
 
     def click_mouse_at(x, y):
@@ -460,13 +787,24 @@ def test_affix_mode_owns_runtime_gate_across_start_click_and_stop():
     manager = object.__new__(SimpleAffixRerollManager)
     manager.input_handler = SimpleNamespace(
         recover_transport=recover_transport,
+        set_target_window=lambda target: calls.append(f"target:{target}") or True,
+        set_runtime_owner=lambda owner, epoch: calls.append(
+            f"owner:{owner}:{epoch}"
+        ) or True,
         set_accepting_actions=set_accepting_actions,
+        reset_runtime=reset_runtime,
         click_mouse_at=click_mouse_at,
+    )
+    manager.border_manager = SimpleNamespace(
+        window_activation_config={"ahk_exe": "game.exe"}
     )
     manager.config = SimpleAffixRerollConfig(
         enabled=True,
         target_affixes=["测试"],
         enchant_button_coord=(10, 20),
+        first_affix_button_coord=(11, 21),
+        replace_button_coord=(12, 22),
+        close_button_coord=(13, 23),
     )
     manager.status = SimpleAffixRerollStatus()
     manager.ocr_manager = SimpleNamespace(is_ready=lambda: True)
@@ -480,7 +818,14 @@ def test_affix_mode_owns_runtime_gate_across_start_click_and_stop():
         affix_mod.event_bus, "publish"
     ):
         assert manager.start_reroll() is True
-        assert calls[:4] == ["recover", "gate:True", "thread:create", "thread:start"]
+        assert calls[:6] == [
+            "target:ahk_exe game.exe",
+            "recover",
+            "owner:affix:1",
+            "gate:True",
+            "thread:create",
+            "thread:start",
+        ]
         run = manager._active_run
         assert run is not None
         assert manager._click_at(run, (10, 20), "附魔按钮") is True
@@ -488,8 +833,8 @@ def test_affix_mode_owns_runtime_gate_across_start_click_and_stop():
 
         manager.stop_reroll("测试停止")
 
-    assert "gate:False" in calls
-    assert calls.index("gate:False") > calls.index("click:10,20")
+    assert "reset" in calls
+    assert calls.index("reset") > calls.index("click:10,20")
     assert gate["open"] is False
     assert manager.status.is_running is False
     assert manager._active_run is None
@@ -507,12 +852,21 @@ def test_affix_mode_refuses_start_when_runtime_gate_cannot_open():
     manager = object.__new__(SimpleAffixRerollManager)
     manager.input_handler = SimpleNamespace(
         recover_transport=lambda: True,
-        set_accepting_actions=lambda enabled: False,
+        set_target_window=lambda target: True,
+        set_runtime_owner=lambda owner, epoch: True,
+        set_accepting_actions=lambda enabled, **kwargs: False,
+        reset_runtime=lambda: True,
+    )
+    manager.border_manager = SimpleNamespace(
+        window_activation_config={"ahk_exe": "game.exe"}
     )
     manager.config = SimpleAffixRerollConfig(
         enabled=True,
         target_affixes=["测试"],
         enchant_button_coord=(10, 20),
+        first_affix_button_coord=(11, 21),
+        replace_button_coord=(12, 22),
+        close_button_coord=(13, 23),
     )
     manager.status = SimpleAffixRerollStatus()
     manager.ocr_manager = SimpleNamespace(is_ready=lambda: True)
@@ -568,9 +922,14 @@ def test_stale_affix_worker_cannot_click_or_close_new_generation_gate():
             new_ocr_entered.set()
             return []
 
-    def set_accepting_actions(enabled):
+    def set_accepting_actions(enabled, **kwargs):
         gate_calls.append(enabled)
         gate["open"] = enabled
+        return True
+
+    def reset_runtime():
+        gate_calls.append(False)
+        gate["open"] = False
         return True
 
     def click_mouse_at(x, y):
@@ -580,10 +939,14 @@ def test_stale_affix_worker_cannot_click_or_close_new_generation_gate():
     manager = object.__new__(SimpleAffixRerollManager)
     manager.input_handler = SimpleNamespace(
         recover_transport=lambda: True,
+        set_target_window=lambda target: True,
+        set_runtime_owner=lambda owner, epoch: True,
         set_accepting_actions=set_accepting_actions,
+        reset_runtime=reset_runtime,
         click_mouse_at=click_mouse_at,
     )
     manager.border_manager = SimpleNamespace(
+        window_activation_config={"ahk_exe": "game.exe"},
         capture_screen_for_reroll=lambda region: object()
     )
     manager.config = SimpleAffixRerollConfig(
@@ -592,6 +955,9 @@ def test_stale_affix_worker_cannot_click_or_close_new_generation_gate():
         max_attempts=100,
         click_delay=5000,
         enchant_button_coord=(10, 20),
+        first_affix_button_coord=(11, 21),
+        replace_button_coord=(12, 22),
+        close_button_coord=(13, 23),
     )
     manager.status = SimpleAffixRerollStatus()
     manager.ocr_manager = BlockingOCR()
@@ -600,7 +966,7 @@ def test_stale_affix_worker_cannot_click_or_close_new_generation_gate():
     manager._active_run = None
     manager._gate_owner_generation = None
     manager._reroll_thread = None
-    manager._screen_region = (0, 0, 10, 10)
+    manager._resolve_ocr_region = lambda: (0, 0, 10, 10)
     manager.WORKER_JOIN_TIMEOUT_SECONDS = 0.01
 
     with mock.patch.object(affix_mod.event_bus, "publish"):
@@ -652,7 +1018,7 @@ def test_affix_stop_notifications_complete_before_next_generation_can_start():
 
     manager = object.__new__(SimpleAffixRerollManager)
     manager.input_handler = SimpleNamespace(
-        set_accepting_actions=lambda enabled: True,
+        reset_runtime=lambda: True,
     )
     manager.config = SimpleAffixRerollConfig()
     manager.status = SimpleAffixRerollStatus(is_running=True)
@@ -725,12 +1091,21 @@ def test_affix_start_does_not_hide_ui_after_synchronous_stop_subscriber():
     manager = object.__new__(SimpleAffixRerollManager)
     manager.input_handler = SimpleNamespace(
         recover_transport=lambda: True,
-        set_accepting_actions=lambda enabled: True,
+        set_target_window=lambda target: True,
+        set_runtime_owner=lambda owner, epoch: True,
+        set_accepting_actions=lambda enabled, **kwargs: True,
+        reset_runtime=lambda: True,
+    )
+    manager.border_manager = SimpleNamespace(
+        window_activation_config={"ahk_exe": "game.exe"}
     )
     manager.config = SimpleAffixRerollConfig(
         enabled=True,
         target_affixes=["测试"],
         enchant_button_coord=(10, 20),
+        first_affix_button_coord=(11, 21),
+        replace_button_coord=(12, 22),
+        close_button_coord=(13, 23),
     )
     manager.status = SimpleAffixRerollStatus()
     manager.ocr_manager = SimpleNamespace(is_ready=lambda: True)

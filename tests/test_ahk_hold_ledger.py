@@ -116,6 +116,7 @@ global KeyLog := []
 global EventLog := []
 global BlockMouseSim := false      ; 模拟 block_mouse 原地模式
 global EmergencySim := false
+global PointInsideTargetClientSim := true
 global ResultFile := A_Args.Length >= 1 ? A_Args[1] : (A_ScriptDir "\out.txt")
 
 ; ---- 被测代码依赖的全局(与 hold_server_extended.ahk 同名同初值)----
@@ -150,6 +151,7 @@ global ACTION_DELAY := "delay"
 global ACTION_NOTIFY := "notify"
 global ACTION_SEQ_RUNNING := "seqrun"
 global MAX_MOUSE_CLICK_HOLD_MS := 5000
+global TargetWin := "test-target"
 
 ; ---- 桩函数(IsSkillHoldSuppressed 是真函数,从原文抽取,不在此列)----
 ShouldBlockMouseInStationary(key) {
@@ -160,7 +162,7 @@ IsMouseButtonKeyStub(key) {
     lower := StrLower(key)
     return (lower = "lbutton") || (lower = "rbutton") || (lower = "left") || (lower = "right")
 }
-SendDown(key) {
+SendDown(key, forceDirect := false, directTarget := "") {
     global KeyLog
     if (ShouldBlockMouseInStationary(key)) {
         return false
@@ -181,11 +183,20 @@ SendPress(key, forceMoveBypass := false) {
     KeyLog.Push("press:" key)
     return true
 }
+IsTransientGlobalPressActive(key) {
+    return false
+}
 CachedStrSplit(str, delim, omit := "", max := -1) {
     if (max > 0) {
         return StrSplit(str, delim, omit, max)
     }
     return StrSplit(str, delim, omit)
+}
+CachedStrLower(str) {
+    return StrLower(str)
+}
+RefreshDirectTargetSafety() {
+    return true
 }
 IsEmergencyAction(action) {
     global EmergencySim
@@ -193,7 +204,11 @@ IsEmergencyAction(action) {
 }
 ExecuteMouseClick(data) {
 }
-ClickMouseAtOnce(x, y) {
+IsPointInsideTargetClient(target, x, y) {
+    global PointInsideTargetClientSim
+    return target != "" && PointInsideTargetClientSim
+}
+ClickMouseAtOnce(x, y, target) {
     global KeyLog
     if (ShouldBlockMouseInStationary("LButton")) {
         return false
@@ -201,13 +216,13 @@ ClickMouseAtOnce(x, y) {
     KeyLog.Push("clickat:" x "," y)
     return true
 }
-PressMouseAt(x, y) {
+PressMouseAt(x, y, target) {
     global KeyLog
     if (ShouldBlockMouseInStationary("LButton")) {
         return false
     }
     KeyLog.Push("move:" x "," y)
-    return SendDown("LButton")
+    return SendDown("LButton", true, target)
 }
 ; 序列推进会把剩余部分放回队首;本文件只测持键账本,不测队列,故记录即可
 global PushedBack := []
@@ -268,6 +283,7 @@ ResetAll() {
     global KeyLog, EventLog, SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
     global ManagedHoldTargets, ActiveManagedKeys, BlockMouseSim, PushedBack
     global CoordinateMouseHoldActive, CoordinateMouseHoldPriority
+    global TargetWin, PointInsideTargetClientSim
     global SpecialKeysPressed, SpecialKeysPaused, SpecialKeyResumeDelayMs
     global RuntimeAcceptingActions
     global MacroSteps, MacroActive, MacroIndex, MacroDueTime
@@ -285,6 +301,8 @@ ResetAll() {
     ActiveManagedKeys := Map()
     SpecialKeysPressed := Map()
     BlockMouseSim := false
+    TargetWin := "test-target"
+    PointInsideTargetClientSim := true
     SpecialKeysPaused := false
     SpecialKeyResumeDelayMs := 0
     RuntimeAcceptingActions := true
@@ -520,6 +538,18 @@ ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",75", 2)
 Expect("o14-block_mouse 在长按时也不移动鼠标", LogStr(), "")
 Expect("o15-block_mouse 长按不建立持键账本", ManagedHoldTargets.Count, 0)
 Expect("o16-block_mouse 长按不安排 release", PushedBack.Length, 0)
+
+ResetAll()
+TargetWin := ""
+ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",0", 2)
+Expect("o17-坐标点击必须配置显式目标", LogStr(), "")
+
+ResetAll()
+PointInsideTargetClientSim := false
+ExecuteAction("mouse_click_at:" virtualLeft "," virtualTop ",75", 2)
+Expect("o18-客户区外坐标不移动鼠标", LogStr(), "")
+Expect("o19-客户区外坐标不建立持键账本", ManagedHoldTargets.Count, 0)
+Expect("o20-客户区外坐标不安排 release", PushedBack.Length, 0)
 
 ; ============================ 汇总 ============================
 report := "CHECKS=" Checks "`n"

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QTextEdit,
 )
 from PySide6.QtCore import Qt
+from copy import deepcopy
 from typing import Dict, Any, List, Tuple, Optional
 
 from .custom_widgets import (
@@ -22,7 +23,8 @@ from .custom_widgets import (
     ConfigCheckBox,
 )
 from ..utils.debug_log import LOG_INFO
-from ..utils.key_names import migrate_skill_sequence_to_steps
+from ..utils.key_names import migrate_skill_sequence_to_steps, normalize_macro_steps
+from ..utils.config_values import config_int
 from .macro_steps_widget import MacroStepsEditor
 
 
@@ -32,6 +34,7 @@ class AffixRerollWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.coord_widgets = {}
+        self._config_snapshot: Dict[str, Any] = {}
         self._setup_ui()
 
     def _setup_ui(self):
@@ -72,14 +75,20 @@ class AffixRerollWidget(QWidget):
         self.max_attempts_spinbox.setValue(100)
         config_layout.addWidget(self.max_attempts_spinbox, 1, 1)
 
+        config_layout.addWidget(QLabel("点击间隔 (ms):"), 2, 0)
+        self.click_delay_spinbox = ConfigSpinBox()
+        self.click_delay_spinbox.setRange(0, 5000)
+        self.click_delay_spinbox.setValue(200)
+        config_layout.addWidget(self.click_delay_spinbox, 2, 1)
+
         # 目标词缀输入
-        config_layout.addWidget(QLabel("目标词缀 (每行一个):"), 2, 0, 1, 2)
+        config_layout.addWidget(QLabel("目标词缀 (每行一个):"), 3, 0, 1, 2)
         self.target_text = QTextEdit()
         self.target_text.setPlaceholderText(
             "输入目标词缀关键词，每行一个\n例如：\n生命\n移动速度\n毒伤"
         )
         self.target_text.setMaximumHeight(100)
-        config_layout.addWidget(self.target_text, 3, 0, 1, 2)
+        config_layout.addWidget(self.target_text, 4, 0, 1, 2)
 
         # 坐标设置
         coords_group = QGroupBox("坐标设置 (格式: x,y)")
@@ -104,7 +113,7 @@ class AffixRerollWidget(QWidget):
             self.coord_widgets[name] = line_edit
             row += 1
 
-        config_layout.addWidget(coords_group, 4, 0, 1, 2)
+        config_layout.addWidget(coords_group, 5, 0, 1, 2)
 
         # 使用说明
         help_label = QLabel(
@@ -117,7 +126,7 @@ class AffixRerollWidget(QWidget):
         )
         help_label.setStyleSheet("color: #888888; font-size: 9pt; padding: 10px;")
         help_label.setWordWrap(True)
-        config_layout.addWidget(help_label, 5, 0, 1, 2)
+        config_layout.addWidget(help_label, 6, 0, 1, 2)
 
         layout.addWidget(config_group)
         layout.addStretch()
@@ -129,36 +138,61 @@ class AffixRerollWidget(QWidget):
 
     def get_config(self) -> Dict[str, Any]:
         """获取配置"""
-        return {
-            "affix_reroll": {
-                "enabled": self.enabled_checkbox.isChecked(),
-                "target_affixes": self._parse_target_affixes(),
-                "max_attempts": self.max_attempts_spinbox.value(),
-                "click_delay": 200,
-                "enchant_button_coord": self._parse_coord_from_text(
-                    self.coord_widgets["enchant_button_coord"].text()
-                ),
-                "first_affix_button_coord": self._parse_coord_from_text(
-                    self.coord_widgets["first_affix_button_coord"].text()
-                ),
-                "replace_button_coord": self._parse_coord_from_text(
-                    self.coord_widgets["replace_button_coord"].text()
-                ),
-                "close_button_coord": self._parse_coord_from_text(
-                    self.coord_widgets["close_button_coord"].text()
-                ),
-            }
-        }
+        affix_config = deepcopy(self._config_snapshot)
+        affix_config.update({
+            "enabled": self.enabled_checkbox.isChecked(),
+            "target_affixes": self._parse_target_affixes(),
+            "max_attempts": self.max_attempts_spinbox.value(),
+            "click_delay": self.click_delay_spinbox.value(),
+            "enchant_button_coord": self._parse_coord_from_text(
+                self.coord_widgets["enchant_button_coord"].text()
+            ),
+            "first_affix_button_coord": self._parse_coord_from_text(
+                self.coord_widgets["first_affix_button_coord"].text()
+            ),
+            "replace_button_coord": self._parse_coord_from_text(
+                self.coord_widgets["replace_button_coord"].text()
+            ),
+            "close_button_coord": self._parse_coord_from_text(
+                self.coord_widgets["close_button_coord"].text()
+            ),
+        })
+        return {"affix_reroll": affix_config}
 
     def update_from_config(self, config: Dict[str, Any]):
         """从配置更新UI"""
-        affix_config = config.get("affix_reroll", {})
+        raw_affix_config = (
+            config.get("affix_reroll", {}) if isinstance(config, dict) else {}
+        )
+        affix_config = (
+            raw_affix_config if isinstance(raw_affix_config, dict) else {}
+        )
+        self._config_snapshot = deepcopy(affix_config)
 
-        self.enabled_checkbox.setChecked(affix_config.get("enabled", False))
-        self.max_attempts_spinbox.setValue(affix_config.get("max_attempts", 100))
+        self.enabled_checkbox.setChecked(affix_config.get("enabled") is True)
+
+        def bounded_int(name: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = config_int(affix_config.get(name, default))
+            except ValueError:
+                value = default
+            return min(max(value, minimum), maximum)
+
+        self.max_attempts_spinbox.setValue(
+            bounded_int("max_attempts", 100, 1, 1000)
+        )
+        self.click_delay_spinbox.setValue(
+            bounded_int("click_delay", 200, 0, 5000)
+        )
 
         target_affixes = affix_config.get("target_affixes", [])
-        self.target_text.setPlainText("\n".join(target_affixes))
+        if not isinstance(target_affixes, list):
+            target_affixes = []
+        self.target_text.setPlainText(
+            "\n".join(
+                value for value in target_affixes if isinstance(value, str)
+            )
+        )
 
         for name, widget in self.coord_widgets.items():
             coord = affix_config.get(name)
@@ -226,7 +260,9 @@ class SkillConfigWidget(QWidget):
 
     def get_config(self) -> Dict[str, Any]:
         """获取技能配置"""
-        skills_config = {}
+        # 只渲染前 8 个技能是界面布局限制，不是配置数量上限。
+        # 从完整快照合并，防止保存时删除未显示技能及其未知字段。
+        skills_config = deepcopy(self._skills_config)
         for skill_name, widget in self.skill_widgets.items():
             if hasattr(widget, "get_current_config"):
                 skills_config[skill_name] = widget.get_current_config()
@@ -242,7 +278,7 @@ class SkillConfigWidget(QWidget):
         self, skills_config: Dict[str, Any], global_config: Optional[Dict[str, Any]] = None
     ):
         LOG_INFO(f"[SkillConfigWidget] 接收到 skills_config: {skills_config}")
-        self._skills_config = skills_config
+        self._skills_config = deepcopy(skills_config)
         LOG_INFO("[SkillConfigWidget] 调用 _create_skill_widgets() 创建技能UI。")
         try:
             self._create_skill_widgets()
@@ -253,10 +289,11 @@ class SkillConfigWidget(QWidget):
             traceback.print_exc()
 
         # 更新宏步骤配置(macro_steps 优先;键缺失则由旧 skill_sequence 迁移)
-        if global_config and hasattr(self, "macro_editor"):
+        if global_config is not None and hasattr(self, "macro_editor"):
             steps = global_config.get("macro_steps")
             if steps is None:
                 steps = migrate_skill_sequence_to_steps(global_config.get("skill_sequence", ""))
+            steps = normalize_macro_steps(steps)
             self.macro_editor.set_steps(steps)
             LOG_INFO(f"[SkillConfigWidget] 宏步骤已更新: {len(steps)} 步")
 

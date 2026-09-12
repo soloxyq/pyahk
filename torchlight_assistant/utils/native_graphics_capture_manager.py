@@ -14,7 +14,8 @@ import time
 from typing import Optional, Callable, Any, Tuple
 import numpy as np
 from .debug_log import LOG, LOG_ERROR, LOG_INFO
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from .config_values import config_int
 
 
 # 添加native_capture目录到路径
@@ -64,8 +65,12 @@ class NativeGraphicsCaptureManager:
         self.session_id: Optional[int] = None  # 使用session_id
         self.is_running = False
         self.capture_thread: Optional[threading.Thread] = None
+        # Absolute virtual-desktop rectangle of the last returned frame.  DXGI
+        # captures one output, whose local (0, 0) can be negative/offset on a
+        # multi-monitor desktop; consumers need this origin to slice correctly.
+        self._frame_rect: Optional[dict] = None
 
-        # Python层面不再维护帧缓存，完全依赖C++层面的永久缓存机制
+        # 本 wrapper 不再维护第二份可变帧缓存；直接读取 C++ session 的最新双缓冲视图。
 
     def initialize(self) -> bool:
         """初始化捕获库
@@ -277,9 +282,13 @@ class NativeGraphicsCaptureManager:
             return None
 
         try:
-            # 直接从C++库获取帧，C++层面已实现永久缓存机制
+            # 直接从 C++ session 获取最新双缓冲视图。
             if self.session_id is not None:
                 frame_data = self.capture_manager.get_frame(self.session_id)
+                if frame_data is not None:
+                    self._frame_rect = self.capture_manager.get_frame_rect(
+                        self.session_id
+                    )
                 return frame_data
 
             return None
@@ -324,6 +333,7 @@ class NativeGraphicsCaptureManager:
                 self.capture_manager.stop_capture(self.session_id)
                 self.capture_manager.destroy_session(self.session_id)
                 self.session_id = None
+                self._frame_rect = None
 
         except Exception as e:
             LOG_ERROR(f"停止或销毁捕获会话时异常: {e}")
@@ -331,29 +341,33 @@ class NativeGraphicsCaptureManager:
     def pause_capture(self):
         """暂停捕获（停止C++库捕获，节省CPU资源）"""
         if not self.is_running:
-            return
+            return False
 
         try:
             if self.capture_manager and self.session_id is not None:
                 # 使用stop_capture停止捕获，但不销毁会话
-                self.capture_manager.stop_capture(self.session_id)
+                return bool(self.capture_manager.stop_capture(self.session_id))
         except Exception as e:
             LOG_ERROR(f"在捕获的后台操作中发生异常: {e}")
+        return False
 
     def resume_capture(self):
         """恢复捕获（重新启动C++库捕获）"""
         if not self.is_running:
-            return
+            return False
 
         try:
             if self.capture_manager and self.session_id is not None:
                 # 使用start_capture重新启动捕获
-                result = self.capture_manager.start_capture(self.session_id)
-                if result:  # 布尔值，True表示成功
-                    # 清理缓存，避免使用暂停前的旧帧
-                    self.clear_cache()
+                result = bool(self.capture_manager.start_capture(self.session_id))
+                # capture_start 会重建 duplication，并在 SetupDuplication 中
+                # 原子清空旧帧元数据；此处再 clear 会把刚捕获的首帧作废。
+                if result:
+                    self._frame_rect = None
+                return result
         except Exception as e:
             LOG_ERROR(f"在捕获的后台操作中发生异常: {e}")
+        return False
 
     def clear_cache(self):
         """清理C++层的帧缓存"""
@@ -363,6 +377,10 @@ class NativeGraphicsCaptureManager:
                 self.capture_manager.clear_frame_cache(self.session_id)
             except Exception as e:
                 LOG_ERROR(f"清理C++帧缓存时异常: {e}")
+
+    def get_latest_frame_rect(self) -> Optional[dict]:
+        """Return the virtual-desktop rectangle of ``get_latest_frame()``."""
+        return dict(self._frame_rect) if self._frame_rect else None
 
     def cleanup(self):
         """清理资源"""
@@ -395,24 +413,46 @@ class NativeGraphicsCaptureManager:
             return False
 
         try:
-            # 更新本地配置
+            # 先构造候选值；原生层拒绝时不能让 Python 账本先行漂移。
+            candidate = replace(self.config)
             if "capture_interval_ms" in config_dict:
-                self.config.capture_interval_ms = config_dict["capture_interval_ms"]
+                candidate.capture_interval_ms = config_int(
+                    config_dict["capture_interval_ms"]
+                )
 
             if "enable_region" in config_dict:
-                self.config.enable_region = config_dict["enable_region"]
+                enable_region = config_dict["enable_region"]
+                if type(enable_region) is not bool:
+                    raise ValueError("enable_region 必须是 JSON boolean")
+                candidate.enable_region = enable_region
 
             if "region" in config_dict:
                 region = config_dict["region"]
-                self.config.region_x = region.get("x", 0)
-                self.config.region_y = region.get("y", 0)
-                self.config.region_width = region.get("width", 0)
-                self.config.region_height = region.get("height", 0)
+                if not isinstance(region, dict):
+                    raise ValueError("region 必须是对象")
+                candidate.region_x = config_int(region.get("x", 0))
+                candidate.region_y = config_int(region.get("y", 0))
+                candidate.region_width = config_int(region.get("width", 0))
+                candidate.region_height = config_int(region.get("height", 0))
+
+            native_config = {
+                "capture_interval_ms": candidate.capture_interval_ms,
+                "enable_region": candidate.enable_region,
+                "region": {
+                    "x": candidate.region_x,
+                    "y": candidate.region_y,
+                    "width": candidate.region_width,
+                    "height": candidate.region_height,
+                },
+            }
 
             # 设置到C++库
             success = self.capture_manager.set_capture_config(
-                self.session_id, config_dict
+                self.session_id, native_config
             )
+            if success:
+                self.config = candidate
+                self._frame_rect = None
             return success
 
         except Exception as e:

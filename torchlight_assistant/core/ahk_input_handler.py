@@ -16,6 +16,7 @@ from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
 from torchlight_assistant.config.ahk_config import AHKConfig
 from torchlight_assistant.core.signal_bridge import ahk_signal_bridge # 导入信号桥
 from torchlight_assistant.utils.debug_log import LOG_INFO, LOG, LOG_ERROR
+from torchlight_assistant.utils.config_values import config_int
 
 
 class AHKInputHandler:
@@ -50,6 +51,9 @@ class AHKInputHandler:
         # AHK 传输失效探测(进程活着但命令超时):同样只告警上报一次
         self._ahk_transport_failure_notified = False
         self._signal_connected = False
+        # disconnect() 不会撤销已经排入 Qt 事件队列的调用。生命周期关闭后，
+        # slot 还要靠此门禁拒绝旧实例的迟到事件。
+        self._disposed = False
         self._recent_ahk_event_ids = deque()
         self._recent_ahk_event_id_set = set()
         
@@ -67,13 +71,8 @@ class AHKInputHandler:
         except ConnectionError as e:
             raise RuntimeError(f"无法连接到AHK服务器: {e}")
         
-        # 设置目标窗口
-        if AHKConfig.WINDOW_EXE:
-            target_str = f"ahk_exe {AHKConfig.WINDOW_EXE}"
-            self.command_sender.set_target_window(target_str)
-
         # WM_COPYDATA 原生窗口过程必须尽快返回。READY 初始化包含捕获/OCR/磁盘操作,
-        # 若用同线程直连,AHK 的 50ms SendMessageTimeoutW 会把正常 F8 处理误判为失败。
+        # 若用同线程直连,AHK 的短超时会把正常 F8 处理误判为失败。
         # 显式队列连接把业务处理移到下一轮 Qt 事件循环,同时保持事件 FIFO 顺序。
         ahk_signal_bridge.ahk_event.connect(
             self._on_ahk_event,
@@ -129,6 +128,8 @@ class AHKInputHandler:
 
     def _on_ahk_event(self, event: str):
         """这个方法现在总是在主GUI线程中被调用"""
+        if getattr(self, "_disposed", False):
+            return
         if not self.event_bus:
             return
 
@@ -314,10 +315,8 @@ class AHKInputHandler:
         """设置 AHK 按键发送模式。"""
         return self._check_send(self.command_sender.set_send_mode(mode))
 
-    def click_mouse(self, button: str = "left", hold_time: Optional[float] = None) -> bool:
-        """
-        点击鼠标
-        """
+    def click_mouse(self, button: str = "left") -> bool:
+        """点击鼠标按钮。坐标/按住语义请使用 ``click_mouse_at``。"""
         return self._dispatch_action(
             f"Mouse:{button}",
             lambda: self.command_sender.send_mouse_click(button, priority=2),
@@ -326,10 +325,10 @@ class AHKInputHandler:
     def click_mouse_at(self, x: int, y: int, hold_time: Optional[float] = None) -> bool:
         """点击屏幕指定坐标；hold_time 单位沿用现有调用方约定为毫秒。"""
         try:
-            x_value = int(x)
-            y_value = int(y)
-            hold_ms = 0 if hold_time is None else int(hold_time)
-        except (TypeError, ValueError):
+            x_value = config_int(x)
+            y_value = config_int(y)
+            hold_ms = 0 if hold_time is None else config_int(hold_time)
+        except ValueError:
             LOG_ERROR(
                 f"[AHK输入] 非法坐标点击参数: x={x!r}, y={y!r}, "
                 f"hold_time={hold_time!r}"
@@ -357,7 +356,8 @@ class AHKInputHandler:
     def execute_skill_normal(self, key: str):
         # 🔧 BUG修复: 配置中 Key 字段允许序列(如 "delay50,1,delay100,2"),
         # 之前直接 send_normal 会把整串当作单个按键名 press: 出去导致无效。
-        # 现在检测逗号自动走 send_sequence(AHK 端在 EnqueueAction 入口展开为原子动作)。
+        # 现在检测逗号自动走 send_sequence。AHK 入队时把整条序列保留为一个决策，
+        # 由 ProcessQueue 每 tick 推进一个原子，避免过载裁剪出半截连招。
         if not key:
             return False
         if "," in key:
@@ -463,7 +463,13 @@ class AHKInputHandler:
                 LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
         return self._check_send(self.command_sender.stop_macro(force=True))
 
-    def set_accepting_actions(self, enabled: bool) -> bool:
+    def set_accepting_actions(
+        self,
+        enabled: bool,
+        *,
+        owner: Optional[str] = None,
+        epoch: Optional[int] = None,
+    ) -> bool:
         """运行时闸门。关闸 = AHK 端原子停止屏障。
 
         关闸在 AHK 端同一条消息内完成 清队(-1)+停宏+释放全部持键,并封住所有
@@ -473,12 +479,29 @@ class AHKInputHandler:
         进入 STOPPED/PAUSED 时第一件事就关掉:UnifiedScheduler.stop() 只 join 2 秒,
         超时的在飞回调之后仍可能下发命令,而那时 Python 侧停止流程已经走完。
         """
+        kwargs = {"force": not enabled}
+        # 旧版本的轻量 sender/test double 可能还不接受 owner/epoch；
+        # 无 owner 时保持旧调用形态，不影响已有调用方。
+        if owner is not None or epoch is not None:
+            kwargs.update(owner=owner, epoch=epoch)
         return self._check_send(
-            self.command_sender.set_accepting_actions(
-                enabled,
-                force=not enabled,
-            )
+            self.command_sender.set_accepting_actions(enabled, **kwargs)
         )
+
+    def set_runtime_owner(self, owner: str, epoch: int) -> bool:
+        """关闸期设置 AHK 输入所有者及世代。"""
+        return self._check_send(
+            self.command_sender.set_runtime_owner(owner, epoch)
+        )
+
+    def reset_runtime(self) -> bool:
+        """单条原子 STOPPED 屏障，永不被干跑或传输熔断拦截。"""
+        if self.dry_run_mode and self.debug_display_manager:
+            try:
+                self.debug_display_manager.add_action("RuntimeReset")
+            except Exception as e:
+                LOG_INFO(f"[AHK输入] 添加调试动作失败: {e}")
+        return self._check_send(self.command_sender.reset_runtime())
 
     def arm_main_mode(self) -> bool:
         """开始 READY 两阶段入口；AHK 原子关闸清场后标记主模式 armed。"""
@@ -551,7 +574,7 @@ class AHKInputHandler:
         """设置强制移动白名单(位移技能,如 RButton 闪现)"""
         return self._check_send(self.command_sender.set_force_move_passthrough_keys(keys))
 
-    def set_stationary_mode(self, active: bool, mode_type: str = "shift_modifier") -> bool:
+    def set_stationary_mode(self, active: bool, mode_type: str = "block_mouse") -> bool:
         """设置原地模式状态。"""
         return self._check_send(
             self.command_sender.set_stationary_mode(
@@ -596,6 +619,8 @@ class AHKInputHandler:
         self.stop()
     
     def stop(self):
+        # 必须先置销毁标志再 disconnect；Qt 已经排队的旧 slot 不会因断连消失。
+        self._disposed = True
         self._disconnect_ahk_signal()
         if not self.ahk_process:
             return

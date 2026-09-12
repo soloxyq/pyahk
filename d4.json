@@ -124,11 +124,8 @@
     "global": {
         "sequence_enabled": false,
         "skill_sequence": "1,2,3,4,5,6,7,8",
-        "queue_processor_interval": 35,
         "cooldown_checker_interval": 110,
         "key_press_duration": 10,
-        "mouse_click_duration": 5,
-        "sequence_timer_interval": 1000,
         "capture_interval": 60,
         "window_activation": {
             "enabled": true,
@@ -136,7 +133,7 @@
             "ahk_exe": "Diablo IV.exe"
         },
         "stationary_mode_config": {
-            "hotkey": "xbutton1",
+            "hotkey": "XButton1",
             "mode_type": "shift_modifier"
         },
         "process_history": {

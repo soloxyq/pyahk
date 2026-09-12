@@ -4,11 +4,49 @@
 
 import cv2
 import numpy as np
+import os
 import threading
 import time
-import os
 from typing import Tuple, Optional, Dict, Any
 import pytesseract
+
+from .config_values import config_int
+
+
+DEFAULT_TESSERACT_CONFIG = {
+    "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
+    "lang": "eng",
+    "psm_mode": 7,
+    "char_whitelist": "0123456789/",
+}
+
+
+def normalize_tesseract_config(
+    config: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """返回可比较、可直接构造识别器的 Tesseract 配置。"""
+    supplied = config if isinstance(config, dict) else {}
+    merged = {**DEFAULT_TESSERACT_CONFIG, **supplied}
+    try:
+        psm_mode = config_int(merged.get("psm_mode", 7))
+    except ValueError:
+        psm_mode = 7
+    if not 0 <= psm_mode <= 13:
+        psm_mode = 7
+    return {
+        "tesseract_cmd": str(merged.get("tesseract_cmd", "") or "").strip(),
+        "lang": str(merged.get("lang", "eng") or "eng").strip() or "eng",
+        "psm_mode": psm_mode,
+        "char_whitelist": str(
+            merged.get("char_whitelist", "0123456789/") or "0123456789/"
+        ),
+    }
+
+
+def tesseract_config_signature(config: Optional[Dict[str, Any]] = None) -> tuple:
+    """生成稳定签名，供运行中配置切换判断是否需要重建。"""
+    normalized = normalize_tesseract_config(config)
+    return tuple(normalized[key] for key in DEFAULT_TESSERACT_CONFIG)
 
 
 class TesseractOcrManager:
@@ -16,25 +54,17 @@ class TesseractOcrManager:
     
     def __init__(self, config: Optional[Dict[str, Any]] = None):
         """初始化 Tesseract OCR 管理器"""
-        # 设置默认配置
-        default_config = {
-            'tesseract_cmd': 'D:\\Program Files\\Tesseract-OCR\\tesseract.exe',
-            'lang': 'eng',
-            'psm_mode': 7,
-            'char_whitelist': '0123456789/'
-        }
-        
-        # 合并用户配置和默认配置
-        config = config or {}
-        merged_config = {**default_config, **config}
-        
-        tesseract_cmd = merged_config.get('tesseract_cmd', '')
-        if tesseract_cmd and os.path.exists(tesseract_cmd):
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-        self.lang = merged_config.get('lang', 'eng')
-        psm_mode = merged_config.get('psm_mode', 7)
-        char_whitelist = merged_config.get('char_whitelist', '0123456789/')
-        self.custom_config = f'--psm {psm_mode} -c tessedit_char_whitelist={char_whitelist}'
+        self.config = normalize_tesseract_config(config)
+        configured_cmd = self.config["tesseract_cmd"]
+        # 不让一个无效的新路径继承上一个配置写入 pytesseract 的全局路径。
+        # 路径无效时回退 PATH 中的 tesseract，与 pytesseract 默认语义一致。
+        self.tesseract_cmd = (
+            configured_cmd if configured_cmd and os.path.exists(configured_cmd) else "tesseract"
+        )
+        self.lang = self.config["lang"]
+        psm_mode = self.config["psm_mode"]
+        char_whitelist = self.config["char_whitelist"]
+        self.custom_config = f"--psm {psm_mode} -c tessedit_char_whitelist={char_whitelist}"
         print(f"[TesseractOcrManager] 初始化完成，配置: {self.custom_config}")
     
     def preprocess_image(self, image: np.ndarray) -> np.ndarray:
@@ -64,7 +94,18 @@ class TesseractOcrManager:
             if debug:
                 cv2.imshow("OCR ROI", processed_roi)
                 cv2.waitKey(1)
-            text = pytesseract.image_to_string(processed_roi, lang=self.lang, config=self.custom_config)
+            # pytesseract 把可执行文件路径放在模块级全局变量中。配置热切换后旧识别
+            # 调用仍可能在途，因此必须在同一把锁内按实例设置、调用并恢复，不能让
+            # 两个配置互相借用对方的 executable。
+            with _global_tesseract_lock:
+                previous_cmd = pytesseract.pytesseract.tesseract_cmd
+                pytesseract.pytesseract.tesseract_cmd = self.tesseract_cmd
+                try:
+                    text = pytesseract.image_to_string(
+                        processed_roi, lang=self.lang, config=self.custom_config
+                    )
+                finally:
+                    pytesseract.pytesseract.tesseract_cmd = previous_cmd
             text = text.strip()
             if not text or '/' not in text:
                 return text, -1.0
@@ -86,24 +127,31 @@ class TesseractOcrManager:
 
 
 _global_tesseract_manager: Optional[TesseractOcrManager] = None
-_global_tesseract_lock = threading.Lock()
+_global_tesseract_signature: Optional[tuple] = None
+_global_tesseract_lock = threading.RLock()
 
 def get_tesseract_ocr_manager(config: Optional[Dict[str, Any]] = None) -> TesseractOcrManager:
-    """获取全局实例(线程安全:调度线程与 GUI 线程可能并发首次获取)。
+    """获取与请求配置匹配的全局实例。
 
-    识别本身每次调用都是独立的 tesseract 子进程,天然可并发;
-    这里只需保证单例创建不竞态(check-then-create 双检锁)。
+    显式传入配置时按规范化签名比较；签名变化就在锁内构造替代实例并原子换指针，
+    从而使“加载另一份配置”立即生效。未传配置时保留当前实例，首次调用才用默认值。
     """
-    global _global_tesseract_manager
-    if _global_tesseract_manager is None:
-        with _global_tesseract_lock:
-            if _global_tesseract_manager is None:
-                _global_tesseract_manager = TesseractOcrManager(config)
-    return _global_tesseract_manager
+    global _global_tesseract_manager, _global_tesseract_signature
+    requested_signature = tesseract_config_signature(config)
+    with _global_tesseract_lock:
+        needs_rebuild = _global_tesseract_manager is None
+        if config is not None and requested_signature != _global_tesseract_signature:
+            needs_rebuild = True
+        if needs_rebuild:
+            replacement = TesseractOcrManager(config)
+            _global_tesseract_manager = replacement
+            _global_tesseract_signature = requested_signature
+        return _global_tesseract_manager
 
 def reset_tesseract_ocr_manager():
     """重置全局实例(同样进锁:不进锁会与并发的 get 构成丢失更新 —— get 刚赋值就被置 None,
     下一个 get 再建一个实例并再写一次 pytesseract 全局 cmd 路径)。"""
-    global _global_tesseract_manager
+    global _global_tesseract_manager, _global_tesseract_signature
     with _global_tesseract_lock:
         _global_tesseract_manager = None
+        _global_tesseract_signature = None

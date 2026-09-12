@@ -69,12 +69,14 @@ def test_batch_sender_preserves_numeric_zero():
         state,
         {
             "special_key_resume_delay_ms": 0,
+            "hp_key": "",
+            "mp_key": "",
             "empty": "",
             "missing": None,
         },
     )
     assert len(calls) == 1
-    assert calls[0][1] == "special_key_resume_delay_ms:0"
+    assert calls[0][1] == "special_key_resume_delay_ms:0,hp_key:,mp_key:"
 
 
 def test_ahk_parser_and_gui_range_are_wired():
@@ -114,7 +116,9 @@ def test_key_press_duration_is_sent_clamped_and_used_by_ahk():
     with open(os.path.join(REPO, "hold_server_extended.ahk"), encoding="utf-8") as fp:
         ahk = fp.read()
     assert 'case "key_press_duration":' in ahk
-    assert "Sleep KeyPressDurationMs" in ahk
+    assert "KeyPressDurationMs" in ahk
+    assert "StartTransientPress(" in ahk
+    assert "ReleaseDueTransientPressKeys" in ahk
     assert "Sleep 5" not in ahk
 
     with open(

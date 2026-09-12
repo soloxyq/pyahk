@@ -145,6 +145,16 @@ def test_no_existing_config_still_builds():
     assert out["enabled"] is True
 
 
+def test_invalid_tolerance_input_is_not_replaced_with_live_defaults():
+    for invalid in ("", "True,30,50", "10,,30,50", "180,30,50", "10,30,256"):
+        widgets = _widgets()
+        widgets["tolerance_input"] = _FakeText(invalid)
+        out = ResourceConfigManager.build_resource_config(
+            "hp", widgets, "rectangle", {}, None, existing_config={}
+        )
+        assert tuple(out[key] for key in ("tolerance_h", "tolerance_s", "tolerance_v")) == (None, None, None)
+
+
 def test_other_detection_modes_also_merge():
     """圆形/矩形模式同样从旧配置合并,不该只修 text_ocr 一条路径。"""
     for mode in ("circle", "rectangle"):

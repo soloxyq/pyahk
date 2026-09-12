@@ -11,6 +11,7 @@
 #endif
 
 #include <stdint.h>
+#include <stddef.h>
 
 #ifdef _WIN32
     #include <windows.h>
@@ -52,7 +53,9 @@ typedef struct {
 // Capture configuration structure
 typedef struct {
     int capture_interval_ms;  // Capture interval in milliseconds
-    CaptureRegion region;     // Capture region (0,0,0,0 means full screen)
+    // Virtual-desktop physical-pixel rectangle.  It must be wholly contained
+    // in the selected DXGI output when enable_region is true.
+    CaptureRegion region;
     int enable_region;        // Enable region capture (0=false, 1=true)
 } CaptureConfig;
 
@@ -89,6 +92,9 @@ CAPTURE_LIB_API CaptureError capture_stop(CaptureHandle handle);
 CAPTURE_LIB_API void capture_destroy_session(CaptureHandle handle);
 CAPTURE_LIB_API CaptureError capture_set_config(CaptureHandle handle, const CaptureConfig* config);
 CAPTURE_LIB_API CaptureError capture_get_config(CaptureHandle handle, CaptureConfig* config);
+// Returns the virtual-desktop rectangle represented by frames currently returned
+// from this session. Region coordinates in CaptureConfig use this same space.
+CAPTURE_LIB_API CaptureError capture_get_frame_rect(CaptureHandle handle, CaptureRegion* rect);
 
 // Frame operations
 CAPTURE_LIB_API CaptureFrame* capture_get_frame(CaptureHandle handle);

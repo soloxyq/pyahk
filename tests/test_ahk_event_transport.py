@@ -18,11 +18,14 @@ from unittest import mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from PySide6.QtCore import QCoreApplication, Qt
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication
 
 import torchlight_assistant.core.ahk_input_handler as handler_mod
 import torchlight_assistant.core.macro_engine as macro_mod
 from torchlight_assistant.core.ahk_input_handler import AHKInputHandler
+from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
 from torchlight_assistant.core.macro_engine import MacroEngine
 from torchlight_assistant.core.signal_bridge import SignalBridge
 from torchlight_assistant.core.states import MacroState
@@ -88,6 +91,10 @@ global MainModeF8AwaitRelease := false
 global MAIN_MODE_F8_RELEASE_POLL_MS := 25
 global SimulatedF8PhysicalDown := false
 global PhysicalStopLatched := false
+global RuntimeOwnerStopLatched := false
+global RuntimeOwner := "none"
+global RuntimeOwnerEpoch := 0
+global RuntimeOwnerEpochs := Map("main", 0, "affix", 0, "pathfinding", 0)
 global PythonReliableRetryUntil := 0
 global PythonReliableRetryDelayMs := 100
 global PYTHON_RELIABLE_RETRY_BASE_MS := 100
@@ -211,6 +218,7 @@ ResetAll() {
     global StopBarrierCalls
     global InterceptKeysPressed, F8StopIntentPending, MainModeArmed
     global MainModeF8AwaitRelease, SimulatedF8PhysicalDown, PhysicalStopLatched
+    global RuntimeOwnerStopLatched, RuntimeOwner, RuntimeOwnerEpoch, RuntimeOwnerEpochs
     global ReplacementEventDuringSend
     SetTimer(PollMainModeF8Release, 0)
     FakeNow := 100
@@ -246,6 +254,10 @@ ResetAll() {
     MainModeF8AwaitRelease := false
     SimulatedF8PhysicalDown := false
     PhysicalStopLatched := false
+    RuntimeOwnerStopLatched := false
+    RuntimeOwner := "none"
+    RuntimeOwnerEpoch := 0
+    RuntimeOwnerEpochs := Map("main", 0, "affix", 0, "pathfinding", 0)
     ReplacementEventDuringSend := ""
 }
 EnableScheduledRetrySuccess() {
@@ -659,6 +671,50 @@ FlushPendingPythonReliableEvents()
 Expect("s20-stopped-root-events-stay-fifo", EventsStr(),
     "evt:777:1:intercept_key_down:F7,evt:777:2:intercept_key_down:F8")
 
+; owner 只能在关闸时交接，开闸必须复核同一 owner+epoch。
+ResetAll()
+RuntimeAcceptingActions := false
+Expect("s21-owner-set-while-closed", SetRuntimeOwner("affix:1") ? 1 : 0, 1)
+Expect("s21-owner-opens-matching-gate",
+    SetRuntimeActionGateFromParam("true:affix:1") ? 1 : 0, 1)
+Expect("s21-live-owner-cannot-be-stolen", SetRuntimeOwner("main:2") ? 1 : 0, 0)
+Expect("s21-stale-owner-gate-rejected",
+    SetRuntimeActionGateFromParam("true:affix:0") ? 1 : 0, 0)
+Expect("s21-matching-close", SetRuntimeActionGateFromParam("false:affix:1") ? 1 : 0, 1)
+Expect("s21-new-affix-epoch", SetRuntimeOwner("affix:2") ? 1 : 0, 1)
+Expect("s21-old-affix-epoch-rejected", SetRuntimeOwner("affix:1") ? 1 : 0, 0)
+RuntimeOwner := "none"  ; 模拟 RESET，tombstone 仍必须保留
+Expect("s21-reset-does-not-reaccept-same-epoch", SetRuntimeOwner("affix:2") ? 1 : 0, 0)
+Expect("s21-post-reset-needs-new-epoch", SetRuntimeOwner("affix:3") ? 1 : 0, 1)
+
+; 洗练正在拥有输入闸门时，物理 F7 必须在当地先止血再回发。
+ResetAll()
+RuntimeOwner := "affix"
+RuntimeOwnerEpoch := 7
+RuntimeAcceptingActions := true
+SendSucceeds := true
+HandleInterceptKey("F7")
+Expect("s22-affix-f7-closes-local-gate", RuntimeAcceptingActions ? 1 : 0, 0)
+Expect("s22-affix-f7-latches-owner-stop", RuntimeOwnerStopLatched ? 1 : 0, 1)
+Expect("s22-affix-f7-rejects-reopen", SetRuntimeActionGate(true) ? 1 : 0, 0)
+FlushPendingPythonReliableEvents()
+Expect("s22-affix-f7-remains-reliable", EventsStr(),
+    "evt:777:1:intercept_key_down:F7")
+
+; 寻路同样由永久 F9 当地止血，不能等待 Python GUI/OCR 恢复。
+ResetAll()
+RuntimeOwner := "pathfinding"
+RuntimeOwnerEpoch := 8
+RuntimeAcceptingActions := true
+SendSucceeds := true
+HandleInterceptKey("F9")
+Expect("s23-path-f9-closes-local-gate", RuntimeAcceptingActions ? 1 : 0, 0)
+Expect("s23-path-f9-latches-owner-stop", RuntimeOwnerStopLatched ? 1 : 0, 1)
+Expect("s23-path-f9-rejects-reopen", SetRuntimeActionGate(true) ? 1 : 0, 0)
+FlushPendingPythonReliableEvents()
+Expect("s23-path-f9-remains-reliable", EventsStr(),
+    "evt:777:1:intercept_key_down:F9")
+
 report := "CHECKS=" Checks "`nRESULT=" (Failures.Length ? "FAIL" : "OK") "`n"
 for index, failure in Failures {
     report .= "FAIL " failure "`n"
@@ -698,9 +754,13 @@ def _build_harness():
         _extract_function(lines, "HandleMonitorKey"),
         _extract_function(lines, "HandleMonitorKeyUp"),
         _extract_function(lines, "ReconcileForceMoveState"),
+        _extract_function(lines, "SetRuntimeOwner"),
+        _extract_function(lines, "RuntimeOwnerMatches"),
+        _extract_function(lines, "SetRuntimeActionGateFromParam"),
         _extract_function(lines, "ArmMainMode"),
         _extract_function(lines, "PollMainModeF8Release"),
         _extract_function(lines, "LatchPhysicalStop"),
+        _extract_function(lines, "LatchRuntimeOwnerStop"),
         _extract_function(lines, "SetRuntimeActionGate"),
         _extract_function(lines, "SendPress"),
         _extract_function(lines, "IsWheelKey"),
@@ -773,15 +833,93 @@ def test_macro_uses_a_poll_budget_not_an_implicit_step_interval():
     assert "Sleep" not in macro_tick
 
 
-def test_key_press_duration_reaches_ahk_send_direct():
+def test_key_press_duration_reaches_non_blocking_ahk_press_ledger():
     with open(AHK_SCRIPT, encoding="utf-8") as fp:
         src = fp.read()
         lines = src.splitlines()
     batch = _extract_function(lines, "UpdateBatchConfig")
-    send_direct = _extract_function(lines, "SendDirect")
+    start_press = _extract_function(lines, "StartTransientPress")
+    release_due = _extract_function(lines, "ReleaseDueTransientPressKeys")
+    clear_queue = _extract_function(lines, "ClearQueue")
+    on_exit = _extract_function(lines, "AhkOnExitHandler")
     assert 'case "key_press_duration"' in batch
     assert "KeyPressDurationMs := Min(Max(Integer(value), 1), 1000)" in batch
-    assert "Sleep KeyPressDurationMs" in send_direct
+    assert "MonotonicMs() + KeyPressDurationMs" in start_press
+    assert "TrackTransientPressKey(" in start_press
+    assert "Sleep" not in start_press
+    assert "SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)" in release_due
+    assert "ReleaseAllTransientPressKeys(false)" in clear_queue
+    assert "ReleaseAllTransientPressKeys(false)" in on_exit
+
+
+def test_stationary_mode_protocol_rejects_unknown_activation_and_allows_clear():
+    with open(AHK_SCRIPT, encoding="utf-8") as fp:
+        src = fp.read()
+        lines = src.splitlines()
+
+    helper = _extract_function(lines, "IsSupportedStationaryMode")
+    assert 'normalized = "shift_modifier" || normalized = "block_mouse"' in helper
+
+    command_case = re.search(
+        r"case CMD_SET_STATIONARY:(.*?)case CMD_SET_FORCE_MOVE_KEY:", src, re.S
+    )
+    assert command_case
+    body = command_case.group(1)
+    assert "nextActive && !IsSupportedStationaryMode(nextModeType)" in body
+    assert "return AHK_RESULT_REJECTED" in body
+    assert 'StationaryModeType := nextActive ? nextModeType : ""' in body
+
+    batch = _extract_function(lines, "UpdateBatchConfig")
+    assert 'case "stationary_type"' in batch
+    assert (
+        'StationaryModeType := IsSupportedStationaryMode(normalizedMode) '
+        '? normalizedMode : ""'
+    ) in batch.replace("\n", " ")
+
+
+def test_reset_runtime_is_one_atomic_command_and_sender_forces_only_that_send():
+    with open(AHK_SCRIPT, encoding="utf-8") as fp:
+        src = fp.read()
+        lines = src.splitlines()
+
+    reset = _extract_function(lines, "ResetRuntime")
+    assert reset.index("RuntimeAcceptingActions := false") < reset.index(
+        "ClearQueue(-1)"
+    ) < reset.index("ClearAllConfigurableHooks(true)")
+    assert 'RuntimeOwner := "none"' in reset
+    assert "RuntimeOwnerStopLatched := false" in reset
+    assert "Sleep" not in reset
+    reset_case = re.search(
+        r"case CMD_RESET_RUNTIME:(.*?)case CMD_SET_RUNTIME_OWNER:", src, re.S
+    )
+    assert reset_case and "ResetRuntime() ? 1 : AHK_RESULT_REJECTED" in reset_case.group(1)
+
+    sender = object.__new__(AHKCommandSender)
+    sender._send = mock.Mock(return_value=True)
+    assert sender.reset_runtime() is True
+    from torchlight_assistant.config.ahk_commands import CMD_RESET_RUNTIME
+
+    sender._send.assert_called_once_with(CMD_RESET_RUNTIME, "", force=True)
+
+
+def test_runtime_owner_wrapper_validates_and_encodes_generation():
+    sender = object.__new__(AHKCommandSender)
+    sender._send = mock.Mock(return_value=True)
+    from torchlight_assistant.config.ahk_commands import (
+        CMD_SET_ACCEPTING_ACTIONS,
+        CMD_SET_RUNTIME_OWNER,
+    )
+
+    assert sender.set_runtime_owner("AFFIX", 7) is True
+    sender._send.assert_called_with(CMD_SET_RUNTIME_OWNER, "affix:7")
+    assert sender.set_accepting_actions(True, owner="affix", epoch=7) is True
+    sender._send.assert_called_with(
+        CMD_SET_ACCEPTING_ACTIONS, "true:affix:7", force=False
+    )
+    with pytest.raises(ValueError):
+        sender.set_runtime_owner("unknown", 1)
+    with pytest.raises(ValueError):
+        sender.set_accepting_actions(True, owner="affix")
 
 
 def test_coordinate_click_action_is_validated_and_non_blocking():
@@ -795,10 +933,55 @@ def test_coordinate_click_action_is_validated_and_non_blocking():
     assert "values.Length != 3" in parser
     assert all(f"SysGet({metric})" in parser for metric in (76, 77, 78, 79))
     assert "MAX_MOUSE_CLICK_HOLD_MS" in parser
-    assert "ClickMouseAtOnce(x, y)" in execute
+    assert "target := TargetWin" in execute
+    assert "IsPointInsideTargetClient(target, x, y)" in execute
+    assert "ClickMouseAtOnce(x, y, target)" in execute
+    assert "PressMouseAt(x, y, target)" in execute
     assert "MarkManagedHoldTarget(\"LButton\")" in execute
     assert 'PushFrontWait(priority, ACTION_RELEASE ":LButton", holdMs)' in execute
     assert not re.search(r"^\s*Sleep\b", execute, re.M)
+
+    target_guard = _extract_function(lines, "IsPointInsideTargetClient")
+    assert 'if (target = "")' in target_guard
+    assert "hwnd := WinActive(target)" in target_guard
+    assert 'WinGetClientPos(&clientX, &clientY, &clientWidth, &clientHeight,' in target_guard
+    assert '"ahk_id " hwnd' in target_guard
+    assert "clientWidth > 0 && clientHeight > 0" in target_guard
+    assert "x >= clientX && x < clientX + clientWidth" in target_guard
+    assert "y >= clientY && y < clientY + clientHeight" in target_guard
+    assert "catch" in target_guard and "return false" in target_guard
+
+    click_once = _extract_function(lines, "ClickMouseAtOnce")
+    press_at = _extract_function(lines, "PressMouseAt")
+    assert "IsPointInsideTargetClient(target, x, y)" in click_once
+    assert "IsPointInsideTargetClient(target, x, y)" in press_at
+    assert 'SendDown("LButton", true, target)' in press_at
+
+
+def test_direct_input_is_suspended_and_released_when_target_loses_foreground():
+    with open(AHK_SCRIPT, encoding="utf-8") as fp:
+        lines = fp.read().splitlines()
+
+    safety = _extract_function(lines, "RefreshDirectTargetSafety")
+    process = _extract_function(lines, "ProcessQueue")
+    macro_tick = _extract_function(lines, "MacroTick")
+    start_press = _extract_function(lines, "StartTransientPress")
+    send_down = _extract_function(lines, "SendDown")
+    mouse_click = _extract_function(lines, "ExecuteMouseClick")
+
+    assert "SendKeyMode = \"direct\"" in safety
+    assert "TargetWin != \"\"" in safety
+    assert "ReleaseAllTransientPressKeys(false)" in safety
+    assert "AbortMacroRuntime()" in safety
+    assert "ReleaseAllManagedHoldTargets()" in safety
+    assert "ReleaseAllSkillHoldKeys(false)" in safety
+    assert "ReconcileSkillHoldKeys()" in safety
+    assert "RefreshDirectTargetSafety()" in process
+    assert "RefreshDirectTargetSafety()" in macro_tick
+    assert "CanEmitDirectInput(target)" in start_press
+    assert 'targetForDirect := directTarget != "" ? directTarget : TargetWin' in send_down
+    assert "CanEmitDirectInput(targetForDirect)" in send_down
+    assert "CanEmitDirectInput(TargetWin)" in mouse_click
 
 
 def test_wm_copydata_cleanup_never_sends_reverse_events_inline():
@@ -819,11 +1002,8 @@ def test_python_event_receiver_is_connected_with_queued_delivery():
     state._start_ahk_server = lambda: True
     connect = mock.Mock()
     fake_bridge = SimpleNamespace(ahk_event=SimpleNamespace(connect=connect))
-    fake_sender = SimpleNamespace(set_target_window=lambda target: True)
-
     with mock.patch.object(handler_mod, "ahk_signal_bridge", fake_bridge), \
-         mock.patch.object(handler_mod, "AHKCommandSender", return_value=fake_sender), \
-         mock.patch.object(handler_mod.AHKConfig, "WINDOW_EXE", ""):
+         mock.patch.object(handler_mod, "AHKCommandSender"):
         AHKInputHandler._init_ahk_system(state)
 
     connect.assert_called_once()
@@ -897,7 +1077,10 @@ def test_input_handler_stop_disconnects_global_signal_once():
 
 
 def test_queued_delivery_defers_plain_python_receiver_until_event_loop():
-    app = QCoreApplication.instance() or QCoreApplication([])
+    # 测试套件随后会创建 QWidget；先创建 QCoreApplication 会留下无法升级为
+    # QApplication 的进程单例，使联跑在首个 GUI 用例处被 Qt 直接终止。
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    app = QApplication.instance() or QApplication([])
     received = []
 
     class Receiver:
@@ -916,7 +1099,6 @@ def test_queued_delivery_defers_plain_python_receiver_until_event_loop():
 def test_stopped_state_resets_python_transient_input_flags():
     state = object.__new__(MacroEngine)
     drops = []
-    stationary = []
     state._force_move_active = True
     state._stationary_mode_active = True
     state._prepared_mode = "combat"
@@ -925,15 +1107,12 @@ def test_stopped_state_resets_python_transient_input_flags():
         "stationary_mode_config": {"mode_type": "block_mouse"},
     }
     state.input_handler = SimpleNamespace(
-        set_accepting_actions=lambda enabled: True,
-        set_stationary_mode=lambda active, mode: stationary.append((active, mode)),
+        reset_runtime=lambda: True,
         set_drop_non_emergency=drops.append,
-        clear_queue=lambda: True,
-        clear_all_configurable_hooks=lambda: True,
         dry_run_mode=False,
         set_dry_run_mode=lambda enabled: None,
     )
-    state.skill_manager = SimpleNamespace(stop=lambda: None)
+    state.skill_manager = SimpleNamespace(stop=lambda **kwargs: None)
     state.pathfinding_manager = SimpleNamespace(stop=lambda: None)
     state.resource_manager = SimpleNamespace(stop=lambda: None)
     state.border_manager = SimpleNamespace(stop=lambda: None)
@@ -944,7 +1123,6 @@ def test_stopped_state_resets_python_transient_input_flags():
 
     assert state._force_move_active is False
     assert state._stationary_mode_active is False
-    assert stationary == [(False, "block_mouse")]
     assert drops == [False]
 
 
@@ -989,22 +1167,19 @@ def test_force_move_activation_is_gated_by_runtime_accepting_actions():
     assert "ReconcileForceMoveState()" in block
     assert not re.search(r"ForceMoveActive\s*:=", block)
 
-    accepting = re.search(
-        r"case CMD_SET_ACCEPTING_ACTIONS:(.*?)\n\s*case CMD_SHUTDOWN:", src, re.S
-    )
     force_key = re.search(
         r"case CMD_SET_FORCE_MOVE_KEY:(.*?)\n\s*case CMD_SET_FORCE_MOVE_STATE:",
         src,
         re.S,
     )
     gate = _extract_function(src.splitlines(), "SetRuntimeActionGate")
-    assert accepting and re.search(
-        r"return SetRuntimeActionGate\(param = \"true\"\)\s*\?\s*1\s*:\s*AHK_RESULT_REJECTED",
-        accepting.group(1),
+    accepting = re.search(
+        r"case CMD_SET_ACCEPTING_ACTIONS:(.*?)\n\s*case CMD_SHUTDOWN:", src, re.S
     )
+    assert accepting and "SetRuntimeActionGateFromParam(param)" in accepting.group(1)
     assert "ReconcileForceMoveState()" in gate
     assert "ClearQueue(-1)" in gate
-    assert "accepting && PhysicalStopLatched" in gate
+    assert "accepting && (PhysicalStopLatched || RuntimeOwnerStopLatched)" in gate
     assert force_key and "ReconcileForceMoveState()" in force_key.group(1)
 
 

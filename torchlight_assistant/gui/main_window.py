@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """主窗口类 - 从main.py拆分出来的核心UI类"""
 
+import copy
 import os
 from PySide6.QtWidgets import (
     QMainWindow,
@@ -105,10 +106,9 @@ class GameSkillConfigUI(QMainWindow):
         self.osd_status_window = OSDStatusWindow(parent=self)
         self.debug_osd_window = DebugOsdWindow() # 实例化DebugOsdWindow，不设父级，使其独立
 
-        # 现在DEBUG OSD窗口已经创建，可以连接事件订阅
-        if self.debug_osd_window:
-            event_bus.subscribe("debug_osd_show", self.debug_osd_window.show)
-            event_bus.subscribe("debug_osd_hide", self.debug_osd_window.hide)
+        # DebugOsdWindow 自己订阅 show/hide 并通过 QTimer 切回 GUI 线程。
+        # 这里不能再直连 QWidget.show/hide：重复订阅既会执行两次，也可能让来自
+        # 工作线程的同步 EventBus 回调直接操作 Qt 控件。
 
     def _create_tab_widget(self):
         self.tab_widget = QTabWidget()
@@ -175,10 +175,12 @@ class GameSkillConfigUI(QMainWindow):
         event_bus.subscribe("ocr:init_failed", self._on_ocr_init_failed)
         # AHK 每秒推送的队列观测(实时深度 + 累计丢弃),RUNNING/PAUSED 时挂到 OSD
         event_bus.subscribe("stats", self._on_queue_stats)
-        # DEBUG OSD窗口的事件订阅已移到_create_widgets方法中处理
+        # DEBUG OSD 窗口在自身构造/cleanup 中对称管理订阅。
 
     def _setup_hotkeys(self):
         event_bus.subscribe("hotkey:f8_system_toggle", self._toggle_visibility_and_macro)
+        event_bus.subscribe("hotkey:f7_system_toggle", self._sync_and_toggle_affix)
+        event_bus.subscribe("hotkey:f9_system_toggle", self._sync_and_toggle_pathfinding)
 
     def _load_initial_config_to_ui(self):
         if self.top_controls:
@@ -314,9 +316,13 @@ class GameSkillConfigUI(QMainWindow):
                 if can_toggle
                 else "运行中不可切换 DEBUG/干跑,请先按 F8 停止。"
             )
-            engine_debug = bool(
-                self.macro_engine._global_config.get("debug_mode", {}).get("enabled", False)
+            raw_debug_config = self.macro_engine._global_config.get(
+                "debug_mode", {}
             )
+            debug_config = (
+                raw_debug_config if isinstance(raw_debug_config, dict) else {}
+            )
+            engine_debug = debug_config.get("enabled") is True
             if cb.isChecked() != engine_debug:
                 cb.blockSignals(True)
                 cb.setChecked(engine_debug)
@@ -357,12 +363,16 @@ class GameSkillConfigUI(QMainWindow):
         LOG_INFO(f"[UI] 接收到 engine:config_updated 事件。skills_config: {skills_config}")
         LOG_INFO(f"[UI] global_config: {global_config}")
         if self._updating_ui: return
+        skills_config = skills_config if isinstance(skills_config, dict) else {}
+        global_config = global_config if isinstance(global_config, dict) else {}
         self._skills_config = skills_config
         self._global_config = global_config
         self.sound_manager.update_config(global_config)
 
         # 更新DEBUG MODE复选框状态
-        debug_mode_enabled = global_config.get("debug_mode", {}).get("enabled", False)
+        raw_debug_config = global_config.get("debug_mode", {})
+        debug_config = raw_debug_config if isinstance(raw_debug_config, dict) else {}
+        debug_mode_enabled = debug_config.get("enabled") is True
         if self.top_controls and hasattr(self.top_controls, 'debug_mode_checkbox'):
             self.top_controls.debug_mode_checkbox.setChecked(debug_mode_enabled)
             LOG_INFO(f"[UI] DEBUG MODE复选框状态已更新为: {debug_mode_enabled}")
@@ -387,7 +397,14 @@ class GameSkillConfigUI(QMainWindow):
                 osd_text, osd_color = f"错误: {error_message}", "red"
             elif is_running:
                 state_map = {"idle": "准备中...", "初始界面": "初始界面\n准备点击附魔...", "词缀选择": "词缀选择\n正在查找目标...", "确认/关闭": "确认/关闭\n准备开始下一轮...", "未知": "未知状态\n尝试恢复..."}
-                targets = self._global_config.get("affix_reroll", {}).get("target_affixes", [])
+                raw_affix_config = self._global_config.get("affix_reroll", {})
+                affix_config = raw_affix_config if isinstance(raw_affix_config, dict) else {}
+                raw_targets = affix_config.get("target_affixes", [])
+                targets = (
+                    [str(target) for target in raw_targets]
+                    if isinstance(raw_targets, list)
+                    else []
+                )
                 base_text = state_map.get(current_state, "未知状态")
                 if current_state == "词缀选择" and targets:
                     display_targets = ", ".join(targets)
@@ -503,7 +520,7 @@ class GameSkillConfigUI(QMainWindow):
             if self.skill_config:
                 LOG_INFO("[UI] 刷新 SkillConfigWidget...")
                 self.skill_config.update_from_config(self._skills_config, self._global_config)
-                is_sequence = self._global_config.get("sequence_enabled", False)
+                is_sequence = self._global_config.get("sequence_enabled") is True
                 self._on_mode_selection_changed("序列" if is_sequence else "技能")
                 LOG_INFO("[UI] SkillConfigWidget 刷新完成。")
         finally:
@@ -542,6 +559,41 @@ class GameSkillConfigUI(QMainWindow):
 
             QTimer.singleShot(0, _show_config_error)
 
+    def _sync_and_toggle_affix(self):
+        """F7 启动前提交当前控件值；停止由引擎直接处理。"""
+        self._publish_synced_mode_request(
+            "ui:sync_and_toggle_affix_requested", "F7"
+        )
+
+    def _sync_and_toggle_pathfinding(self):
+        """F9 准备寻路前提交当前控件值；停止由引擎直接处理。"""
+        self._publish_synced_mode_request(
+            "ui:sync_and_toggle_pathfinding_requested", "F9"
+        )
+
+    def _publish_synced_mode_request(self, event_name: str, hotkey: str):
+        try:
+            full_config = self._gather_current_config_from_ui()
+            event_bus.publish(event_name, full_config)
+        except Exception as e:
+            LOG_ERROR(f"[UI] {hotkey} 同步当前配置失败,已取消启动: {e}")
+            if getattr(self, "_config_error_dialog_pending", False):
+                return
+            self._config_error_dialog_pending = True
+            err = str(e)
+
+            def _show_config_error():
+                try:
+                    QMessageBox.critical(
+                        self,
+                        "配置错误",
+                        f"无法应用当前配置，未执行 {hotkey} 启动：{err}",
+                    )
+                finally:
+                    self._config_error_dialog_pending = False
+
+            QTimer.singleShot(0, _show_config_error)
+
     def _on_mode_selection_changed(self, text: str):
         if self.skill_config:
             is_sequence_mode = text == "序列"
@@ -569,7 +621,9 @@ class GameSkillConfigUI(QMainWindow):
             LOG_ERROR(f"[UI] 设置DEBUG MODE失败: {e}")
 
     def _gather_current_config_from_ui(self) -> Dict[str, Any]:
-        global_config = {}
+        # 从已加载配置的深拷贝开始，再由 UI 拥有的字段覆盖。这样没有对应控件的
+        # 扩展字段不会在“按 F8 同步”或保存时被静默抹掉。
+        global_config = copy.deepcopy(self._global_config)
         if self.top_controls: global_config.update(self.top_controls.get_config())
         if self.timing_settings: global_config.update(self.timing_settings.get_config())
         if self.window_activation: global_config.update(self.window_activation.get_config())
@@ -577,7 +631,29 @@ class GameSkillConfigUI(QMainWindow):
         if self.affix_reroll: global_config.update(self.affix_reroll.get_config())
         if self.pathfinding_settings: global_config.update(self.pathfinding_settings.get_config())
         if self.resource_management: global_config.update(self.resource_management.get_config())
+        # ResourceManagementWidget 只负责 HP/MP 子配置；检测周期在“时间间隔”页。
+        # 后者必须最后覆盖 resource widget 的兼容默认值 200ms，否则用户填写的
+        # resource_check_interval 永远不会进入运行时 resource_management.check_interval。
+        if self.timing_settings:
+            timing_config = self.timing_settings.get_config()
+            resource_config = global_config.get("resource_management")
+            if not isinstance(resource_config, dict):
+                resource_config = {}
+                global_config["resource_management"] = resource_config
+            resource_config["check_interval"] = timing_config.get(
+                "resource_check_interval", 200
+            )
         if self.priority_keys_widget: global_config["priority_keys"] = self.priority_keys_widget.get_config()
+        # 前两项从未驱动运行时；后三项只是 TimingSettingsWidget 的内部/旧版
+        # 兼容别名，持久化权威均已写入 resource_management，避免双数据源漂移。
+        for legacy_key in (
+            "queue_processor_interval",
+            "mouse_click_duration",
+            "hp_cooldown",
+            "mp_cooldown",
+            "resource_check_interval",
+        ):
+            global_config.pop(legacy_key, None)
         skills_config = self.skill_config.get_config() if self.skill_config else {}
         if hasattr(self.skill_config, "get_macro_steps"):
             steps = self.skill_config.get_macro_steps()
@@ -585,10 +661,15 @@ class GameSkillConfigUI(QMainWindow):
             # 仅全 press/delay 时回写旧 CSV(降级/可读),含 down/up 则为空,macro_steps 为权威
             global_config["skill_sequence"] = steps_to_legacy_sequence(steps)
         # 保留不在UI中编辑的配置段
-        global_config["process_history"] = self._global_config.get("process_history", {})
+        global_config["process_history"] = copy.deepcopy(
+            self._global_config.get("process_history", {})
+        )
         
         # tesseract_ocr 配置：如果为空则使用默认值
-        tesseract_config = self._global_config.get("tesseract_ocr", {})
+        raw_tesseract_config = self._global_config.get("tesseract_ocr", {})
+        tesseract_config = (
+            raw_tesseract_config if isinstance(raw_tesseract_config, dict) else {}
+        )
         if not tesseract_config:
             tesseract_config = {
                 "tesseract_cmd": "D:\\Program Files\\Tesseract-OCR\\tesseract.exe",
@@ -596,7 +677,7 @@ class GameSkillConfigUI(QMainWindow):
                 "psm_mode": 7,
                 "char_whitelist": "0123456789/"
             }
-        global_config["tesseract_ocr"] = tesseract_config
+        global_config["tesseract_ocr"] = copy.deepcopy(tesseract_config)
         
         return {"skills": skills_config, "global": global_config}
 
@@ -686,7 +767,9 @@ class GameSkillConfigUI(QMainWindow):
                     current_text = combo.currentText()
                     combo.clear()
                     combo.addItems(unique_processes)
-                    if current_text in unique_processes:
+                    if current_text and current_text not in unique_processes:
+                        combo.addItem(current_text)
+                    if current_text:
                         combo.setCurrentText(current_text)
         except Exception as e:
             LOG_ERROR(f"[UI] 刷新进程列表时出错: {e}")
@@ -698,6 +781,8 @@ class GameSkillConfigUI(QMainWindow):
 
     def _on_process_selection_changed(self, process_name: str):
         """处理进程选择变化，并自动获取窗口类名"""
+        if self._updating_ui:
+            return
         if self.window_activation and hasattr(self.window_activation, "widgets"):
             status_label = self.window_activation.widgets.get("status_label")
             class_input = self.window_activation.widgets.get("class")
@@ -716,11 +801,15 @@ class GameSkillConfigUI(QMainWindow):
                         status_label.setText(f"已选择进程: {process_name} (类名: {class_name})")
                         LOG_INFO(f"[窗口激活] 自动获取窗口类名: {process_name} -> {class_name}")
                     else:
-                        class_input.setText("（未找到对应窗口）")
+                        # 状态提示不得写进配置输入框；否则下一次保存会把这段中文
+                        # 当作真实 ahk_class，下次 READY 永远找不到目标窗口。
+                        class_input.setText("")
+                        status_label.setText(f"未找到进程 {process_name} 对应的窗口")
                         LOG_INFO(f"[窗口激活] 未找到进程 {process_name} 对应的窗口类名")
                 except Exception as e:
                     LOG_ERROR(f"[窗口激活] 获取窗口类名时出错: {e}")
-                    class_input.setText("（获取类名时出错）")
+                    class_input.setText("")
+                    status_label.setText(f"读取 {process_name} 窗口类名失败")
             else:
                 status_label.setText("当前未设置窗口激活")
                 status_label.setStyleSheet("color: gray; font-size: 8pt;")

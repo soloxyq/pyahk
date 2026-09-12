@@ -5,6 +5,7 @@ AHK命令发送器
 
 import threading
 import time
+from typing import Optional
 
 from hold_client import (
     send_ahk_cmd_ex,
@@ -18,9 +19,11 @@ from torchlight_assistant.config.ahk_commands import (
     CMD_HOOK_REGISTER, CMD_HOOK_UNREGISTER,
     CMD_SET_SEND_MODE,
     CMD_SET_MACRO_STEPS, CMD_START_MACRO, CMD_STOP_MACRO,
+    CMD_RESET_RUNTIME, CMD_SET_RUNTIME_OWNER,
     get_command_name
 )
 from torchlight_assistant.utils.debug_log import LOG_INFO, LOG_ERROR
+from torchlight_assistant.utils.config_values import config_int
 
 
 class AHKCommandSender:
@@ -41,7 +44,7 @@ class AHKCommandSender:
     def __init__(self, window_title: str = "HoldServer_Window_UniqueName_12345"):
         self.window_title = window_title
         self._stationary_mode_active = False
-        self._stationary_mode_type = "shift_modifier"
+        self._stationary_mode_type = ""
         # 失败类型必须按发送线程保存。GUI 与调度线程可能同时发命令,若共用一个字段,
         # 线程 A 超时后会被线程 B 的成功结果覆盖,_check_send 就漏报真正的挂死。
         self._send_state = threading.local()
@@ -197,18 +200,25 @@ class AHKCommandSender:
     def set_stationary_mode(
         self,
         active: bool,
-        mode_type: str = "shift_modifier",
+        mode_type: str = "block_mouse",
         *,
         force: bool = False,
-    ):
+    ) -> bool:
         """设置原地模式状态；关闭方向可作为停机安全命令强制发送。"""
-        self._stationary_mode_active = active
-        self._stationary_mode_type = mode_type
-        
+        normalized_mode = str(mode_type or "").strip().lower()
+        if active and normalized_mode not in {"shift_modifier", "block_mouse"}:
+            LOG_ERROR(f"【AHKCommandSender】拒绝非法原地模式: {mode_type!r}")
+            return False
+
         # 发送命令到AHK
         from torchlight_assistant.config.ahk_commands import CMD_SET_STATIONARY
-        param = f"{'true' if active else 'false'}:{mode_type}"
-        return self._send(CMD_SET_STATIONARY, param, force=force)
+        param = f"{'true' if active else 'false'}:{normalized_mode}"
+        if not self._send(CMD_SET_STATIONARY, param, force=force):
+            return False
+        # 本地镜像只能在 AHK 明确接受后提交，避免发送失败后两端账本分叉。
+        self._stationary_mode_active = bool(active)
+        self._stationary_mode_type = normalized_mode if active else ""
+        return True
     
     def set_force_move_key(self, key: str):
         """设置强制移动键"""
@@ -230,12 +240,19 @@ class AHKCommandSender:
         """设置强制移动期间不被替换的白名单键(位移技能,如 RButton 闪现)
 
         Args:
-            keys: 键名列表(可迭代),AHK 端会小写化匹配,空列表/None 清空白名单
+            keys: 字符串列表；AHK 端会小写化匹配，空列表/None 清空白名单
         """
         from torchlight_assistant.config.ahk_commands import (
             CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS,
         )
-        param = ",".join(str(k).strip() for k in (keys or []) if str(k).strip())
+        if keys is None:
+            keys = []
+        if not isinstance(keys, (list, tuple)) or not all(
+            isinstance(key, str) for key in keys
+        ):
+            LOG_ERROR("【AHKCommandSender】强制移动白名单必须是字符串列表")
+            return False
+        param = ",".join(key.strip() for key in keys if key.strip())
         return self._send(CMD_SET_FORCE_MOVE_PASSTHROUGH_KEYS, param)
     
     def clear_all_configurable_hooks(self, *, force: bool = False) -> bool:
@@ -263,10 +280,13 @@ class AHKCommandSender:
         try:
             # 构建参数字符串： "hp_key:1,mp_key:2,stationary_type:shift_modifier"
             config_items = []
+            clearable_empty_fields = {"hp_key", "mp_key", "stationary_type"}
             for key, value in config_dict.items():
-                # 数值 0 是有效配置(例如 special_key_resume_delay_ms=0 用于清除
-                # 上一个配置的保护窗口),不能按 falsy 丢掉。None/空字符串才表示未配置。
-                if value is not None and value != "":
+                # 数值 0 和 HP/MP 空键都是有效值；其他空字符串沿用旧协议的
+                # “不更新”，避免意外扩展出 AHK 不认识的清空语义。
+                if value is not None and (
+                    value != "" or key in clearable_empty_fields
+                ):
                     config_items.append(f"{key}:{value}")
             
             if not config_items:
@@ -310,8 +330,8 @@ class AHKCommandSender:
             stype = step.get("type")
             if stype == "delay":
                 try:
-                    data = str(max(int(step.get("ms", 0)), 0))
-                except (TypeError, ValueError):
+                    data = str(max(config_int(step.get("ms", 0)), 0))
+                except (TypeError, ValueError, OverflowError):
                     continue
             elif stype in ("down", "up", "press"):
                 data = str(step.get("key", "")).strip()
@@ -421,7 +441,14 @@ class AHKCommandSender:
             force=force,
         )
 
-    def set_accepting_actions(self, enabled: bool, *, force: bool = False) -> bool:
+    def set_accepting_actions(
+        self,
+        enabled: bool,
+        *,
+        force: bool = False,
+        owner: Optional[str] = None,
+        epoch: Optional[int] = None,
+    ) -> bool:
         """运行时闸门。关闸 = AHK 端原子停止屏障(清场+封住所有输入生产路径)。
 
         用于"按了 F8/Z 之后绝不再有键打进游戏":Python 侧 join 调度线程只等 2 秒,
@@ -431,11 +458,43 @@ class AHKCommandSender:
         """
         from torchlight_assistant.config.ahk_commands import CMD_SET_ACCEPTING_ACTIONS
 
+        if (owner is None) != (epoch is None):
+            raise ValueError("owner 与 epoch 必须同时提供")
+        param = "true" if enabled else "false"
+        if owner is not None:
+            normalized_owner = str(owner).strip().lower()
+            if normalized_owner not in {"none", "main", "affix", "pathfinding"}:
+                raise ValueError(f"无效运行时 owner: {owner!r}")
+            normalized_epoch = int(epoch)
+            if normalized_epoch < 0:
+                raise ValueError("runtime owner epoch 不能为负数")
+            param = f"{param}:{normalized_owner}:{normalized_epoch}"
+        return self._send(CMD_SET_ACCEPTING_ACTIONS, param, force=force)
+
+    def set_runtime_owner(self, owner: str, epoch: int) -> bool:
+        """在关闸期交接 AHK 输入所有权。
+
+        同一 owner 的 epoch 必须单调不减；所有者切换只能在闸门关闭时完成。
+        打开闸门时应把同一 owner/epoch 传给 set_accepting_actions 再复核一次。
+        """
+        normalized_owner = str(owner).strip().lower()
+        if normalized_owner not in {"none", "main", "affix", "pathfinding"}:
+            raise ValueError(f"无效运行时 owner: {owner!r}")
+        normalized_epoch = int(epoch)
+        if normalized_epoch < 0:
+            raise ValueError("runtime owner epoch 不能为负数")
         return self._send(
-            CMD_SET_ACCEPTING_ACTIONS,
-            "true" if enabled else "false",
-            force=force,
+            CMD_SET_RUNTIME_OWNER,
+            f"{normalized_owner}:{normalized_epoch}",
         )
+
+    def reset_runtime(self) -> bool:
+        """单条原子 STOPPED 屏障，并强制绕过传输熔断。
+
+        AHK 在同一次 WM_COPYDATA 内关闸、清队、停宏、释放全部持键并
+        注销动态 Hook，避免 STOPPED 串行等待多个 500ms。
+        """
+        return self._send(CMD_RESET_RUNTIME, "", force=True)
 
     def arm_main_mode(self) -> bool:
         """声明主状态机进入 READY；AHK 先原子关闸清场，再设置 armed 标记。"""

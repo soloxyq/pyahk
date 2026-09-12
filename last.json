@@ -123,11 +123,8 @@
     },
     "global": {
         "sequence_enabled": false,
-        "queue_processor_interval": 50,
         "key_press_duration": 10,
-        "mouse_click_duration": 5,
         "cooldown_checker_interval": 100,
-        "sequence_timer_interval": 1000,
         "capture_interval": 40,
         "sound_feedback_enabled": true,
         "window_activation": {
@@ -151,7 +148,6 @@
             "close_button_coord": null
         },
         "pathfinding_config": {
-            "hotkey": "f9",
             "minimap_area": [
                 0,
                 0,

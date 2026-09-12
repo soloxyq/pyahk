@@ -8,7 +8,7 @@ import sys
 import tempfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -17,6 +17,7 @@ import torchlight_assistant.gui.main_window as main_window_module
 from torchlight_assistant.core.config_manager import ConfigManager
 from torchlight_assistant.core.macro_engine import MacroEngine
 from torchlight_assistant.core.states import MacroState
+from torchlight_assistant.gui.basic_widgets import TimingSettingsWidget
 from torchlight_assistant.gui.main_window import GameSkillConfigUI
 
 
@@ -39,6 +40,16 @@ def _valid_config():
             "skill_sequence": "",
         },
     }
+
+
+def test_non_object_app_state_is_ignored(tmp_path):
+    engine = MacroEngine.__new__(MacroEngine)
+    state_file = tmp_path / ".pyahk_state.json"
+    engine.APP_STATE_FILE = state_file
+
+    for value in ([], None, "default.json"):
+        state_file.write_text(json.dumps(value), encoding="utf-8")
+        assert engine._load_last_config_file() == ""
 
 
 def test_physical_f8_requests_ui_config_sync():
@@ -73,6 +84,44 @@ def test_physical_f8_stop_does_not_depend_on_ui():
     assert calls == [None]
 
 
+def test_physical_f7_f9_start_request_current_ui_snapshot():
+    engine = MacroEngine.__new__(MacroEngine)
+    engine._state = MacroState.STOPPED
+    engine.affix_reroll_manager = SimpleNamespace(
+        status=SimpleNamespace(is_running=False)
+    )
+    engine._on_f7_key_press = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("F7 启动不得绕过 GUI")
+    )
+    engine._on_f9_key_press = lambda *_args: (_ for _ in ()).throw(
+        AssertionError("F9 启动不得绕过 GUI")
+    )
+    published = []
+
+    with patch.object(
+        macro_engine_module.event_bus,
+        "publish",
+        side_effect=lambda name, *args, **kwargs: published.append(name),
+    ):
+        engine._handle_ahk_intercept_key("F7")
+        engine._handle_ahk_intercept_key("F9")
+
+    assert published == ["hotkey:f7_system_toggle", "hotkey:f9_system_toggle"]
+
+
+def test_physical_f7_stop_does_not_gather_ui_config():
+    engine = MacroEngine.__new__(MacroEngine)
+    engine._state = MacroState.STOPPED
+    engine.affix_reroll_manager = SimpleNamespace(
+        status=SimpleNamespace(is_running=True)
+    )
+    engine._on_f7_key_press = Mock()
+    with patch.object(macro_engine_module.event_bus, "publish") as publish:
+        engine._handle_ahk_intercept_key("F7")
+    publish.assert_not_called()
+    engine._on_f7_key_press.assert_called_once_with()
+
+
 def test_ui_f8_bridge_publishes_current_widget_config():
     full_config = _valid_config()
     ui = SimpleNamespace(
@@ -92,6 +141,31 @@ def test_ui_f8_bridge_publishes_current_widget_config():
 
     assert published == [
         ("ui:sync_and_toggle_state_requested", (full_config,), {})
+    ]
+
+
+def test_ui_f7_f9_bridges_publish_current_widget_config():
+    full_config = _valid_config()
+    ui = SimpleNamespace(_gather_current_config_from_ui=lambda: full_config)
+    published = []
+
+    with patch.object(
+        main_window_module.event_bus,
+        "publish",
+        side_effect=lambda name, *args, **kwargs: published.append(
+            (name, args, kwargs)
+        ),
+    ):
+        GameSkillConfigUI._publish_synced_mode_request(
+            ui, "ui:sync_and_toggle_affix_requested", "F7"
+        )
+        GameSkillConfigUI._publish_synced_mode_request(
+            ui, "ui:sync_and_toggle_pathfinding_requested", "F9"
+        )
+
+    assert published == [
+        ("ui:sync_and_toggle_affix_requested", (full_config,), {}),
+        ("ui:sync_and_toggle_pathfinding_requested", (full_config,), {}),
     ]
 
 
@@ -117,6 +191,145 @@ def test_ui_stop_does_not_gather_config():
     assert published == [
         ("ui:sync_and_toggle_state_requested", (None,), {})
     ]
+
+
+def test_ui_gather_preserves_unknown_global_fields_and_wires_resource_interval():
+    timing = SimpleNamespace(
+        get_config=lambda: {
+            "key_press_duration": 10,
+            "hp_cooldown": 1111,
+            "mp_cooldown": 2222,
+            "resource_check_interval": 333,
+        }
+    )
+    ui = SimpleNamespace(
+        _global_config={
+            "future_extension": {"keep": True},
+            "process_history": {"items": ["game.exe"]},
+            "tesseract_ocr": {"future": {"models": ["eng"]}},
+            "queue_processor_interval": 50,
+            "mouse_click_duration": 5,
+        },
+        top_controls=None,
+        timing_settings=timing,
+        window_activation=None,
+        stationary_mode=None,
+        affix_reroll=None,
+        pathfinding_settings=None,
+        resource_management=SimpleNamespace(
+            get_config=lambda: {
+                "resource_management": {
+                    "hp_config": {"cooldown": 1111},
+                    "mp_config": {"cooldown": 2222},
+                    "check_interval": 200,
+                }
+            }
+        ),
+        priority_keys_widget=None,
+        skill_config=None,
+    )
+
+    result = GameSkillConfigUI._gather_current_config_from_ui(ui)
+
+    assert result["global"]["future_extension"] == {"keep": True}
+    assert result["global"]["resource_management"]["check_interval"] == 333
+    assert result["global"]["resource_management"]["hp_config"]["cooldown"] == 1111
+    assert result["global"]["resource_management"]["mp_config"]["cooldown"] == 2222
+    assert "queue_processor_interval" not in result["global"]
+    assert "mouse_click_duration" not in result["global"]
+    assert "hp_cooldown" not in result["global"]
+    assert "mp_cooldown" not in result["global"]
+    assert "resource_check_interval" not in result["global"]
+    result["global"]["process_history"]["items"].append("other.exe")
+    result["global"]["tesseract_ocr"]["future"]["models"].append("chi_sim")
+    assert ui._global_config["process_history"]["items"] == ["game.exe"]
+    assert ui._global_config["tesseract_ocr"]["future"]["models"] == ["eng"]
+
+
+def test_timing_widget_loads_canonical_nested_resource_timings():
+    class Box:
+        def __init__(self):
+            self.value = None
+
+        def setValue(self, value):
+            self.value = value
+
+    widget = SimpleNamespace(
+        timing_spinboxes={
+            name: Box()
+            for name in (
+                "key_press",
+                "cooldown_checker",
+                "capture_interval",
+                "special_key_resume_delay",
+                "hp_cooldown",
+                "mp_cooldown",
+                "resource_check_interval",
+            )
+        },
+        sound_feedback_checkbox=None,
+    )
+
+    TimingSettingsWidget.update_from_config(
+        widget,
+        {
+            "resource_management": {
+                "check_interval": 333,
+                "hp_config": {"cooldown": 1111},
+                "mp_config": {"cooldown": 2222},
+            }
+        }
+    )
+
+    assert widget.timing_spinboxes["hp_cooldown"].value == 1111
+    assert widget.timing_spinboxes["mp_cooldown"].value == 2222
+    assert widget.timing_spinboxes["resource_check_interval"].value == 333
+
+
+def test_timing_widget_prefers_canonical_nested_values_and_sanitizes_bad_input():
+    from torchlight_assistant.gui.basic_widgets import TimingSettingsWidget
+
+    class Box:
+        def setValue(self, value):
+            self.value = value
+
+    checkbox = SimpleNamespace(setChecked=lambda value: setattr(checkbox, "value", value))
+    widget = SimpleNamespace(
+        timing_spinboxes={
+            name: Box()
+            for name in (
+                "key_press",
+                "cooldown_checker",
+                "capture_interval",
+                "special_key_resume_delay",
+                "hp_cooldown",
+                "mp_cooldown",
+                "resource_check_interval",
+            )
+        },
+        sound_feedback_checkbox=checkbox,
+    )
+
+    TimingSettingsWidget.update_from_config(
+        widget,
+        {
+            "key_press_duration": float("nan"),
+            "capture_interval": None,
+            "sound_feedback_enabled": "false",
+            "hp_cooldown": 9999,
+            "resource_check_interval": 9999,
+            "resource_management": {
+                "check_interval": 321,
+                "hp_config": {"cooldown": 1234},
+            },
+        },
+    )
+
+    assert widget.timing_spinboxes["key_press"].value == 10
+    assert widget.timing_spinboxes["capture_interval"].value == 40
+    assert widget.timing_spinboxes["hp_cooldown"].value == 1234
+    assert widget.timing_spinboxes["resource_check_interval"].value == 321
+    assert checkbox.value is False
 
 
 def test_ui_f8_gather_failure_defers_dialog_and_dedupes():
@@ -302,6 +515,32 @@ def test_config_manager_rejects_broken_and_non_object_json():
             assert "顶层必须是 JSON 对象" in str(e)
         else:
             raise AssertionError("顶层非对象 JSON 必须拒绝")
+
+
+def test_config_manager_rejects_non_finite_numbers_on_load_and_save():
+    manager = ConfigManager()
+    with tempfile.TemporaryDirectory(prefix="pyahk_finite_") as tmpdir:
+        root = Path(tmpdir)
+        for index, text in enumerate(("{\"x\": NaN}", "{\"x\": 1e309}")):
+            source = root / f"bad_{index}.json"
+            source.write_text(text, encoding="utf-8")
+            try:
+                manager.load_config(str(source))
+            except ValueError as exc:
+                assert "非有限" in str(exc)
+            else:
+                raise AssertionError("非有限 JSON 数值必须拒绝")
+
+        destination = root / "saved.json"
+        destination.write_text('{"old": true}', encoding="utf-8")
+        try:
+            manager.save_config({"global": {"interval": float("inf")}}, destination)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("保存不得输出 Infinity")
+        assert destination.read_text(encoding="utf-8") == '{"old": true}'
+        assert not destination.with_name("saved.json.tmp").exists()
 
 
 def test_load_commits_runtime_config_only_after_validation_success():

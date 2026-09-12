@@ -241,6 +241,14 @@ class FakeZeroCopyCapture:
         self.calls += 1
         return self.buffer  # 视图语义:后续捕获会原地覆写
 
+    def get_latest_frame_rect(self):
+        return {
+            "x": 0,
+            "y": 0,
+            "width": self.buffer.shape[1],
+            "height": self.buffer.shape[0],
+        }
+
     def cleanup(self):
         self.cleaned = True
 
@@ -339,6 +347,23 @@ def test_pause_capture_invalidates_snapshot():
     again = bfm.get_current_frame()
     assert again is not first
     assert again[0, 0, 0] == 55, "恢复后仍命中暂停前的快照"
+
+
+def test_resume_capture_failure_keeps_border_manager_paused():
+    bfm = _make_bfm()
+    bfm.paused = True
+    bfm.graphics_capture.resume_capture = lambda: False
+
+    assert bfm.resume_capture() is False
+    assert bfm.paused is True
+
+
+def test_pause_capture_failure_does_not_publish_false_paused_state():
+    bfm = _make_bfm()
+    bfm.graphics_capture.pause_capture = lambda: False
+
+    assert bfm.pause_capture() is False
+    assert bfm.paused is False
 
 
 def test_reuse_window_follows_configured_interval():

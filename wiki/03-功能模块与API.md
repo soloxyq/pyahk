@@ -52,14 +52,14 @@ class MacroEngine:
     def toggle_pause_resume(self) -> bool: ...           # RUNNING ↔ PAUSED
     def load_config(self, config_file: str) -> bool: ...
     def save_full_config(self, file_path: str, full_config: dict) -> bool: ...
-    def set_debug_mode(self, enabled: bool): ...
+    def set_debug_mode(self, enabled: bool) -> bool: ...
     def cleanup(self): ...                               # 退出时分层清理
 ```
 
 **事件订阅**(在 `_setup_primary_hotkey()` 与 `_setup_event_subscriptions()`):
 - `intercept_key_down` → `_handle_ahk_intercept_key`(STOPPED 下的 F8 先转给 GUI 采集当前配置;停止路径直接处理;其余分发 F7/F9/Z/原地模式键/BOSS 模式键)
 - `ui:sync_and_toggle_state_requested` → `_handle_f8_press(full_config)`
-- `ui:load_config_requested` → 严格验证后提交;发布 `engine:config_load_result`
+- `ui:load_config_requested` → JSON 解析 + 顶层/`skills`/`global` 最小结构校验后提交;发布 `engine:config_load_result`
 - `ui:save_full_config_requested` → 原子保存;成功后发布 `engine:config_updated` 与 `engine:config_save_result`
 - `special_key_pause` → 启用/关闭 `set_drop_non_emergency`
 - `managed_key_down` → `clear_non_emergency_queue`(不暂停调度器,避免 HP/MP 检测停摆)
@@ -82,12 +82,14 @@ class SkillManager:
                  resource_manager=None, debug_display_manager=None): ...
 
     def start(self): ...
-    def stop(self): ...
+    def stop(self, *, cleanup_input: bool = True): ...
     def pause(self): ...
     def resume(self): ...
 
     def update_all_configs(self, skills_config: dict): ...
     def update_global_config(self, global_config: dict): ...
+    def _apply_config_update(self, skills_config: dict,
+                             global_config: dict): ...    # 双配置最终状态事务
 
     # 调度器回调
     def execute_timed_skill(self, skill_name: str): ...
@@ -107,6 +109,14 @@ class SkillManager:
 
 **hold 模式技能**(`TriggerMode=2`):Python 用 `set_skill_hold_keys()` 下发完整期望集合,AHK 独占维护实际持键账本并做差量同步。`start/resume` 声明完整集合,`pause/stop` 声明空集合;按下顺序稳定为鼠标键优先,同类内部按配置顺序。
 
+**配置热更新事务**:`engine:config_updated` 携带的 skills/global 会作为一个最终状态一起应用。事务期间旧调度回调在实际发键前退出；AHK 只收到最终模式需要的持键或宏状态，调度任务在输入提交成功后才变更。例如“技能模式 A 持键 → 宏模式且新配置含 B 持键”只会释放旧集合并启动宏，不会短暂按下 B。任何输入同步失败都会先关闭 AHK 运行时闸门，再等待 Python 调度线程退出并请求状态机回退 STOPPED。
+
+技能检测携带配置世代令牌：即使图像检测阻塞到热更新完成、事务门重新开放后才返回，
+旧结果仍不得发送旧 Key/AltKey 或写入新配置的连续性历史。检测在锁外执行，
+令牌核对与历史追加/有界发送在短临界区完成；不能只靠布尔“正在更新”标志。
+
+上层已成功执行 AHK 单条原子 `reset_runtime` 时，调用 `stop(cleanup_input=False)` 只停止并等待 Python 调度生产者，不再重复发送空持键和 `stop_macro`；独立调用 `stop()` 默认仍执行完整输入清理。
+
 **BOSS 模式**:`BossOnly=true` 的定时/冷却技能在 BOSS 模式关闭时跳过;按住型不参与 BOSS 模式,GUI 和配置归一化会禁用该组合。
 
 **通用宏模式**:`sequence_enabled=true` 时,定时/冷却任务不注册,AHK 端 `MacroTick` 循环执行 `macro_steps`;Python 调度器只保留资源检测任务。
@@ -121,13 +131,10 @@ HP/MP 自动药剂。被动调用,不持有线程,被 `SkillManager.check_resour
 class ResourceManager:
     def __init__(self, border_manager, input_handler, debug_display_manager=None): ...
 
-    def update_config(self, resource_config: dict): ...
+    def update_config(self, resource_config: dict,
+                      tesseract_config: Optional[dict] = None): ...
     def check_and_execute_resources(self, cached_frame=None) -> bool:
         """检查并按阈值触发药剂(被动调用)"""
-
-    def get_current_resource_percentage(self, resource_type: str,
-                                        cached_frame=None) -> float:
-        """OSD 显示用,返回当前 HP/MP 百分比 0-100"""
 
     def capture_template_hsv(self, frame): ...           # F8 进 READY 时截模板
     def auto_detect_orbs(self, orb_type: str) -> dict:   # 自动检测圆形血/魔球
@@ -136,10 +143,19 @@ class ResourceManager:
 
 **3 种检测模式**(`hp_config["detection_mode"]`):
 - `rectangle`(默认): HSV 模板匹配,**0.3ms**,推荐
-- `circle`: 圆形蒙版 + HSV 匹配,~5ms
-- `text_ocr`: 数字 OCR,3 种引擎(`template`/`keras`/`tesseract`),25-241ms
+- `circle`: 圆形蒙版 + HSV 匹配；历史运行估计 ~5ms，当前基准脚本未覆盖
+- `text_ocr`: 数字 OCR,4 种引擎(`paddle`/`template`/`keras`/`tesseract`)；
+  当前 478 次历史基准只覆盖后三种，Paddle 的 CPU/GPU 数值是运行估计
+
+所有矩形区域均采用虚拟桌面绝对物理像素的半开区间
+`(x1, y1, x2, y2)`。原点 `0` 与左/上副屏的负坐标都合法；缺字段、零面积，
+或换算到当前捕获 output 后越界的区域视为本轮检测无效，不会触发药剂。
 
 **冷却保护**:`_flask_cooldowns` 用 `time.monotonic()`(2025 修复,避免系统校时影响)。
+只有 HP/MP 紧急命令成功提交给 AHK 后才记录内部冷却；传输失败或业务拒绝不会制造“实际没喝药、却等待完整冷却”的假状态。
+
+Tesseract 配置以当前 `global.tesseract_ocr` 为唯一来源。配置签名改变时会先构造新实例、
+成功后再原子替换；在途识别可安全使用旧的不可变实例，不会混用两份配置。
 
 ---
 
@@ -163,7 +179,7 @@ class AHKInputHandler:
     # 通用按键
     def send_key(self, key_str: str) -> bool:
         """支持单键 'q' 或序列 'delay50,q,delay100,w'"""
-    def click_mouse(self, button="left", hold_time=None) -> bool: ...
+    def click_mouse(self, button: str = "left") -> bool: ...
     def set_skill_hold_keys(self, keys) -> bool: ...          # 声明 TriggerMode=2 的完整期望持键集合
 
     # 队列管理
@@ -192,10 +208,24 @@ class AHKInputHandler:
     # 坐标点击复用 AHK 动作队列；hold_time>0 时非阻塞按住并保证清理时补 key-up
     def click_mouse_at(self, x: int, y: int, hold_time=None) -> bool: ...
 
-    def cleanup(self) / stop(): ...                      # 终止 AHK 进程
+    # 运行时闸门/所有权
+    def set_accepting_actions(self, enabled: bool, owner=None, epoch=None) -> bool: ...
+    def set_runtime_owner(self, owner: str, epoch: int) -> bool: ...
+    def reset_runtime(self) -> bool: ...
+
+    def cleanup(self) / stop(): ...                      # 断开事件入口并终止 AHK 进程
 ```
 
-`dry_run_mode=True` 时不真发按键,只记录到 `debug_display_manager`(用于调参)。
+事件桥使用 `Qt.QueuedConnection`，因此 `disconnect()` 本身不会撤销已经排队的 slot。`stop/cleanup` 会先设置 disposed 门禁，迟到的旧实例事件在进入 EventBus 前被丢弃。
+
+`direct` 模式写入系统全局输入流：配置了目标选择器后，每个新 down/press/坐标点击
+都会复核目标仍在前台，切走时还会释放已在飞的全局键；目标留空才保留“向当前前台”
+的兼容语义。`control` 模式的键盘输入使用 `ControlSend`，鼠标按钮使用 `ControlClick`，
+均沿 down 时的目标与发送方式配对释放，可在后台投递；**屏幕坐标点击始终是全局输入**，
+即使配置了 `control` 也要求明确目标且目标当前在前台，坐标必须位于
+该前台 HWND 当前客户区的半开边界内。动作入队后若窗口移动或缩放，执行时会重新校验。
+
+`dry_run_mode=True` 时，普通动作、非空持键声明和宏启动只记录到 `debug_display_manager`；空持键声明、停宏、关闸、清队、重置运行时等**安全清理命令仍会真实下发**，否则从真实运行切到干跑时可能留下卡键或后台宏。
 
 **TriggerMode=2 声明式持键语义**:
 - Python 不镜像“实际按住了什么”,只发送完整期望集合;AHK 端按 LIFO 释放多余键、按配置顺序补按缺失键
@@ -220,6 +250,8 @@ class AHKCommandSender:
     def send_key(self, key: str, priority: int = 2) -> bool: ...
     def send_sequence(self, sequence: str, priority: int = 2) -> bool: ...
     def send_mouse_click(self, button: str = "left", priority: int = 2) -> bool: ...
+    def send_mouse_click_at(self, x: int, y: int, hold_ms: int = 0,
+                            priority: int = 2) -> bool: ...
     def set_skill_hold_keys(self, keys) -> bool: ...
 
     # 语义化便捷方法
@@ -234,7 +266,7 @@ class AHKCommandSender:
     def clear_all_configurable_hooks(self) -> bool: ...
 
     # 队列控制
-    def pause(self) -> bool / resume(self) -> bool: ...
+    def pause(self) -> bool / resume(self) -> bool: ...   # 旧 CMD_PAUSE/RESUME 兼容接口
     def clear_queue(self, priority: int = -1) -> bool:
         """-1=全部, -2=非紧急, 0-3=单优先级"""
 
@@ -242,7 +274,7 @@ class AHKCommandSender:
     def set_target_window(self, target: str) -> bool: ...     # "ahk_exe game.exe"
     def activate_window(self) -> bool: ...
     def set_send_mode(self, mode: str) -> bool: ...           # "direct"/"control"
-    def set_stationary_mode(self, active: bool, mode_type: str): ...
+    def set_stationary_mode(self, active: bool, mode_type: str) -> bool: ...  # 仅接受 shift_modifier/block_mouse 激活
     def set_force_move_key(self, key: str): ...
     def set_force_move_state(self, active: bool): ...
     def set_force_move_replacement_key(self, key: str): ...
@@ -256,6 +288,11 @@ class AHKCommandSender:
     def set_macro_steps(self, steps) -> bool: ...
     def start_macro(self) -> bool: ...
     def stop_macro(self) -> bool: ...
+
+    # 原子 STOPPED 屏障与跨模式所有权
+    def set_accepting_actions(self, enabled: bool, *, owner=None, epoch=None) -> bool: ...
+    def set_runtime_owner(self, owner: str, epoch: int) -> bool: ...
+    def reset_runtime(self) -> bool: ...
 ```
 
 ---
@@ -344,6 +381,23 @@ class UnifiedScheduler:
 
 `SkillManager` 注册的任务:`timed_skill_{name}` / `cooldown_checker` / `resource_checker`。宏模式不注册 `sequence_scheduler`;步骤循环在 AHK 端 `MacroTick` 内执行。
 
+每次 `start()` 都创建私有 generation/stop token。`stop()` 等待 callback 最多 2 秒;
+若第三方 callback 尚未返回,调度器会 fail-closed 拒绝新一代启动。旧 callback 返回后
+worker 才清理世代并允许重启,且不能借下一代的运行状态继续取任务。任务出队后、调用
+callback 前还会再次验证世代。
+
+### PathfindingManager `core/pathfinding_manager.py`
+
+固定的永久根热键 F9（不是配置字段）启动该模式的独立寻路 worker。每次运行拥有私有 stop/pause token;捕获、OpenCV 和 A*
+等可能阻塞的步骤返回后都会复核 generation,实际点击也与最后一次世代检查线性化。
+
+移动坐标不假设 1920×1080:每次从 `BorderFrameManager` 的目标 HWND 解析客户区,
+由客户区中心沿移动方向最多偏移 150px。目标不是当前前台窗口、HWND/客户区无效或
+计算点越界时直接跳过点击,避免物理鼠标落到其他应用。寻路必须配置
+`window_activation.ahk_class` / `ahk_exe` 至少一个明确目标；`enabled`
+仍只决定是否主动激活窗口。未配置目标时 F9 的 READY 事务直接失败；
+运行期目标离开前台则 fail-closed 跳过点击。
+
 ---
 
 ### ConfigManager `core/config_manager.py`
@@ -387,18 +441,19 @@ class BorderFrameManager:
     def prepare_border(self, skills_config, resource_config=None): ...
     def start_capture_loop(self, interval_ms: int = 40, capture_region=None): ...
     def stop() / pause_capture() / resume_capture(): ...
+    def cleanup(): ...                                  # stop + 解除配置订阅
 
     def get_current_frame(self) -> Optional[np.ndarray]:
-        """返回 BGR(A) numpy 数组. None 表示捕获未就绪"""
+        """返回只读 BGRA numpy 快照. None 表示捕获未就绪"""
     def get_region_from_frame(self, frame, x, y, w, h) -> Optional[np.ndarray]: ...
     def capture_target_window_frame(self) -> Optional[np.ndarray]: ...
 
     # HSV 检测
     def compare_cooldown_image(self, frame, x, y, skill_name, size,
-                               threshold=0.95) -> Optional[float]:
+                               threshold=0.7) -> Optional[float]:
         """技能冷却匹配度 0-100, None 表示检测失败/无模板"""
     def compare_resource_circle(self, frame, cx, cy, r, resource_type,
-                                threshold=0.0, color_config=None) -> float: ...
+                                threshold=0.0, color_config=None) -> Optional[float]: ...
     def _compare_resource_hsv(self, frame, x, y, w, h, resource_name,
                               threshold) -> Optional[float]: ...
 
@@ -425,6 +480,7 @@ class NativeGraphicsCaptureManager:
     def start_capture(self) -> bool / stop_capture(): ...
     def pause_capture() / resume_capture(): ...
     def get_latest_frame(self) -> Optional[np.ndarray]: ...
+    def get_latest_frame_rect(self) -> Optional[dict]: ...  # 虚拟桌面绝对 x/y/w/h
     def capture_single_frame(self) -> Optional[np.ndarray]: ...
     def set_capture_config(self, config_dict: dict) -> bool: ...
     def cleanup(): ...
@@ -435,10 +491,13 @@ class CaptureConfig:
     target_window_handle: Optional[int] = None
     capture_monitor: bool = False
     monitor_index: int = 0
+    frame_callback: Optional[Callable] = None
     capture_interval_ms: int = 60
     enable_region: bool = False
     region_x/y/width/height: int = 0
 ```
+
+`region_x/y` 与检测配置均为虚拟桌面物理像素绝对坐标；`get_latest_frame_rect()` 给出最新帧的同一坐标系矩形。窗口捕获会随 HWND 跨 output 重建 DXGI duplication，`monitor_index` 则是全部 DXGI outputs 的零基序号。
 
 ---
 
@@ -485,7 +544,9 @@ class CaptureConfig:
 
 ## 跨模块约定
 
-1. **不直接调 manager 之间的方法**,通过 `event_bus.publish/subscribe` 解耦
+1. **事件广播与生命周期调用分层**:状态/配置通知通过 `event_bus.publish/subscribe`
+   解耦；`MacroEngine` 作为所有者可直接调 manager 的 start/stop/pause/resume，
+   `SkillManager` 也会同步调用其 `ResourceManager`。
 2. **配置变更**统一发 `engine:config_updated`(skills_config, global_config)
 3. **状态变更**发 `engine:state_changed`(new_state, old_state)
 4. **Qt UI 更新**必须从主线程,跨线程要走 `QTimer.singleShot(0, ...)` 或 SignalBridge

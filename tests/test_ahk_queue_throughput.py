@@ -113,6 +113,13 @@ def _extract_function(src_lines, name):
 _STUBS = r"""
 #Requires AutoHotkey v2.0
 #SingleInstance Off
+#Warn All, StdOut
+
+OnError(ReportHarnessError)
+ReportHarnessError(err, mode) {
+    FileAppend(err.Message "`n" err.Stack "`n", "**")
+    ExitApp(1)
+}
 
 global ResultFile := A_Args.Length >= 1 ? A_Args[1] : (A_ScriptDir "\out.txt")
 
@@ -163,6 +170,14 @@ global ExecLog := []            ; ["<action>@<tick>", ...]
 global CurrentTick := 0
 
 ; ---- 桩:物理发键换成记录,持键账本已由 test_ahk_hold_ledger 覆盖 ----
+; 目标窗口/临时 press 账本由 test_ahk_transient_press 覆盖；本测试只计量队列。
+RefreshDirectTargetSafety() {
+    return true
+}
+ReleaseAllTransientPressKeys(reconcile := true) {
+}
+ReleaseAllPersistentPressKeys() {
+}
 SendPress(key, forceMoveBypass := false) {
     global ExecLog, CurrentTick
     ExecLog.Push("press:" key "@" CurrentTick)
@@ -860,7 +875,7 @@ def _build_and_run():
         fp.write(script)
 
     proc = subprocess.run(
-        [AHK_EXE, script_path, out_path],
+        [AHK_EXE, "/ErrorStdOut", script_path, out_path],
         capture_output=True, text=True, timeout=180,
     )
     if not os.path.isfile(out_path):
@@ -965,7 +980,7 @@ def _measure_timer_period():
     out_path = os.path.join(tmpdir, "timer.txt")
     with open(script_path, "w", encoding="utf-8") as fp:
         fp.write(_TIMER_PROBE)
-    subprocess.run([AHK_EXE, script_path, out_path],
+    subprocess.run([AHK_EXE, "/ErrorStdOut", script_path, out_path],
                    capture_output=True, text=True, timeout=60)
     vals = {}
     with open(out_path, "r", encoding="utf-8-sig") as fp:

@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt, QRect, Signal as QSignal
 from PySide6.QtGui import QPainter, QPen, QColor, QCursor
+from copy import deepcopy
 from typing import Dict, Any, Optional
 from ..utils.debug_log import LOG_INFO, LOG
 
@@ -41,6 +42,7 @@ class ResourceManagementWidget(QWidget):
         self.hp_widgets = {}
         self.mp_widgets = {}
         self.main_window = None  # 引用主窗口，用于隐藏/显示
+        self._resource_config_snapshot: Dict[str, Any] = {}
 
         # 检测模式跟踪
         self.hp_detection_mode = "rectangle"  # "rectangle" 或 "circle"
@@ -141,7 +143,8 @@ class ResourceManagementWidget(QWidget):
 
         # 启用开关
         enabled_checkbox = ConfigCheckBox(f"启用{title.split('(')[0].strip()}")
-        enabled_checkbox.setChecked(True)
+        # 缺失配置必须 fail-closed。update_from_config 会显式加载已有值。
+        enabled_checkbox.setChecked(False)
         layout.addWidget(enabled_checkbox)
 
         # 基础配置
@@ -472,15 +475,15 @@ class ResourceManagementWidget(QWidget):
         tools_buttons_layout.addStretch()
         tools_layout.addLayout(tools_buttons_layout)
 
-        # 多颜色配置工具
-        colors_group = QGroupBox("多颜色配置")
+        # 取色结果仅用于辅助调节各资源的 tolerance_*；不是独立检测规则。
+        colors_group = QGroupBox("取色参考（不参与运行时判定）")
         colors_group.setStyleSheet("QGroupBox { font-weight: bold; color: #666; }")
         colors_layout = QVBoxLayout(colors_group)
         colors_layout.setContentsMargins(8, 12, 8, 8)
 
         # 颜色配置说明
         colors_info = QLabel(
-            "工具用途: 显示取色工具获取的颜色，每行一个颜色 H,S,V (OpenCV格式)"
+            "工具用途: 临时显示取色结果（每行 H,S,V）；真正运行参数是上方各资源的容差"
         )
         colors_info.setStyleSheet("color: #666; font-size: 10pt; font-style: italic;")
         colors_layout.addWidget(colors_info)
@@ -611,12 +614,14 @@ class ResourceManagementWidget(QWidget):
                 self._on_region_selected(prefix, x1, y1, x2, y2)
                 if selected_mode == "text_ocr":
                     screenshot_array = dialog.get_screenshot_array()
+                    desktop_origin = dialog._desktop_origin
                     from PySide6.QtCore import QTimer
 
                     QTimer.singleShot(
                         0,
                         lambda: self._calibrate_ocr_region_from_selection(
-                            prefix, screenshot_array, (x1, y1, x2, y2)
+                            prefix, screenshot_array, (x1, y1, x2, y2),
+                            desktop_origin,
                         ),
                     )
             
@@ -648,19 +653,49 @@ class ResourceManagementWidget(QWidget):
         min_score = 0.70
         try:
             if self.main_window and hasattr(self.main_window, "_global_config"):
-                resource_config = (
-                    self.main_window._global_config
-                    .get("resource_management", {})
-                    .get(f"{prefix}_config", {})
+                global_config = self.main_window._global_config
+                raw_resource_management = (
+                    global_config.get("resource_management", {})
+                    if isinstance(global_config, dict)
+                    else {}
                 )
-                model_name = resource_config.get("ocr_model", model_name)
-                device = resource_config.get("ocr_device", device)
-                min_score = float(resource_config.get("match_threshold", min_score))
+                resource_management = (
+                    raw_resource_management
+                    if isinstance(raw_resource_management, dict)
+                    else {}
+                )
+                raw_resource_config = resource_management.get(
+                    f"{prefix}_config", {}
+                )
+                resource_config = (
+                    raw_resource_config
+                    if isinstance(raw_resource_config, dict)
+                    else {}
+                )
+                model_name = str(resource_config.get("ocr_model", model_name) or model_name)
+                device = str(resource_config.get("ocr_device", device) or device)
+                candidate_score = float(
+                    resource_config.get("match_threshold", min_score)
+                )
+                if 0.0 <= candidate_score <= 1.0:
+                    min_score = candidate_score
         except Exception as e:
             LOG_INFO(f"[OCR框选] 读取OCR配置失败，使用默认值: {e}")
         return model_name, device, min_score
 
-    def _calibrate_ocr_region_from_selection(self, prefix: str, screenshot_array, rough_box):
+    def _get_current_tesseract_config(self) -> Dict[str, Any]:
+        """读取当前已加载/正在编辑配置，绝不回退去读取 default.json。"""
+        try:
+            if self.main_window and hasattr(self.main_window, "_global_config"):
+                config = self.main_window._global_config.get("tesseract_ocr", {})
+                return dict(config) if isinstance(config, dict) else {}
+        except Exception as e:
+            LOG_INFO(f"[Tesseract测试] 读取当前配置失败，使用内置默认值: {e}")
+        return {}
+
+    def _calibrate_ocr_region_from_selection(
+        self, prefix: str, screenshot_array, rough_box, desktop_origin=(0, 0)
+    ):
         """用 full OCR 将用户粗框自动收紧到合法的 当前/最大 文本行。"""
         widgets = self.hp_widgets if prefix == "hp" else self.mp_widgets
         coord_input = widgets.get("coord_input")
@@ -685,6 +720,10 @@ class ResourceManagementWidget(QWidget):
             return
 
         _model_name, device, min_score = self._get_ocr_runtime_options(prefix)
+        # 框选信号是虚拟桌面坐标，OCR 裁剪使用单屏截图的局部坐标。
+        origin_x, origin_y = desktop_origin
+        x1, y1, x2, y2 = rough_box
+        local_box = (x1 - origin_x, y1 - origin_y, x2 - origin_x, y2 - origin_y)
         try:
             QApplication.setOverrideCursor(Qt.WaitCursor)
             from ..utils.paddle_ocr_manager import get_paddle_ocr_manager
@@ -692,7 +731,7 @@ class ResourceManagementWidget(QWidget):
             mgr = get_paddle_ocr_manager()
             result = mgr.locate_number_box(
                 screenshot_array,
-                rough_box,
+                local_box,
                 device=device,
                 min_score=min_score,
                 padding=3,
@@ -705,6 +744,8 @@ class ResourceManagementWidget(QWidget):
 
         if result:
             x1, y1, x2, y2 = result["box"]
+            x1, x2 = x1 + origin_x, x2 + origin_x
+            y1, y2 = y1 + origin_y, y2 + origin_y
             if coord_input:
                 coord_input.setText(f"{x1},{y1},{x2},{y2}")
             if status_label:
@@ -816,16 +857,8 @@ class ResourceManagementWidget(QWidget):
         UI 只覆盖它认识的字段;ocr_model / ocr_device 这类没有控件的用户设置
         必须原样带过去,否则保存或 F8 同步会把它们静默抹回默认值。
         """
-        try:
-            if self.main_window and hasattr(self.main_window, "_global_config"):
-                return (
-                    self.main_window._global_config
-                    .get("resource_management", {})
-                    .get(f"{prefix}_config", {})
-                ) or {}
-        except Exception as e:
-            LOG_INFO(f"[资源配置] 读取现有配置失败,将从空配置构建: {e}")
-        return {}
+        value = self._resource_config_snapshot.get(f"{prefix}_config", {})
+        return deepcopy(value) if isinstance(value, dict) else {}
 
     def _build_hp_config(self) -> Dict[str, Any]:
         """构建HP配置 - 使用ResourceConfigManager"""
@@ -846,21 +879,30 @@ class ResourceManagementWidget(QWidget):
 
     def get_config(self) -> Dict[str, Any]:
         """获取配置（匹配ResourceManager期望的格式）"""
-        return {
-            "resource_management": {
+        resource_config = deepcopy(self._resource_config_snapshot)
+        resource_config.update(
+            {
                 "hp_config": self._build_hp_config(),
                 "mp_config": self._build_mp_config(),
-                "check_interval": 200,  # 默认检测间隔，实际值由时间间隔页面管理
+                "check_interval": resource_config.get("check_interval", 200),
             }
+        )
+        return {
+            "resource_management": resource_config
         }
 
     def update_from_config(self, config: Dict[str, Any]):
         """从配置更新UI - 使用ResourceConfigManager统一处理"""
-        res_config = config.get("resource_management", {})
+        raw_res_config = (
+            config.get("resource_management", {}) if isinstance(config, dict) else {}
+        )
+        res_config = raw_res_config if isinstance(raw_res_config, dict) else {}
+        self._resource_config_snapshot = deepcopy(res_config)
         
         # HP配置更新
-        hp_config = res_config.get("hp_config", {})
-        if self.hp_widgets and hp_config:
+        raw_hp_config = res_config.get("hp_config", {})
+        hp_config = raw_hp_config if isinstance(raw_hp_config, dict) else {}
+        if self.hp_widgets:
             ResourceConfigManager.update_widget_from_config(
                 self.hp_widgets,
                 hp_config,
@@ -877,8 +919,9 @@ class ResourceManagementWidget(QWidget):
             self._toggle_tolerance_visibility("hp", detection_mode != "text_ocr")
             
         # MP配置更新  
-        mp_config = res_config.get("mp_config", {})
-        if self.mp_widgets and mp_config:
+        raw_mp_config = res_config.get("mp_config", {})
+        mp_config = raw_mp_config if isinstance(raw_mp_config, dict) else {}
+        if self.mp_widgets:
             ResourceConfigManager.update_widget_from_config(
                 self.mp_widgets,
                 mp_config,
@@ -991,8 +1034,14 @@ class ResourceManagementWidget(QWidget):
             return None
 
         config = self.main_window._global_config
-        res_config = config.get("resource_management", {})
-        resource_config = res_config.get(f"{prefix}_config", {})
+        if not isinstance(config, dict):
+            return None
+        raw_res_config = config.get("resource_management", {})
+        res_config = raw_res_config if isinstance(raw_res_config, dict) else {}
+        raw_resource_config = res_config.get(f"{prefix}_config", {})
+        resource_config = (
+            raw_resource_config if isinstance(raw_resource_config, dict) else {}
+        )
 
         if mode == "circle":
             # 圆形模式: center_x, center_y, radius
@@ -1192,10 +1241,16 @@ class ResourceManagementWidget(QWidget):
             if "ocr_engine_combo" in widgets:
                 widgets["ocr_engine_combo"].setVisible(True)
                 widgets["ocr_engine_label"].setVisible(True)
-        else:
+        elif mode == "rectangle":
             label.setText("⬛ 当前模式：矩形检测（手动选择区域）")
             label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #17a2b8;")
             # 隐藏OCR引擎选择
+            if "ocr_engine_combo" in widgets:
+                widgets["ocr_engine_combo"].setVisible(False)
+                widgets["ocr_engine_label"].setVisible(False)
+        else:
+            label.setText(f"⚠️ 当前模式不受支持：{mode!s}（运行时已禁用）")
+            label.setStyleSheet("font-size: 10pt; font-weight: bold; color: #dc3545;")
             if "ocr_engine_combo" in widgets:
                 widgets["ocr_engine_combo"].setVisible(False)
                 widgets["ocr_engine_label"].setVisible(False)
@@ -1385,7 +1440,7 @@ class ResourceManagementWidget(QWidget):
         LOG_INFO(f"📊 总像素数: {total_pixels:,} 个")
         LOG_INFO(f"🎨 平均颜色: HSV({mean_h}, {mean_s}, {mean_v})")
         LOG_INFO(f"⚙️  智能容差: ±({tolerance_h}, {tolerance_s}, {tolerance_v})")
-        LOG_INFO(f"✅ 已追加到颜色配置")
+        LOG_INFO("✅ 已追加到临时取色参考列表")
         LOG_INFO("=" * 50)
 
     def _test_text_ocr(self, prefix: str):
@@ -1527,20 +1582,10 @@ class ResourceManagementWidget(QWidget):
             else:
                 # 使用Tesseract引擎
                 try:
-                    from ..core.config_manager import ConfigManager
                     from ..utils.tesseract_ocr_manager import get_tesseract_ocr_manager
 
-                    # 获取Tesseract OCR配置
-                    config_manager = ConfigManager()
-                    try:
-                        global_config = config_manager.load_config("default.json")
-                        tesseract_config = global_config.get("global", {}).get(
-                            "tesseract_ocr", {}
-                        )
-                    except Exception:
-                        tesseract_config = {}
-
-                    # 创建识别器
+                    # 与当前运行配置使用同一来源；签名变化时工厂会安全重建。
+                    tesseract_config = self._get_current_tesseract_config()
                     ocr_manager = get_tesseract_ocr_manager(tesseract_config)
 
                     # 执行识别

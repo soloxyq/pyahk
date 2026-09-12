@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 
 from .event_bus import event_bus
 from ..utils.debug_log import LOG_INFO, LOG_ERROR
+from ..utils.config_values import config_int
 
 
 @dataclass
@@ -24,31 +25,45 @@ class SimpleAffixRerollConfig:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "SimpleAffixRerollConfig":
+        if not isinstance(data, dict):
+            return cls()
+
+        def parse_int(name: str, default: int, minimum: int, maximum: int) -> int:
+            try:
+                value = config_int(data.get(name, default))
+            except ValueError:
+                return default
+            return min(max(value, minimum), maximum)
+
+        def parse_coord(name: str) -> Optional[Tuple[int, int]]:
+            raw = data.get(name)
+            if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+                return None
+            try:
+                x, y = config_int(raw[0]), config_int(raw[1])
+            except ValueError:
+                return None
+            if not (-2147483648 <= x <= 2147483647):
+                return None
+            if not (-2147483648 <= y <= 2147483647):
+                return None
+            return x, y
+
+        raw_targets = data.get("target_affixes", [])
+        target_affixes = (
+            [value.strip() for value in raw_targets if isinstance(value, str) and value.strip()]
+            if isinstance(raw_targets, list)
+            else []
+        )
         return cls(
-            enabled=data.get("enabled", False),
-            target_affixes=data.get("target_affixes", []),
-            max_attempts=data.get("max_attempts", 100),
-            click_delay=data.get("click_delay", 200),
-            enchant_button_coord=(
-                tuple(data.get("enchant_button_coord"))
-                if data.get("enchant_button_coord")
-                else None
-            ),
-            first_affix_button_coord=(
-                tuple(data.get("first_affix_button_coord"))
-                if data.get("first_affix_button_coord")
-                else None
-            ),
-            replace_button_coord=(
-                tuple(data.get("replace_button_coord"))
-                if data.get("replace_button_coord")
-                else None
-            ),
-            close_button_coord=(
-                tuple(data.get("close_button_coord"))
-                if data.get("close_button_coord")
-                else None
-            ),
+            enabled=data.get("enabled") is True,
+            target_affixes=target_affixes,
+            max_attempts=parse_int("max_attempts", 100, 1, 1000),
+            click_delay=parse_int("click_delay", 200, 0, 5000),
+            enchant_button_coord=parse_coord("enchant_button_coord"),
+            first_affix_button_coord=parse_coord("first_affix_button_coord"),
+            replace_button_coord=parse_coord("replace_button_coord"),
+            close_button_coord=parse_coord("close_button_coord"),
         )
 
 
@@ -96,37 +111,73 @@ class SimpleAffixRerollManager:
         self._active_run: Optional[_AffixRerollRun] = None
         self._gate_owner_generation: Optional[int] = None
         self._cleanup_done = False
-        self._screen_region = None  # 缓存截图区域
         event_bus.subscribe("hotkey:affix_reroll_start", self._on_f7_pressed)
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
         LOG_INFO("[配置驱动洗練管理器] 初始化完成")
 
-    def _on_f7_pressed(self):
+    def _on_f7_pressed(self, runtime_epoch: Optional[int] = None):
+        if getattr(self, "_cleanup_done", False):
+            return
         if self.status.is_running:
             self.stop_reroll("用户按F7停止")
         else:
-            self.start_reroll()
+            self.start_reroll(runtime_epoch=runtime_epoch)
 
     def _on_config_updated(
         self, skills_config: Dict[str, Any], global_config: Dict[str, Any]
     ):
-        config_data = global_config.get("affix_reroll", {})
+        if getattr(self, "_cleanup_done", False):
+            return
+        config_data = (
+            global_config.get("affix_reroll", {})
+            if isinstance(global_config, dict)
+            else {}
+        )
         LOG_INFO(f"[洗练管理器] 接收到配置更新: {config_data}")
         self.config = SimpleAffixRerollConfig.from_dict(config_data)
         LOG_INFO(
             f"[洗练管理器] 配置更新完成: 启用={self.config.enabled}, 目标词缀={self.config.target_affixes}"
         )
 
-    def start_reroll(self) -> bool:
+    def start_reroll(self, runtime_epoch: Optional[int] = None) -> bool:
         with self._run_lock:
             if self._active_run is not None or self.status.is_running:
                 return False
+        required_coordinates = (
+            self.config.enchant_button_coord,
+            self.config.first_affix_button_coord,
+            self.config.replace_button_coord,
+            self.config.close_button_coord,
+        )
         if (
             not self.config.enabled
             or not self.config.target_affixes
-            or not self.config.enchant_button_coord
+            or any(coordinate is None for coordinate in required_coordinates)
         ):
             LOG_ERROR("[配置驱动洗練管理器] 配置无效或不完整，无法启动")
+            return False
+
+        # 坐标点击绝不允许沿用 TargetWin="" 的“当前前台窗口”兼容语义。
+        # 该检查也覆盖绕过 MacroEngine、直接发布 F7 事件的调用方。
+        from ..utils.window_utils import WindowUtils
+
+        window_config = getattr(
+            self.border_manager, "window_activation_config", {}
+        ) or {}
+        target = WindowUtils.build_ahk_target(window_config)
+        if not target:
+            LOG_ERROR("[洗练管理器] 未配置显式目标窗口，拒绝坐标点击模式")
+            self.status.error_message = "洗练需要配置目标窗口"
+            self._publish_status_update()
+            return False
+        try:
+            target_synced = bool(self.input_handler.set_target_window(target))
+        except Exception as e:
+            LOG_ERROR(f"[洗练管理器] 同步目标窗口异常: {e}")
+            target_synced = False
+        if not target_synced:
+            self.status.error_message = "目标窗口同步失败"
+            self._publish_status_update()
             return False
 
         # 获取全局OCR管理器实例
@@ -165,7 +216,13 @@ class SimpleAffixRerollManager:
                 publish_failure = True
                 run = None
             else:
-                self._run_generation += 1
+                try:
+                    requested_epoch = int(runtime_epoch or 0)
+                except (TypeError, ValueError, OverflowError):
+                    requested_epoch = 0
+                self._run_generation = max(
+                    self._run_generation + 1, requested_epoch
+                )
                 run = _AffixRerollRun(
                     generation=self._run_generation,
                     config=SimpleAffixRerollConfig(
@@ -181,13 +238,20 @@ class SimpleAffixRerollManager:
                     status=SimpleAffixRerollStatus(is_running=True),
                 )
                 publish_failure = False
-                if not self._set_runtime_gate(True, "启动"):
+                owner_ready = self._set_runtime_owner(run.generation, "启动")
+                if not owner_ready or not self._set_runtime_gate(
+                    True, "启动", run.generation
+                ):
                     run.status.is_running = False
-                    run.status.error_message = "AHK输入闸门打开失败"
+                    run.status.error_message = (
+                        "AHK运行所有权设置失败"
+                        if not owner_ready
+                        else "AHK输入闸门打开失败"
+                    )
                     self.status = run.status
-                    # timeout 不代表 true 没执行；必须用 force 方向的 false
-                    # 再做一次有界回滚，不能留下无 owner 的开闸。
-                    self._set_runtime_gate(False, "启动失败回滚")
+                    # timeout 不代表 owner/true 没执行；用一条原子 RESET 回滚，
+                    # 不能留下迟到开闸或半建立的 owner。
+                    self._reset_runtime("启动失败回滚")
                     run = None
                     publish_failure = True
 
@@ -208,7 +272,7 @@ class SimpleAffixRerollManager:
                     run.status.error_message = "洗练线程启动失败"
                     self._active_run = None
                     self._gate_owner_generation = None
-                    self._set_runtime_gate(False, "启动回滚")
+                    self._reset_runtime("启动回滚")
                     publish_failure = True
                     run = None
 
@@ -229,15 +293,36 @@ class SimpleAffixRerollManager:
             return False
         return True
 
-    def stop_reroll(self, reason: str = "用户手动停止"):
+    def stop_reroll(
+        self,
+        reason: str = "用户手动停止",
+        *,
+        cleanup_runtime: bool = True,
+    ):
         with self._run_lock:
             run = self._active_run
         if run is not None:
-            self._stop_run(run, reason)
+            self._stop_run(run, reason, cleanup_runtime=cleanup_runtime)
 
-    def _set_runtime_gate(self, enabled: bool, context: str) -> bool:
+    def _set_runtime_owner(self, generation: int, context: str) -> bool:
         try:
-            ok = bool(self.input_handler.set_accepting_actions(enabled))
+            ok = bool(self.input_handler.set_runtime_owner("affix", generation))
+        except Exception as e:
+            LOG_ERROR(f"[洗练管理器] {context}时设置 AHK owner 异常: {e}")
+            return False
+        if not ok:
+            LOG_ERROR(f"[洗练管理器] {context}时设置 AHK owner 失败")
+        return ok
+
+    def _set_runtime_gate(
+        self, enabled: bool, context: str, generation: int
+    ) -> bool:
+        try:
+            ok = bool(
+                self.input_handler.set_accepting_actions(
+                    enabled, owner="affix", epoch=generation
+                )
+            )
         except Exception as e:
             LOG_ERROR(f"[洗练管理器] {context}时设置 AHK 输入闸门异常: {e}")
             return False
@@ -245,8 +330,23 @@ class SimpleAffixRerollManager:
             LOG_ERROR(f"[洗练管理器] {context}时设置 AHK 输入闸门失败")
         return ok
 
+    def _reset_runtime(self, context: str) -> bool:
+        try:
+            ok = bool(self.input_handler.reset_runtime())
+        except Exception as e:
+            LOG_ERROR(f"[洗练管理器] {context}时原子复位 AHK 异常: {e}")
+            return False
+        if not ok:
+            LOG_ERROR(f"[洗练管理器] {context}时原子复位 AHK 失败")
+        return ok
+
     def _stop_run(
-        self, run: _AffixRerollRun, reason: str, *, show_ui: bool = True
+        self,
+        run: _AffixRerollRun,
+        reason: str,
+        *,
+        show_ui: bool = True,
+        cleanup_runtime: bool = True,
     ) -> bool:
         """Stop exactly one generation; stale workers are strict no-ops."""
         with self._run_lock:
@@ -259,7 +359,8 @@ class SimpleAffixRerollManager:
             if self._gate_owner_generation == run.generation:
                 self._gate_owner_generation = None
                 # 状态对外变成 stopped 前先完成 AHK 原子关闸。
-                gate_ok = self._set_runtime_gate(False, reason)
+                if cleanup_runtime:
+                    gate_ok = self._reset_runtime(reason)
             run.status.is_running = False
             self.status = run.status
             thread = run.thread
@@ -299,13 +400,19 @@ class SimpleAffixRerollManager:
         with self._run_lock:
             return self._active_run is run and not run.stop_event.is_set()
 
-    def _update_run_status(self, run: _AffixRerollRun, **changes) -> bool:
+    def _update_run_status(
+        self, run: _AffixRerollRun, *, publish: bool = False, **changes
+    ) -> bool:
         with self._run_lock:
             if self._active_run is not run or run.stop_event.is_set():
                 return False
             for name, value in changes.items():
                 setattr(run.status, name, value)
             self.status = run.status
+            if publish:
+                # 验证世代、写状态、发送通知必须在同一临界区完成；否则 stop/
+                # restart 可插在写入和通知之间，让旧截图错误覆盖新一轮 OSD。
+                self._publish_status_update(run.status)
             return True
 
     def _reroll_loop(self, run: _AffixRerollRun):
@@ -355,37 +462,22 @@ class SimpleAffixRerollManager:
         if not self._is_current_run(run):
             return False
 
-        # 获取截图区域（只截取屏幕左边500像素宽度）
-        if self._screen_region is None:
-            try:
-                from PIL import ImageGrab
-
-                # 获取屏幕尺寸
-                screen_size = ImageGrab.grab().size
-                screen_width, screen_height = screen_size
-                # region格式: (left, top, right, bottom)
-                screen_region = (0, 0, 500, screen_height)
-                LOG_INFO(
-                    f"[洗练管理器] 初始化截图区域: {screen_region} (屏幕尺寸: {screen_size})"
-                )
-            except Exception as e:
-                LOG_ERROR(f"[洗练管理器] 获取屏幕尺寸失败，使用默认区域: {e}")
-                screen_region = (0, 0, 500, 1080)  # 默认区域
-            with self._run_lock:
-                if self._active_run is not run or run.stop_event.is_set():
-                    return False
-                if self._screen_region is None:
-                    self._screen_region = screen_region
+        screen_region = self._resolve_ocr_region()
+        if screen_region is None:
+            self._update_run_status(
+                run, error_message="目标窗口不可截图", publish=True
+            )
+            return False
 
         frame = self.border_manager.capture_screen_for_reroll(
-            region=self._screen_region
+            region=screen_region
         )
         if not self._is_current_run(run):
             return False
+
         if frame is None:
             LOG_ERROR("[洗练循环] 获取屏幕截图失败")
-            if self._update_run_status(run, error_message="截图失败"):
-                self._publish_status_update(run.status)
+            self._update_run_status(run, error_message="截图失败", publish=True)
             return False
 
         all_text = self.ocr_manager.get_text_from_image(frame)
@@ -455,11 +547,44 @@ class SimpleAffixRerollManager:
                 return False
             return False
 
+    def _resolve_ocr_region(self) -> Optional[Tuple[int, int, int, int]]:
+        """Resolve the target client's left OCR strip in desktop coordinates."""
+        try:
+            import win32gui
+            from ..utils.window_utils import WindowUtils
+
+            window_config = getattr(
+                self.border_manager, "window_activation_config", {}
+            ) or {}
+            hwnd = WindowUtils.find_target_window(window_config)
+            if not hwnd or not win32gui.IsWindow(hwnd):
+                return None
+            # ImageGrab sees the composed desktop, not an occluded background
+            # window. Requiring foreground matches the AHK click safety gate.
+            if win32gui.GetForegroundWindow() != hwnd:
+                return None
+            client_left, client_top, client_right, client_bottom = (
+                win32gui.GetClientRect(hwnd)
+            )
+            left, top = win32gui.ClientToScreen(
+                hwnd, (client_left, client_top)
+            )
+            right, bottom = win32gui.ClientToScreen(
+                hwnd, (client_right, client_bottom)
+            )
+            right = min(int(right), int(left) + 500)
+            region = (int(left), int(top), right, int(bottom))
+            if region[2] <= region[0] or region[3] <= region[1]:
+                return None
+            return region
+        except Exception as e:
+            LOG_ERROR(f"[洗练管理器] 解析目标 OCR 区域失败: {e}")
+            return None
+
     def _click_at(
         self, run: _AffixRerollRun, coordinate, label: str
     ) -> bool:
         """Send one click while serializing against stop/new-generation open."""
-        publish_error = False
         with self._run_lock:
             if self._active_run is not run or run.stop_event.is_set():
                 return False
@@ -467,7 +592,6 @@ class SimpleAffixRerollManager:
                 run.status.error_message = f"{label}坐标未配置"
                 LOG_ERROR(f"[洗练循环] {run.status.error_message}")
                 run.stop_event.set()
-                publish_error = True
                 ok = False
             else:
                 try:
@@ -483,12 +607,13 @@ class SimpleAffixRerollManager:
                         f"[洗练循环] {run.status.error_message}，停止本轮洗练"
                     )
                     run.stop_event.set()
-                    publish_error = True
             self.status = run.status
-
-        if publish_error:
-            self._publish_status_update(run.status)
-        return ok
+            if not ok:
+                # generation 验证、状态写入和发布必须同属一个 RLock 临界区。
+                # 否则旧 worker 可在解锁后、发布前被 stop/new start 越过，
+                # 再用旧 stopped/error 覆盖新一轮 OSD。
+                self._publish_status_update(run.status)
+            return ok
 
     def _notify_success(self, run: _AffixRerollRun) -> bool:
         # 通知也是 generation 副作用。持 RLock 发布并在两条事件之间

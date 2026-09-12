@@ -1,200 +1,58 @@
-# AGENTS.md — pyahk 项目协作入口
+# AGENTS.md — pyahk 协作入口
+本文件保持 64 行以内；CLAUDE.md / GEMINI.md 引用它，详细设计与配置以 wiki 为准。
 
-> 这是各 AI 助手(Claude Code / Gemini CLI / Codex 等)与 pyahk 协作时**第一份要读的文档**。
-> CLAUDE.md 和 GEMINI.md 都通过 `@AGENTS.md` 引用本文件,所以只需维护这一份。
+## 项目与环境
+- Python 决策 + AutoHotkey v2 执行；PySide6 GUI，自研 C++ DXGI 捕获。
+- 目标游戏：D4 / PoE2 / Torchlight Infinite；WM_COPYDATA 双向通信。
+- 工作目录：E:\repogit\pyahk；使用 PowerShell，搜索优先 rg。
+- 当前分支 feature/ahk-input-system；master 仍为旧 pynput 架构，不作为输入实现参考。
 
----
+## 提交与编辑纪律
+- 只有用户对当前批次明确要求，才允许 git commit / git push；历史授权不延续。
+- 修改后完成相关测试、git diff --check 并汇报；保留用户已有改动。
+- 用 apply_patch 编辑；所有文本保持 LF，避免整文件 CRLF 噪声。
+- 不使用 git reset --hard、git checkout -- 等破坏性命令恢复工作区。
+- docs/AHK_COMPLETE_ARCHITECTURE.md 是历史档案，不需要随当前实现更新。
 
-## 1. 项目一句话定位
+## 状态与安全边界
+- STOPPED → READY → RUNNING ↔ PAUSED；后三态均可直接 STOPPED。
+- F8 准备 combat / 停止；F9 准备或停止 pathfinding；Z 开始或暂停/恢复。
+- F7 启停独立洗练；三模式互斥。F8/F7/F9 永久监听，Z 仅 READY 后注册。
+- READY 两阶段：AHK 初始关闸，arm_main + owner/epoch → Hook/捕获/OCR 准备 → 开闸。
+- STOPPED 使用单条 reset_runtime 原子关闸、清队、停宏、释放持键和注销动态 Hook。
+- 物理 F8 本地先止血，再可靠通知 Python；迟到回调不得停止或污染新的运行世代。
+- Python→AHK 超时为 500ms；不重放超时业务命令，安全清理可强制发送。
+- 熔断冷却 2 秒后，F8/F7/F9 启动尝试以串行 PING 探测恢复；停止不受限制。
+- AHK→Python 可靠 FIFO 上限 64，普通边沿软上限 60，F8 保留 4 槽；接收后 Qt 排队处理。
+- direct 显式目标失焦时拒发并释放持键；control 必须有目标，up 沿原 down 路径配对。
+- 畸形目标不能退化成前台窗口；坐标点击必须在明确目标的前台客户区内。
+- DXGI 帧为 BGRA；检测坐标为虚拟桌面物理像素，可为零或负数，按帧原点换算。
+- BorderFrameManager 返回锁内复制的只读快照；旧 worker 不得使用新世代状态发键。
 
-**pyahk** = Python(决策) + AutoHotkey v2(执行) 的 ARPG 游戏自动化辅助工具,
-目标游戏:暗黑破坏神 4 / 流放之路 2 / Torchlight Infinite。
-GUI 用 PySide6,屏幕捕获用自研 C++ DXGI 库。
+## 设计特性，勿误报
+- 强制移动期间，非白名单/非紧急自动按键替换为 f（可配置）；HP/MP 救命药剂保留。
+- 管理键清非紧急队列并独占执行；特殊键透传并抑制普通输入，仍放行药剂与释放动作。
+- special_key_resume_delay_ms 只延迟自动输入恢复，物理 key-up 始终立即透传。
+- PAUSED 完全停止 HP/MP；F8/F7/F9 不属于可清理的 RegisteredHooks。
+- 滚轮无可靠 up，禁止 special/monitor；intercept 滚轮逐刻度发送，不参与自动重复去重。
+- 队列 QUEUE_TICK_MS=15；Windows timer 量化后约 63 动作/秒，不能按请求周期直接估算。
+- 全局普通预算 MAX_PENDING_ATOMS=16；过载按 low→normal→high 丢最旧可丢项。
+- ≥500ms 的旧普通动作过期丢弃；release/cleanup/delay_clear/seqrun、紧急与在飞动作受保护。
+- sequence 是单个决策，开打后不可裁断；普通 delay 只挡本队列，delay_clear 才是全局独占。
+- 宏 5ms 是轮询预算，步骤节奏靠显式 delay；key_press_duration 控制 press 的 down→up。
+- 按键存储与协议统一 AHK 标准名（LButton/RButton/MButton）；GUI 别名保存前归一化。
+- AHK 函数只要赋值全局变量，顶部必须声明 global，避免意外创建 local。
+- main_special.py、旧 InputHandler 已删除；pynput 仅用于 GUI 录键便捷功能。
 
-## 2. 心智模型(必读)
-
-```
-┌────────── Python 进程 (PySide6 GUI) ──────────┐    ┌── AHK 子进程 ──┐
-│                                                  │    │                │
-│  C++ DXGI 捕获(零拷贝) ──► BorderFrameManager   │    │ hold_server_   │
-│         │                       │                │    │ extended.ahk   │
-│         ▼                       ▼                │    │                │
-│  HSV 模板匹配 ──► SkillManager / ResourceManager │    │ 5 种 Hook 模式 │
-│                              │                  │    │ 4 级优先队列   │
-│                              ▼                  │    │ 队列 notBefore │
-│                        MacroEngine (状态机)     │    │ SendInput      │
-│                              │                  │    │                │
-│         ┌───── EventBus(单例,递归保护) ─┐       │    │                │
-│         ▼                              ▼        │    │                │
-│  AHKInputHandler ◄─── ahk_event_filter (全局)   │    │                │
-│         │                              ▲        │    │                │
-│         └─Cmd──► AHKCommandSender ─────┼─WM────►│    │                │
-│                                         │ COPY  │◄───┤                │
-│                  Event ◄────────────────┘ DATA  │    │                │
-└─────────────────────────────────────────────────┘    └────────────────┘
-                                                       (独立 PID, 启动失败 = 拒绝运行)
-```
-
-**记忆口诀**:Python 看屏幕、做决策、发命令; AHK 拦截热键、排队、按键盘。
-两边通过 WM_COPYDATA 双向通信(实测 0.069ms)。
-
-## 3. 状态机 + 全局热键(速查)
-
-### 状态机
-`STOPPED ←→ READY ←→ RUNNING ←→ PAUSED` (`STOPPED → STOPPED` 为终止;严格的转换检查)
-
-| 状态 | 含义 | 谁触发 |
-|------|------|--------|
-| STOPPED | 未启动,只有 F8/F7/F9 永久根热键监听 | 启动时 / F8 退出 |
-| READY | 已注册业务热键,准备就绪 | F8 |
-| RUNNING | 调度器跑技能/资源检测 | Z (从 READY) / Z (从 PAUSED) |
-| PAUSED | 完全暂停(含 HP/MP) | Z (从 RUNNING) |
-
-AHK 的 `RuntimeAcceptingActions` 初始为 `false`。STOPPED → READY 使用两阶段入口:
-先在关闸状态武装 `MainModeArmed`、注册动态 Hook 并完成捕获准备,全部成功后才开闸;
-任一步失败都重施 STOPPED 原子屏障,不暴露半初始化的 READY。
-
-### 全局热键(F8/F7/F9 永久注册,Z 在 READY 时注册)
-
-| 键 | 功能 | 注册时机 |
-|----|------|---------|
-| **F8** | STOPPED ↔ READY | **永久**,启动即注册 |
-| **F7** | 启停装备词缀洗练(独立模式) | **永久**,handler 要求 STOPPED 状态才生效 |
-| **F9** | 准备/停止自动寻路(独立模式;Z 才启动执行) | **永久**,handler 要求 STOPPED 状态才进入 pathfinding 准备态 |
-| **Z** | RUNNING ↔ PAUSED 或 READY → RUNNING | 仅 READY 时注册,STOPPED 进入时清理 |
-
-模式互斥:combat / pathfinding 通过 `MacroEngine._prepared_mode` (`none`/`combat`/`pathfinding`) 控制;洗练独立运行,通过 `affix_reroll_manager.status.is_running` 跟踪。F8/F7/F9 各自的 handler 之间互相检查这两个状态实现三模式硬互斥。
-
-## 4. AI 协作约定(避免误判 / 踩坑)
-
-### 4.0 提交纪律 ⚠️(最高优先级)
-
-**除非用户主动、明确地要求提交/推送(如"请提交并 PUSH"),否则不允许自行 `git commit` / `git push`。**
-
-- 完成修改后:跑测试、做验证、报告结果,然后**停下等指示**。
-- 一次授权只对那一次有效,不延续到后续批次 —— 上一轮说过"提交并 PUSH"不代表这一轮也可以。
-- 修复用户复核出的问题同样不例外:改完、验完、汇报,由用户决定是否入库。
-
-### 4.1 这些"看似 BUG"实际是设计特性 ⚠️
-
-| 行为 | 真相 |
-|------|------|
-| 强制移动键(默认 A)按住时,队列按键默认替换为 `f`,但 `force_move_passthrough_keys` 白名单键与 HP/MP 紧急药剂正常发送 | **特性**:边跑边互动(D4/PoE2 拾取/对话技巧),同时不阻止位移和救命药剂 |
-| 管理键(如 E)按下时清空非紧急队列 | **特性**:保证管理键独占执行(E 通常映射闪避/强力技) |
-| 特殊键(如 Space)激活时丢弃非紧急入队,但 HP/MP 紧急药剂与 `release:*` 释放动作仍然放行;松开后可由 `special_key_resume_delay_ms` 延迟自动输入恢复 | **特性**:物理 key-up/`special_key_up` 始终立即透传/回发,只延迟 `special_key_pause:end` 与宏/队列/持键恢复;闪避期间救命药剂照常,release 不会被卡死 |
-| PAUSED 状态完全停 HP/MP 检测 + 清所有队列 | **特性**:用户主动 Z 暂停 = 完全停下 |
-| F8/F7/F9 不在 RegisteredHooks 记录中 | **特性**:三个永久根热键,清理动态 Hook 时不碰它们 |
-| 同一个 key 不能同时出现在 special_keys / managed_keys | **特性**:跨类冲突会让后注册的 Hotkey 覆盖前者,Python 注册时检测重复并 LOG_ERROR 跳过后者 |
-| 滚轮键不能配置为 special / monitor | **特性**:`WheelUp/Down/Left/Right` 没有可靠的物理 up 边沿,会让抑制或强制移动状态无法复位;滚轮仍可作为 intercept 键,且每个刻度都独立发送、不参与自动重复去重 |
-| Python→AHK 命令 500ms 超时后暂时熔断普通命令 | **特性**:超时不等于 AHK 未执行,所以不重放原业务命令;安全清理仍可强制发送。2 秒冷却后 F8 只做一次串行、无副作用 PING,成功才解除熔断,持续失败再重启应用 |
-| AHK→Python 可靠边沿使用 64 项有界 FIFO | **特性**:普通业务边沿软上限 60,为 F8 保留 4 项安全槽;GUI 长时间卡顿后超限普通边沿会被丢弃,避免恢复后执行过期意图。活跃主模式的 F8 stop 会作废旧世代边沿并优先保留 |
-| 过载时丢弃**最旧**的待发动作(`queue_drop` 上报,overload/expired 分开计数) | **特性**:执行上限实测约 63 动作/秒(`QUEUE_TICK_MS=15` → 实际 15.8ms × 每 tick 1 个动作),生产侧无背压。不丢的代价是延迟无限增长(实测 10 秒过载 → 打出去的是 10 秒前的决策)。`MAX_PENDING_ATOMS=16` 是**全局**原子预算 ≈ 延迟上限 250ms。`release:`/`cleanup:`/`delay_clear:`/`seqrun:`、紧急队列、**最新到达的动作**、以及**正在执行的队首**都**永不丢弃**。见 wiki/02 "吞吐预算" |
-| 等待超过 500ms 的动作被丢弃(而不是迟发) | **特性**:年龄绑在每个队列项上(入队记录 `MonotonicMs()` 单调毫秒 = GetTickCount64,含系统休眠;**不是** `A_TickCount`,那是 32 位、~49.7 天回绕),**出队时**判定:真实等待 ≥ `STALE_MS`(500ms)且可丢 → 丢弃并按 `expired` 计数上报(与过载 `overload` 分开诊断)。过期决策没有价值,执行一个 500ms 前的决策比不执行更糟。不可丢动作(release/cleanup/seqrun)再老也照常执行 |
-| `sequence:` 不再展开成多个队列项 | **特性**:一次序列是**一个决策**,原子有因果关系。展开后会被后续入队从中间裁断(实测 20 步序列再来一个普通动作,队头就从 k1 变成 k6)。作为单项则要么整条被丢、要么按序走完;开打后标记 `seqrun:` 进入不可丢集合,且**每条队列队首的 seqrun 豁免预算**(被抢占的在飞序列不该把预算顶爆) |
-| `QUEUE_TICK_MS` 是 15 而不是 20 | **特性**:Windows 消息定时器粒度 ~15.6ms,`SetTimer` 向上凑整 —— 请求 20ms 实际是 31.6ms(吞吐腰斩到 31.7/s),请求 15ms 才是 15.8ms(63/s)。改回 20 会让 `last.json`/`d4灵巫.json` 等现成配置永久过载。实测表见 `hold_server_extended.ahk` 中 `QUEUE_TICK_MS` 处 |
-| 普通 delay 只挡自己所在的优先级队列;序列间隙里其他队列可以插入动作 | **特性**(2026-08 重构):delay 转成本队列队首的 `seqrun:` 等待项(`notBefore`),low 的 `delay:100` 不再压住 high 技能。尾部 delay 留空哨兵防止间隔蒸发。需要间隙**独占**用管理键 —— `delay_clear:` 仍是全局闸门(`ManagedDelayUntil`),窗口内清非紧急队列、只放行 HP/MP。emergency 队列不支持普通 delay(救命动作永不等待) |
-
-**反模式**:看到这些不要急着报 BUG,先读 `wiki/02-架构与核心概念.md` 的"设计意图"段。
-
-### 4.2 WSL 编辑陷阱 ⚠️
-
-**症状**:你在 WSL 里用 Edit 工具改 `/mnt/e/repogit/pyahk/` 下的文件,git diff 显示 99 个文件 3.6 万行变化。
-
-**原因**:WSL 在 NTFS 上保存会自动把 LF 改成 CRLF,与 HEAD 的 LF 不一致。
-
-**防护**:仓库已加 `.gitattributes` 强制 `* text=auto eol=lf`。但你**编辑后仍要主动验证**:
-```bash
-file <path>                        # 应输出 LF, 不是 CRLF
-git diff --check HEAD -- <path>    # 应无 trailing whitespace 警告
-```
-若发现 CRLF,用 Python 转换最稳(sed 在 WSL 偶尔静默失败):
-```python
-with open(f, 'rb') as fp: data = fp.read()
-with open(f, 'wb') as fp: fp.write(data.replace(b'\r\n', b'\n'))
-```
-
-### 4.3 AHK v2 作用域陷阱 ⚠️
-
-**规则**:AHK v2 函数内**对一个变量赋值**(任意位置)就会自动定为 local,**除非函数顶部 `global` 声明**。
-
-**踩坑案例**:`ClearQueue` 内 `EmergencyQueue := []` 没声明 global → 创建空局部数组 → 全局队列里旧动作残留 → PAUSED 看似清了实则没清。
-
-**修复方法**:任何函数对全局变量赋值时,函数顶部必须列出 global 声明:
-```ahk
-ProcessQueue() {
-    global ManagedDelayUntil, TotalQueueCount, QueueCounts
-    global EmergencyQueue, HighQueue, NormalQueue, LowQueue
-    global QueueStats, IsPaused, SpecialKeysPaused
-    ; ...
-}
-```
-**验证**:`python tests/test_ahk_global_scope.py` —— 全量扫描"赋值了全局却没声明 global"的函数(不是硬编码名单)。
-
-### 4.4 不存在的文件 ⚠️
-
-- `main_special.py` —— **已删除**(2025.10.16 输入系统重构)。文档曾引用,已全部清理。如需"特定游戏简化版",基于 AHK 架构重写,不要试图找原文件。
-- `InputHandler` (Python 类) —— **已删除**,被 `AHKInputHandler` 替代。
-- `pynput` —— 核心输入执行**不再依赖** pynput(已迁移到 AHK 子进程)。但 `requirements.txt` 仍含 `pynput>=1.7.6`,因为 GUI 的 `priority_keys_widget.py` 用它做"按住录制键名"的便捷输入(失败时回退到手动输入框)。pynput 缺失不影响主功能。
-
-### 4.5 按键命名约定 ⚠️
-
-内部存储、JSON 配置、Python→AHK 协议统一使用 **AHK 标准按键名**。鼠标键必须写 `LButton` / `RButton` / `MButton`,不要保存成 `left_mouse` / `right_mouse` / `middle_mouse`。
-
-GUI 可以接受 `right_mouse`、`leftclick`、`mouse_right` 这类别名作为输入兼容,但保存配置前必须归一化成 AHK 标准名。看到 `priority_keys` 里的 `target` 或 key 被改成下划线别名时,应按 BUG 处理。
-
-## 5. wiki 索引
-
-| 文档 | 主题 | 何时读 |
-|------|------|--------|
-| [wiki/01-快速入门](wiki/01-项目概述与快速入门.md) | clone → install → 启动 | 第一次接触项目 |
-| [wiki/02-架构与通信](wiki/02-架构与核心概念.md) | 状态机 / WM_COPYDATA / 队列 / Hook 模式 | 改核心模块前 |
-| [wiki/03-模块与API](wiki/03-功能模块与API.md) | 各模块的核心方法签名与职责 | 写新功能前 |
-| [wiki/04-配置JSON Schema](wiki/04-配置与条件系统.md) | 配置文件字段 + 枚举值 | 改配置 UI / 加新功能开关 |
-| [wiki/05-图像与性能](wiki/05-图像捕获与性能.md) | DXGI 捕获 / HSV 匹配 / 性能数据 | 优化检测精度/速度 |
-| [wiki/06-调试与排查](wiki/06-调试、部署与故障排查.md) | 日志在哪 / 常见 BUG 定位路径 | 出问题时 |
-
-补充:`docs/AHK_COMPLETE_ARCHITECTURE.md` 是 2025.10 输入系统重构的设计文档(历史档案),不需要修改但可作为深度参考。
-
-## 6. 关键文件路径速查
-
-```
-pyahk/
-├── main.py                                  # 唯一入口 (PySide6 GUI)
-├── hold_server_extended.ahk                 # AHK 服务器(所有键盘逻辑)
-├── hold_client.py                           # WM_COPYDATA 客户端(Python→AHK)
-├── ahk_commands.ahk                         # AHK 端命令 ID 定义
-├── default.json / d4.json / poe2_*.json     # 游戏配置
-├── .gitattributes                           # 强制 LF 行尾
-│
-├── torchlight_assistant/
-│   ├── core/
-│   │   ├── macro_engine.py                  # 状态机协调中枢
-│   │   ├── skill_manager.py                 # 技能调度
-│   │   ├── resource_manager.py              # HP/MP 检测
-│   │   ├── ahk_input_handler.py             # AHK 子进程封装
-│   │   ├── ahk_command_sender.py            # 命令发送
-│   │   ├── ahk_event_filter.py              # 全局 WM_COPYDATA 接收(QAbstractNativeEventFilter)
-│   │   ├── signal_bridge.py                 # Qt Signal 跨线程桥
-│   │   ├── event_bus.py                     # 单例事件总线
-│   │   ├── unified_scheduler.py             # heapq + monotonic 调度
-│   │   ├── pathfinding_manager.py           # 自动寻路 (初步实现)
-│   │   ├── simple_affix_reroll_manager.py   # 装备洗练 (初步实现)
-│   │   └── states.py                        # MacroState 枚举
-│   ├── config/
-│   │   ├── ahk_commands.py                  # CMD_* ID 与 AHK 端同步(20 个)
-│   │   └── ahk_config.py                    # AHK 启动配置
-│   ├── gui/                                 # PySide6 界面
-│   └── utils/
-│       ├── border_frame_manager.py          # 帧管理 + HSV 匹配
-│       ├── native_graphics_capture_manager.py  # DXGI 捕获 Python 包装
-│       └── ...
-│
-└── native_capture/                          # C++ DXGI 库源码
-```
-
-## 7. 当前分支与上下文
-
-- 当前分支:`feature/ahk-input-system`(2025.10 输入系统重构后,尚未合回 master)
-- master 分支较旧(仍是 pynput 时代),改输入相关代码时**绝不要参考 master**
-- 提交风格:中英混合 `feat(scope): 描述`, 常带 emoji
-- 用户活跃地用中文写 commit/对话
+## 文档与关键路径
+- [wiki/01](wiki/01-项目概述与快速入门.md)：安装、启动、PowerShell 命令。
+- [wiki/02](wiki/02-架构与核心概念.md)：状态机、通信、队列与 Hook；改核心前必读。
+- [wiki/03](wiki/03-功能模块与API.md)：模块职责、API 与调用边界。
+- [wiki/04](wiki/04-配置与条件系统.md)：JSON Schema、默认值与检测语义；改配置前必读。
+- [wiki/05](wiki/05-图像捕获与性能.md)：DXGI、DPI、HSV、快照与性能数据。
+- [wiki/06](wiki/06-调试、部署与故障排查.md)：日志、测试、部署和故障排查。
+- 入口 main.py；传输 hold_client.py / core/ahk_command_sender.py / core/ahk_event_filter.py。
+- 状态调度在 torchlight_assistant/core/；GUI 在 gui/；捕获与检测工具在 utils/。
+- AHK 执行在 hold_server_extended.ahk；命令 ID 与 config/ahk_commands.py、ahk_commands.ahk 同步。
+- native_capture/ 保存 C++ 源码、wrapper 和 DLL；改 ABI 后三者须一致。
+- 验证：python -m pytest -q；python tests/test_ahk_global_scope.py；git diff --check HEAD。

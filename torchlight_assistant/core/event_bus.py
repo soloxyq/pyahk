@@ -101,28 +101,38 @@ class EventBus:
         B7修复: 限制同一事件名的并发异步任务数,防止 handler 内部递归 publish_async
         导致线程池任务无限增长(线程池默认无界队列)。超过上限直接丢弃并记录错误。
         """
-        # 并发上限检查
-        with self._async_lock:
-            cnt = self._async_event_counts[event_name]
-            if cnt >= self._max_async_per_event:
-                LOG_ERROR(
-                    f"[EventBus] 异步事件 '{event_name}' 并发超过上限 "
-                    f"({self._max_async_per_event}),已丢弃。可能存在递归 publish_async"
-                )
-                return
-
         with self.subscribers_lock:
             handlers = self.subscribers.get(event_name, []).copy()
 
         if not handlers:
             return
 
-        # 提交前递增计数(每个 handler 一次,完成时递减)
+        # 计数单位是 handler future，而不是 publish 次数。检查与预留必须在同一
+        # 把锁内完成，否则多个发布者可同时越过上限；还要按本次 handler 数量
+        # 判断，避免 cnt=7 时一次提交 5 个 future 把 8 的上限冲到 12。
         with self._async_lock:
+            cnt = self._async_event_counts[event_name]
+            if cnt + len(handlers) > self._max_async_per_event:
+                LOG_ERROR(
+                    f"[EventBus] 异步事件 '{event_name}' 并发超过上限 "
+                    f"({self._max_async_per_event}),已丢弃。可能存在递归 publish_async"
+                )
+                return
             self._async_event_counts[event_name] += len(handlers)
 
         for handler in handlers:
-            self._executor.submit(self._safe_async_handler, event_name, handler, *args, **kwargs)
+            try:
+                self._executor.submit(
+                    self._safe_async_handler, event_name, handler, *args, **kwargs
+                )
+            except Exception as e:
+                # 预留计数必须与实际成功提交的 future 对称；例如 cleanup 后的
+                # RuntimeError 不能把该事件永久卡在“达到并发上限”。
+                with self._async_lock:
+                    self._async_event_counts[event_name] -= 1
+                    if self._async_event_counts[event_name] <= 0:
+                        self._async_event_counts.pop(event_name, None)
+                LOG_ERROR(f"Error submitting async event '{event_name}': {e}")
 
     def _safe_async_handler(self, event_name: str, handler: Callable, *args, **kwargs):
         """安全地执行异步事件处理器"""

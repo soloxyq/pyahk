@@ -1,21 +1,44 @@
 import ctypes
 import ctypes.wintypes
-from ctypes import Structure, POINTER, c_void_p, c_int, c_uint8, c_uint64, c_char_p
+from ctypes import Structure, POINTER, c_void_p, c_int, c_uint8, c_uint64, c_size_t, c_char_p
 import os
 import sys
+import math
 from typing import Optional, Callable, Any
 import numpy as np
 from PIL import Image
 
 
+_C_INT_MIN = -(2**31)
+_C_INT_MAX = 2**31 - 1
+
+
+def _strict_c_int(value: Any, name: str, *, minimum: int = _C_INT_MIN) -> int:
+    """Convert a config value to C ``int`` without bool/fraction/overflow coercion."""
+    if type(value) is bool:
+        raise ValueError(f"{name} 不能是布尔值")
+    if isinstance(value, float) and (
+        not math.isfinite(value) or not value.is_integer()
+    ):
+        raise ValueError(f"{name} 必须是有限整数")
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} 必须是整数") from exc
+    if not minimum <= result <= _C_INT_MAX:
+        raise ValueError(f"{name} 超出 32 位整数范围")
+    return result
+
+
 # 错误码定义
 class CaptureResult:
     SUCCESS = 0
-    ERROR_INIT_FAILED = -1
-    ERROR_WINDOW_NOT_FOUND = -2
-    ERROR_CAPTURE_FAILED = -3
-    ERROR_INVALID_PARAM = -4
-    ERROR_NOT_INITIALIZED = -5
+    ERROR_NOT_INITIALIZED = -1
+    ERROR_INIT_FAILED = -2
+    ERROR_INVALID_PARAM = -3
+    ERROR_CAPTURE_FAILED = -4
+    ERROR_OUT_OF_MEMORY = -5
+    ERROR_UNSUPPORTED = -6
 
 
 # 捕获区域结构
@@ -40,7 +63,7 @@ class CaptureFrame(Structure):
         ("stride", c_int),
         ("timestamp", c_uint64),
         ("data", POINTER(c_uint8)),
-        ("data_size", c_int),
+        ("data_size", c_size_t),
         ("format", c_int),
     ]
 
@@ -193,6 +216,10 @@ class GameCaptureLib:
         self._lib.capture_get_config.argtypes = [c_void_p, POINTER(CaptureConfig)]
         self._lib.capture_get_config.restype = c_int
 
+        # capture_get_frame_rect
+        self._lib.capture_get_frame_rect.argtypes = [c_void_p, POINTER(CaptureRegion)]
+        self._lib.capture_get_frame_rect.restype = c_int
+
         # capture_clear_frame_cache
         self._lib.capture_clear_frame_cache.argtypes = [c_void_p]
         self._lib.capture_clear_frame_cache.restype = None
@@ -240,8 +267,12 @@ class GameCaptureLib:
             print("库未初始化")
             return None
 
-        if config:
-            c_config = self._dict_to_capture_config(config)
+        if config is not None:
+            try:
+                c_config = self._dict_to_capture_config(config)
+            except ValueError as exc:
+                print(f"捕获配置无效: {exc}")
+                return None
             handle = self._lib.capture_create_window_session_with_config(
                 window_handle, ctypes.byref(c_config)
             )
@@ -273,8 +304,12 @@ class GameCaptureLib:
             print("库未初始化")
             return None
 
-        if config:
-            c_config = self._dict_to_capture_config(config)
+        if config is not None:
+            try:
+                c_config = self._dict_to_capture_config(config)
+            except ValueError as exc:
+                print(f"捕获配置无效: {exc}")
+                return None
             handle = self._lib.capture_create_monitor_session_with_config(
                 monitor_index, ctypes.byref(c_config)
             )
@@ -376,6 +411,23 @@ class GameCaptureLib:
             # This can happen if there's no new frame. It's not necessarily an error.
             return None
 
+    def get_frame_rect(self, session_id: int) -> Optional[dict]:
+        """Return the current frame rectangle in virtual-desktop pixels."""
+        if session_id not in self._sessions:
+            return None
+        rect = CaptureRegion()
+        result = self._lib.capture_get_frame_rect(
+            self._sessions[session_id], ctypes.byref(rect)
+        )
+        if result != CaptureResult.SUCCESS:
+            return None
+        return {
+            "x": rect.x,
+            "y": rect.y,
+            "width": rect.width,
+            "height": rect.height,
+        }
+
     def destroy_session(self, session_id: int):
         """销毁捕获会话
 
@@ -402,7 +454,11 @@ class GameCaptureLib:
             return False
 
         handle = self._sessions[session_id]
-        c_config = self._dict_to_capture_config(config)
+        try:
+            c_config = self._dict_to_capture_config(config)
+        except ValueError as exc:
+            print(f"捕获配置无效: {exc}")
+            return False
         result = self._lib.capture_set_config(handle, ctypes.byref(c_config))
 
         if result == CaptureResult.SUCCESS:
@@ -449,15 +505,31 @@ class GameCaptureLib:
 
     def _dict_to_capture_config(self, config: dict) -> CaptureConfig:
         """将字典转换为CaptureConfig结构体"""
-        c_config = CaptureConfig()
-        c_config.capture_interval_ms = config.get("capture_interval_ms", 40)
-        c_config.enable_region = 1 if config.get("enable_region", False) else 0
+        if not isinstance(config, dict):
+            raise ValueError("config 必须是对象")
 
+        enable_region = config.get("enable_region", False)
+        if type(enable_region) is not bool:
+            raise ValueError("enable_region 必须是布尔值")
         region = config.get("region", {})
-        c_config.region.x = region.get("x", 0)
-        c_config.region.y = region.get("y", 0)
-        c_config.region.width = region.get("width", 0)
-        c_config.region.height = region.get("height", 0)
+        if not isinstance(region, dict):
+            raise ValueError("region 必须是对象")
+
+        c_config = CaptureConfig()
+        c_config.capture_interval_ms = _strict_c_int(
+            config.get("capture_interval_ms", 40),
+            "capture_interval_ms",
+            minimum=0,
+        )
+        c_config.enable_region = 1 if enable_region else 0
+        c_config.region.x = _strict_c_int(region.get("x", 0), "region.x")
+        c_config.region.y = _strict_c_int(region.get("y", 0), "region.y")
+        c_config.region.width = _strict_c_int(
+            region.get("width", 0), "region.width", minimum=1 if enable_region else 0
+        )
+        c_config.region.height = _strict_c_int(
+            region.get("height", 0), "region.height", minimum=1 if enable_region else 0
+        )
 
         return c_config
 
@@ -711,6 +783,11 @@ class CaptureManager:
         if not self._initialized:
             return
         self._capture_lib.clear_frame_cache(session_id)
+
+    def get_frame_rect(self, session_id: int) -> Optional[dict]:
+        if not self._initialized:
+            return None
+        return self._capture_lib.get_frame_rect(session_id)
 
     def find_window_by_title(self, title_pattern: str) -> Optional[int]:
         """根据标题查找窗口

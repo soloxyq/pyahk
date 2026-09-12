@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
 )
 from PySide6.QtCore import Qt
+from copy import deepcopy
 from typing import Dict, Any
 
 from .custom_widgets import (
@@ -27,6 +28,7 @@ from .custom_widgets import (
     ConfigComboBox,
 )
 from ..utils.key_names import normalize_key_name
+from ..utils.config_values import config_int
 
 
 # 状态字符串常量
@@ -46,6 +48,8 @@ class TopControlsWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._input_mode_snapshot = "direct"
+        self._debug_config_snapshot: Dict[str, Any] = {}
         self._setup_ui()
 
     def _setup_ui(self):
@@ -122,10 +126,18 @@ class TopControlsWidget(QWidget):
 
     def get_config(self) -> Dict[str, Any]:
         """获取配置"""
+        current_input_mode = self.input_mode_combo.currentText().lower()
+        input_mode = (
+            current_input_mode
+            if current_input_mode in {"direct", "control"}
+            else deepcopy(self._input_mode_snapshot)
+        )
+        debug_config = deepcopy(self._debug_config_snapshot)
+        debug_config["enabled"] = self.debug_mode_checkbox.isChecked()
         return {
             "sequence_enabled": self.mode_combo.currentText() == "序列",
-            "debug_mode": {"enabled": self.debug_mode_checkbox.isChecked()},
-            "input_mode": self.input_mode_combo.currentText().lower(),  # "direct" or "control"
+            "debug_mode": debug_config,
+            "input_mode": input_mode,
             "boss_mode_hotkey": normalize_key_name(
                 self.boss_mode_hotkey_entry.text().strip()
             ) if self.boss_mode_hotkey_entry.text().strip() else "",
@@ -133,22 +145,34 @@ class TopControlsWidget(QWidget):
 
     def update_from_config(self, config: Dict[str, Any]):
         """从配置更新UI"""
-        is_sequence = config.get("sequence_enabled", False)
+        config = config if isinstance(config, dict) else {}
+        is_sequence = config.get("sequence_enabled") is True
         self.mode_combo.blockSignals(True)
         self.mode_combo.setCurrentText("序列" if is_sequence else "技能")
         self.mode_combo.blockSignals(False)
 
         # DEBUG MODE
-        debug_config = config.get("debug_mode", {})
-        self.debug_mode_checkbox.setChecked(debug_config.get("enabled", False))
+        raw_debug_config = config.get("debug_mode", {})
+        debug_config = raw_debug_config if isinstance(raw_debug_config, dict) else {}
+        self._debug_config_snapshot = deepcopy(debug_config)
+        self.debug_mode_checkbox.setChecked(debug_config.get("enabled") is True)
 
         # INPUT MODE
-        input_mode = config.get("input_mode", "direct")
+        raw_input_mode = config.get("input_mode", "direct")
+        input_mode = str(raw_input_mode or "").lower()
+        self._input_mode_snapshot = deepcopy(
+            input_mode if input_mode in {"direct", "control"} else raw_input_mode
+        )
         self.input_mode_combo.blockSignals(True)
-        self.input_mode_combo.setCurrentText(input_mode.capitalize())
+        if input_mode in {"direct", "control"}:
+            self.input_mode_combo.setCurrentText(input_mode.capitalize())
+        else:
+            self.input_mode_combo.setCurrentIndex(-1)
         self.input_mode_combo.blockSignals(False)
 
-        self.boss_mode_hotkey_entry.setText(config.get("boss_mode_hotkey", ""))
+        self.boss_mode_hotkey_entry.setText(
+            normalize_key_name(config.get("boss_mode_hotkey"))
+        )
 
 
 class TimingSettingsWidget(QWidget):
@@ -171,9 +195,7 @@ class TimingSettingsWidget(QWidget):
         grid_layout.setSpacing(12)
 
         settings = [
-            ("「通用」队列处理:", "queue_processor"),
             ("「通用」按键时长:", "key_press"),
-            ("「通用」鼠标时长:", "mouse_click"),
             ("「技能」冷却检查:", "cooldown_checker"),
             ("「通用」图像捕获间隔:", "capture_interval"),
             ("「通用」特殊键恢复保护:", "special_key_resume_delay"),
@@ -221,11 +243,7 @@ class TimingSettingsWidget(QWidget):
     def get_config(self) -> Dict[str, Any]:
         """获取配置"""
         config = {
-            "queue_processor_interval": self.timing_spinboxes[
-                "queue_processor"
-            ].value(),
             "key_press_duration": self.timing_spinboxes["key_press"].value(),
-            "mouse_click_duration": self.timing_spinboxes["mouse_click"].value(),
             "cooldown_checker_interval": self.timing_spinboxes[
                 "cooldown_checker"
             ].value(),
@@ -243,24 +261,55 @@ class TimingSettingsWidget(QWidget):
 
     def update_from_config(self, config: Dict[str, Any]):
         """从配置更新UI"""
+        config = config if isinstance(config, dict) else {}
+        raw_resource_config = config.get("resource_management", {})
+        resource_config = (
+            raw_resource_config if isinstance(raw_resource_config, dict) else {}
+        )
+        raw_hp_config = resource_config.get("hp_config", {})
+        raw_mp_config = resource_config.get("mp_config", {})
+        hp_config = raw_hp_config if isinstance(raw_hp_config, dict) else {}
+        mp_config = raw_mp_config if isinstance(raw_mp_config, dict) else {}
         mapping = {
-            "queue_processor": config.get("queue_processor_interval", 50),
             "key_press": config.get("key_press_duration", 10),
-            "mouse_click": config.get("mouse_click_duration", 5),
             "cooldown_checker": config.get("cooldown_checker_interval", 100),
             "capture_interval": config.get("capture_interval", 40),
             "special_key_resume_delay": config.get(
                 "special_key_resume_delay_ms", 0
             ),
-            "hp_cooldown": config.get("hp_cooldown", 5000),
-            "mp_cooldown": config.get("mp_cooldown", 8000),
-            "resource_check_interval": config.get("resource_check_interval", 200),
+            # nested resource_management 是持久化权威；顶层三项只作为旧配置
+            # 兼容别名读取，避免一次加载/保存把按 wiki 编写的 nested 值改回默认。
+            "hp_cooldown": hp_config.get(
+                "cooldown", config.get("hp_cooldown", 5000)
+            ),
+            "mp_cooldown": mp_config.get(
+                "cooldown", config.get("mp_cooldown", 8000)
+            ),
+            "resource_check_interval": resource_config.get(
+                "check_interval", config.get("resource_check_interval", 200)
+            ),
+        }
+        bounds = {
+            "key_press": (10, 1, 1000),
+            "cooldown_checker": (100, 1, 999999),
+            "capture_interval": (40, 10, 1000),
+            "special_key_resume_delay": (0, 0, 1000),
+            "hp_cooldown": (5000, 1, 999999),
+            "mp_cooldown": (8000, 1, 999999),
+            "resource_check_interval": (200, 1, 999999),
         }
         for key, value in mapping.items():
             if key in self.timing_spinboxes:
-                self.timing_spinboxes[key].setValue(value)
+                default, minimum, maximum = bounds[key]
+                try:
+                    parsed = config_int(value)
+                except ValueError:
+                    parsed = default
+                self.timing_spinboxes[key].setValue(
+                    min(max(parsed, minimum), maximum)
+                )
 
         if self.sound_feedback_checkbox:
             self.sound_feedback_checkbox.setChecked(
-                config.get("sound_feedback_enabled", False)
+                config.get("sound_feedback_enabled") is True
             )

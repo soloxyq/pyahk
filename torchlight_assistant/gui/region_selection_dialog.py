@@ -6,7 +6,7 @@ import math
 
 from PySide6.QtWidgets import QDialog, QApplication
 from PySide6.QtCore import Qt, QRect, Signal as QSignal
-from PySide6.QtGui import QPainter, QPen, QColor
+from PySide6.QtGui import QPainter, QPen, QColor, QCursor
 from torchlight_assistant.utils.debug_log import LOG_INFO, LOG, LOG_ERROR
 
 
@@ -36,6 +36,25 @@ def logical_rect_to_physical(x1, y1, x2, y2, dpr, max_w, max_h):
     return px1, py1, px2, py2
 
 
+def _physical_monitor_origin(screen):
+    """Best-effort Win32 physical origin for the screen under the cursor."""
+    try:
+        import win32api
+        import win32con
+
+        monitor = win32api.MonitorFromPoint(
+            win32api.GetCursorPos(), win32con.MONITOR_DEFAULTTONEAREST
+        )
+        left, top, _, _ = win32api.GetMonitorInfo(monitor)["Monitor"]
+        return int(left), int(top)
+    except Exception:
+        # On non-Windows/test hosts this is the best available fallback.  On
+        # Windows the Win32 path above is required because QScreen geometry can
+        # be in logical rather than physical pixels under per-monitor DPI.
+        geometry = screen.geometry()
+        return int(geometry.x()), int(geometry.y())
+
+
 class RegionSelectionDialog(QDialog):
     """区域选择对话框"""
 
@@ -58,8 +77,11 @@ class RegionSelectionDialog(QDialog):
         self.setAttribute(Qt.WA_DeleteOnClose)
 
         # 获取屏幕截图(grabWindow 返回**物理像素**尺寸的 pixmap)
-        screen = QApplication.primaryScreen()
+        # Capture the monitor under the cursor rather than always the primary
+        # monitor, so users can configure a game on a secondary display.
+        screen = QApplication.screenAt(QCursor.pos()) or QApplication.primaryScreen()
         self.screenshot = screen.grabWindow(0)
+        self._desktop_origin = _physical_monitor_origin(screen)
 
         # DPI 适配。换算比例**从截图自身推导**(物理宽 / 逻辑屏宽),不用
         # screen.devicePixelRatio():这个比值就是"截图原始索引空间 ↔ 鼠标逻辑空间"
@@ -157,15 +179,20 @@ class RegionSelectionDialog(QDialog):
                     self._dpr, self.screenshot.width(), self.screenshot.height(),
                 )
 
+                abs_x1 = x1 + self._desktop_origin[0]
+                abs_y1 = y1 + self._desktop_origin[1]
+                abs_x2 = x2 + self._desktop_origin[0]
+                abs_y2 = y2 + self._desktop_origin[1]
                 LOG(
                     f"[调试] 区域选择完成(物理像素, DPR={self._dpr}): "
-                    f"({x1},{y1}) -> ({x2},{y2})"
+                    f"({abs_x1},{abs_y1}) -> ({abs_x2},{abs_y2})"
                 )
 
                 # 立即发送区域选择信号
-                self.region_selected.emit(x1, y1, x2, y2)
+                self.region_selected.emit(abs_x1, abs_y1, abs_x2, abs_y2)
 
-                # 存储区域信息，准备异步分析
+                # Color analysis slices the monitor-local screenshot; signals
+                # and persisted config use virtual-desktop absolute pixels.
                 self._selected_region = (x1, y1, x2, y2)
 
                 if self._analyze_colors_enabled:
@@ -195,10 +222,14 @@ class RegionSelectionDialog(QDialog):
             # 执行颜色分析
             color_analysis = self._analyze_region_colors(x1, y1, x2, y2)
 
+            abs_x1 = x1 + self._desktop_origin[0]
+            abs_y1 = y1 + self._desktop_origin[1]
+            abs_x2 = x2 + self._desktop_origin[0]
+            abs_y2 = y2 + self._desktop_origin[1]
             # 发送颜色分析信号
             if color_analysis:
                 LOG(f"[调试] 发送颜色分析结果")
-                self.region_analyzed.emit(x1, y1, x2, y2, color_analysis)
+                self.region_analyzed.emit(abs_x1, abs_y1, abs_x2, abs_y2, color_analysis)
             else:
                 LOG(f"[调试] 颜色分析失败")
 

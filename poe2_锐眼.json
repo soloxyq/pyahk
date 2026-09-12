@@ -126,15 +126,9 @@
         "debug_mode": {
             "enabled": false
         },
-        "queue_processor_interval": 35,
         "key_press_duration": 10,
-        "mouse_click_duration": 5,
         "cooldown_checker_interval": 120,
-        "sequence_timer_interval": 125,
         "capture_interval": 55,
-        "hp_cooldown": 1000,
-        "mp_cooldown": 1000,
-        "resource_check_interval": 200,
         "sound_feedback_enabled": true,
         "window_activation": {
             "enabled": true,
@@ -158,7 +152,6 @@
             "close_button_coord": null
         },
         "pathfinding_config": {
-            "hotkey": "",
             "minimap_area": [
                 0,
                 0,
@@ -185,27 +178,7 @@
                 "region_x1": 113,
                 "region_y1": 896,
                 "region_x2": 124,
-                "region_y2": 1051,
-                "colors": [
-                    {
-                        "name": "Color1",
-                        "target_h": 157,
-                        "target_s": 75,
-                        "target_v": 29,
-                        "tolerance_h": 10,
-                        "tolerance_s": 30,
-                        "tolerance_v": 50
-                    },
-                    {
-                        "name": "Color2",
-                        "target_h": 40,
-                        "target_s": 84,
-                        "target_v": 48,
-                        "tolerance_h": 10,
-                        "tolerance_s": 30,
-                        "tolerance_v": 50
-                    }
-                ]
+                "region_y2": 1051
             },
             "mp_config": {
                 "enabled": true,
@@ -225,18 +198,7 @@
                 "region_x1": 1787,
                 "region_y1": 894,
                 "region_x2": 1800,
-                "region_y2": 1053,
-                "colors": [
-                    {
-                        "name": "Color1",
-                        "target_h": 104,
-                        "target_s": 80,
-                        "target_v": 58,
-                        "tolerance_h": 10,
-                        "tolerance_s": 30,
-                        "tolerance_v": 50
-                    }
-                ]
+                "region_y2": 1053
             },
             "check_interval": 200
         },

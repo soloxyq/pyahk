@@ -1,3 +1,7 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include <windows.h>
 #include <objbase.h>
 #include <iostream>
@@ -15,7 +19,6 @@ static int64_t GetCurrentTimeMs() {
     return std::chrono::duration_cast<std::chrono::milliseconds>(duration).count();
 }
 
-#define NOMINMAX
 #include <dxgi1_2.h>
 #include <d3d11.h>
 #include <vector>
@@ -23,6 +26,7 @@ static int64_t GetCurrentTimeMs() {
 #include <mutex>
 #include <map>
 #include <algorithm>
+#include <limits>
 
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3d11.lib")
@@ -40,18 +44,31 @@ static int64_t GetCurrentTimeMs() {
 
 // Global variables
 static bool g_initialized = false;
-static CaptureError g_last_error = CAPTURE_ERROR_NONE;
-static ID3D11Device* g_d3d_device = nullptr;
-static ID3D11DeviceContext* g_d3d_context = nullptr;
+static unsigned int g_init_refcount = 0;
+static thread_local CaptureError g_last_error = CAPTURE_ERROR_NONE;
 static IDXGIFactory1* g_dxgi_factory = nullptr;
-static std::mutex g_capture_mutex;
+// Desktop Duplication and D3D11 immediate contexts are not thread-safe.
+// Serializing exported operations also keeps handles alive during lookup/use.
+static std::recursive_mutex g_api_mutex;
 static std::map<CaptureHandle, class DXGICaptureSession*> g_sessions;
+
+struct OutputSelection {
+    int adapter_index = -1;
+    int output_index = -1;
+};
+
+static bool IsConfigStructurallyValid(const CaptureConfig* config) {
+    return config && config->capture_interval_ms >= 0 &&
+        (config->enable_region == 0 || config->enable_region == 1) &&
+        (!config->enable_region ||
+         (config->region.width > 0 && config->region.height > 0));
+}
 
 // DXGI Capture Session
 class DXGICaptureSession {
 public:
     HWND target_window = nullptr;
-    int monitor_index = -1;
+    OutputSelection output_selection;
     bool is_running = false;
     
     // Capture configuration
@@ -62,6 +79,8 @@ public:
     IDXGIOutput* output = nullptr;
     IDXGIOutput1* output1 = nullptr;
     IDXGIOutputDuplication* duplication = nullptr;
+    ID3D11Device* d3d_device = nullptr;
+    ID3D11DeviceContext* d3d_context = nullptr;
     
     // --- Zero-Copy Frame Buffers ---
     std::vector<uint8_t> buffer_a;
@@ -72,7 +91,7 @@ public:
     CaptureFrame shared_frame;
 
     // Atomic pointer to the currently readable buffer's data.
-    std::atomic<uint8_t*> current_read_buffer;
+    std::atomic<uint8_t*> current_read_buffer{nullptr};
 
     // Which buffer is the capture thread currently writing to?
     // (The other one is the read buffer)
@@ -82,6 +101,10 @@ public:
     int frame_height = 0;
     int original_width = 0;   // 原始屏幕宽度
     int original_height = 0;  // 原始屏幕高度
+    int output_left = 0;
+    int output_top = 0;
+    int frame_left = 0;
+    int frame_top = 0;
     
     // Staging texture for GPU-to-CPU transfer (reused across captures)
     ID3D11Texture2D* staging_texture = nullptr;
@@ -112,12 +135,48 @@ public:
             output->Release();
             output = nullptr;
         }
+        if (d3d_context) {
+            d3d_context->Release();
+            d3d_context = nullptr;
+        }
+        if (d3d_device) {
+            d3d_device->Release();
+            d3d_device = nullptr;
+        }
         if (adapter) {
             adapter->Release();
             adapter = nullptr;
         }
+        staging_width = 0;
+        staging_height = 0;
+        original_width = 0;
+        original_height = 0;
+        frame_width = 0;
+        frame_height = 0;
+        shared_frame.data = nullptr;
+        shared_frame.data_size = 0;
+        current_read_buffer.store(nullptr);
     }
 };
+
+static bool IsRegionWithinCurrentOutput(
+    const DXGICaptureSession* session, const CaptureConfig& config
+) {
+    if (!config.enable_region) return true;
+    if (session->original_width <= 0 || session->original_height <= 0) {
+        return false;
+    }
+    const CaptureRegion& region = config.region;
+    const int64_t region_right = static_cast<int64_t>(region.x) + region.width;
+    const int64_t region_bottom = static_cast<int64_t>(region.y) + region.height;
+    const int64_t output_right = static_cast<int64_t>(session->output_left) +
+        session->original_width;
+    const int64_t output_bottom = static_cast<int64_t>(session->output_top) +
+        session->original_height;
+    return region.width > 0 && region.height > 0 &&
+        region.x >= session->output_left && region.y >= session->output_top &&
+        region_right <= output_right && region_bottom <= output_bottom;
+}
 
 // Helper functions
 static bool InitializeDXGI() {
@@ -130,103 +189,174 @@ static bool InitializeDXGI() {
         return false;
     }
     
-    // Create D3D11 device
-    D3D_FEATURE_LEVEL featureLevels[] = {
-        D3D_FEATURE_LEVEL_11_1,
-        D3D_FEATURE_LEVEL_11_0,
-    };
-    
-    hr = D3D11CreateDevice(
-        nullptr,
-        D3D_DRIVER_TYPE_HARDWARE,
-        nullptr,
-        0,
-        featureLevels,
-        ARRAYSIZE(featureLevels),
-        D3D11_SDK_VERSION,
-        &g_d3d_device,
-        nullptr,
-        &g_d3d_context
-    );
-    
-    return SUCCEEDED(hr);
+    return true;
 }
 
-static int GetMonitorFromWindow(HWND hwnd) {
-    HMONITOR hMonitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
-    if (!hMonitor) {
-        return 0;
-    }
-    
-    // Enumerate adapters to find the monitor
+static bool GetOutputSelectionForMonitor(HMONITOR monitor, OutputSelection* selection) {
+    if (!monitor || !selection || !g_dxgi_factory) return false;
     IDXGIAdapter1* adapter = nullptr;
     for (UINT i = 0; g_dxgi_factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
         IDXGIOutput* output = nullptr;
         for (UINT j = 0; adapter->EnumOutputs(j, &output) != DXGI_ERROR_NOT_FOUND; ++j) {
             DXGI_OUTPUT_DESC desc;
-            if (SUCCEEDED(output->GetDesc(&desc))) {
-                if (desc.Monitor == hMonitor) {
-                    output->Release();
-                    adapter->Release();
-                    return i;
-                }
-            }
+            const bool matches = SUCCEEDED(output->GetDesc(&desc)) && desc.Monitor == monitor;
             output->Release();
+            if (matches) {
+                adapter->Release();
+                selection->adapter_index = static_cast<int>(i);
+                selection->output_index = static_cast<int>(j);
+                return true;
+            }
         }
         adapter->Release();
     }
-    
-    return 0;
+    return false;
+}
+
+static bool GetOutputSelectionForWindow(HWND hwnd, OutputSelection* selection) {
+    return GetOutputSelectionForMonitor(
+        MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), selection
+    );
+}
+
+// monitor_index is zero-based across all DXGI outputs, not an adapter index.
+static bool GetOutputSelectionByGlobalIndex(int monitor_index, OutputSelection* selection) {
+    if (monitor_index < 0 || !selection || !g_dxgi_factory) return false;
+    int current_index = 0;
+    IDXGIAdapter1* adapter = nullptr;
+    for (UINT i = 0; g_dxgi_factory->EnumAdapters1(i, &adapter) != DXGI_ERROR_NOT_FOUND; ++i) {
+        IDXGIOutput* output = nullptr;
+        for (UINT j = 0; adapter->EnumOutputs(j, &output) != DXGI_ERROR_NOT_FOUND; ++j) {
+            output->Release();
+            if (current_index++ == monitor_index) {
+                adapter->Release();
+                selection->adapter_index = static_cast<int>(i);
+                selection->output_index = static_cast<int>(j);
+                return true;
+            }
+        }
+        adapter->Release();
+    }
+    return false;
 }
 
 static bool SetupDuplication(DXGICaptureSession* session) {
     HRESULT hr;
+    const auto fail_setup = [session]() {
+        session->cleanup();
+        return false;
+    };
     
     // Get adapter
-    hr = g_dxgi_factory->EnumAdapters1(session->monitor_index, &session->adapter);
+    hr = g_dxgi_factory->EnumAdapters1(session->output_selection.adapter_index, &session->adapter);
     if (FAILED(hr)) {
-        return false;
+        return fail_setup();
+    }
+
+    // Desktop Duplication requires the D3D device to be created on the same
+    // adapter as the selected output. A single default-adapter device fails on
+    // cross-GPU multi-monitor systems even when output enumeration is correct.
+    D3D_FEATURE_LEVEL feature_levels[] = {
+        D3D_FEATURE_LEVEL_11_1,
+        D3D_FEATURE_LEVEL_11_0,
+    };
+    hr = D3D11CreateDevice(
+        session->adapter,
+        D3D_DRIVER_TYPE_UNKNOWN,
+        nullptr,
+        0,
+        feature_levels,
+        ARRAYSIZE(feature_levels),
+        D3D11_SDK_VERSION,
+        &session->d3d_device,
+        nullptr,
+        &session->d3d_context
+    );
+    if (hr == E_INVALIDARG) {
+        // Older Windows runtimes reject a feature-level list containing 11_1.
+        if (session->d3d_context) {
+            session->d3d_context->Release();
+            session->d3d_context = nullptr;
+        }
+        if (session->d3d_device) {
+            session->d3d_device->Release();
+            session->d3d_device = nullptr;
+        }
+        hr = D3D11CreateDevice(
+            session->adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
+            nullptr,
+            0,
+            &feature_levels[1],
+            1,
+            D3D11_SDK_VERSION,
+            &session->d3d_device,
+            nullptr,
+            &session->d3d_context
+        );
+    }
+    if (FAILED(hr)) {
+        return fail_setup();
     }
     
     // Get output
-    hr = session->adapter->EnumOutputs(0, &session->output);
+    hr = session->adapter->EnumOutputs(session->output_selection.output_index, &session->output);
     if (FAILED(hr)) {
-        return false;
+        return fail_setup();
     }
     
     // Get output1 interface
     hr = session->output->QueryInterface(__uuidof(IDXGIOutput1), (void**)&session->output1);
     if (FAILED(hr)) {
-        return false;
+        return fail_setup();
     }
     
     // Create desktop duplication
-    hr = session->output1->DuplicateOutput(g_d3d_device, &session->duplication);
+    hr = session->output1->DuplicateOutput(session->d3d_device, &session->duplication);
     if (FAILED(hr)) {
-        return false;
+        return fail_setup();
     }
     
     // Get output description
     DXGI_OUTPUT_DESC desc;
     hr = session->output->GetDesc(&desc);
     if (FAILED(hr)) {
-        return false;
+        return fail_setup();
     }
     
     session->original_width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
     session->original_height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
+    session->output_left = desc.DesktopCoordinates.left;
+    session->output_top = desc.DesktopCoordinates.top;
+
+    if (!IsRegionWithinCurrentOutput(session, session->config)) {
+        g_last_error = CAPTURE_ERROR_INVALID_PARAMETER;
+        return fail_setup();
+    }
     
     // Calculate buffer size based on actual capture region
     int buffer_width = session->config.enable_region ? 
         session->config.region.width : session->original_width;
     int buffer_height = session->config.enable_region ? 
         session->config.region.height : session->original_height;
+    if (buffer_width <= 0 || buffer_height <= 0) return fail_setup();
     
     // Calculate required size (BGRA = 4 bytes per pixel)
-    size_t required_size = buffer_width * buffer_height * 4;
+    const size_t width_size = static_cast<size_t>(buffer_width);
+    const size_t height_size = static_cast<size_t>(buffer_height);
+    if (height_size > std::numeric_limits<size_t>::max() / width_size / 4) {
+        g_last_error = CAPTURE_ERROR_OUT_OF_MEMORY;
+        return fail_setup();
+    }
+    size_t required_size = width_size * height_size * 4;
     
     // Allocate 110% of required size to handle minor resolution changes
-    size_t allocate_size = required_size * 110 / 100;
+    const size_t reserve_extra = required_size / 10;
+    if (required_size > std::numeric_limits<size_t>::max() - reserve_extra) {
+        g_last_error = CAPTURE_ERROR_OUT_OF_MEMORY;
+        return fail_setup();
+    }
+    size_t allocate_size = required_size + reserve_extra;
     
     try {
         session->buffer_a.resize(allocate_size);
@@ -234,7 +364,8 @@ static bool SetupDuplication(DXGICaptureSession* session) {
         DEBUG_PRINT("SetupDuplication: Allocated " << allocate_size 
                    << " bytes for " << buffer_width << "x" << buffer_height);
     } catch (const std::bad_alloc&) {
-        return false; // Failed to allocate buffers
+        g_last_error = CAPTURE_ERROR_OUT_OF_MEMORY;
+        return fail_setup();
     }
 
     // Set initial state
@@ -244,8 +375,38 @@ static bool SetupDuplication(DXGICaptureSession* session) {
     // Initialize shared frame structure
     memset(&session->shared_frame, 0, sizeof(CaptureFrame));
     session->shared_frame.format = CAPTURE_FORMAT_BGRA;
+    session->frame_width = 0;
+    session->frame_height = 0;
+    session->frame_left = session->output_left;
+    session->frame_top = session->output_top;
 
     return true;
+}
+
+static bool RefreshWindowOutput(DXGICaptureSession* session) {
+    if (!session->target_window) {
+        if (session->duplication) return true;
+        session->cleanup();
+        return SetupDuplication(session);
+    }
+    OutputSelection selection;
+    if (!IsWindow(session->target_window) ||
+        !GetOutputSelectionForWindow(session->target_window, &selection)) return false;
+    if (selection.adapter_index == session->output_selection.adapter_index &&
+        selection.output_index == session->output_selection.output_index) {
+        if (session->duplication) return true;
+        // A previous DuplicateOutput/recovery attempt may have failed after
+        // releasing the old objects. Retry on the next poll instead of leaving
+        // this live session permanently unable to capture.
+        session->cleanup();
+        return SetupDuplication(session);
+    }
+
+    // Desktop Duplication is output-bound; do not expose frames from the old
+    // output after a target window crosses monitors.
+    session->cleanup();
+    session->output_selection = selection;
+    return SetupDuplication(session);
 }
 
 static bool CaptureFrameData(DXGICaptureSession* session) {
@@ -258,7 +419,8 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
     int64_t current_time = GetTickCount64();
     if (session->config.capture_interval_ms > 0) {
         int64_t time_since_last = current_time - session->last_capture_time;
-        if (time_since_last < session->config.capture_interval_ms) {
+        if (session->frame_width > 0 &&
+            time_since_last < session->config.capture_interval_ms) {
             return false; // Too early for next capture
         }
     }
@@ -310,7 +472,7 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
         stagingDesc.BindFlags = 0;
         stagingDesc.MiscFlags = 0;
         
-        hr = g_d3d_device->CreateTexture2D(&stagingDesc, nullptr, &session->staging_texture);
+        hr = session->d3d_device->CreateTexture2D(&stagingDesc, nullptr, &session->staging_texture);
         if (FAILED(hr)) {
             desktopTexture->Release();
             session->duplication->ReleaseFrame();
@@ -323,10 +485,10 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
                    << desc.Width << "x" << desc.Height);
     }
     
-    g_d3d_context->CopyResource(session->staging_texture, desktopTexture);
+    session->d3d_context->CopyResource(session->staging_texture, desktopTexture);
     
     D3D11_MAPPED_SUBRESOURCE mapped;
-    hr = g_d3d_context->Map(session->staging_texture, 0, D3D11_MAP_READ, 0, &mapped);
+    hr = session->d3d_context->Map(session->staging_texture, 0, D3D11_MAP_READ, 0, &mapped);
     if (FAILED(hr)) {
         desktopTexture->Release();
         session->duplication->ReleaseFrame();
@@ -337,12 +499,30 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
     int capture_x = 0, capture_y = 0;
     int capture_width = session->original_width;
     int capture_height = session->original_height;
+    session->frame_left = session->output_left;
+    session->frame_top = session->output_top;
     
     if (session->config.enable_region) {
-        capture_x = (std::max)(0, (std::min)(session->config.region.x, session->original_width - 1));
-        capture_y = (std::max)(0, (std::min)(session->config.region.y, session->original_height - 1));
-        capture_width = (std::max)(1, (std::min)(session->config.region.width, session->original_width - capture_x));
-        capture_height = (std::max)(1, (std::min)(session->config.region.height, session->original_height - capture_y));
+        const int64_t region_right = static_cast<int64_t>(session->config.region.x) + session->config.region.width;
+        const int64_t region_bottom = static_cast<int64_t>(session->config.region.y) + session->config.region.height;
+        const int64_t output_right = static_cast<int64_t>(session->output_left) + session->original_width;
+        const int64_t output_bottom = static_cast<int64_t>(session->output_top) + session->original_height;
+        if (session->config.region.width <= 0 || session->config.region.height <= 0 ||
+            session->config.region.x < session->output_left ||
+            session->config.region.y < session->output_top ||
+            region_right > output_right || region_bottom > output_bottom) {
+            g_last_error = CAPTURE_ERROR_INVALID_PARAMETER;
+            session->d3d_context->Unmap(session->staging_texture, 0);
+            desktopTexture->Release();
+            session->duplication->ReleaseFrame();
+            return false;
+        }
+        capture_x = session->config.region.x - session->output_left;
+        capture_y = session->config.region.y - session->output_top;
+        capture_width = session->config.region.width;
+        capture_height = session->config.region.height;
+        session->frame_left = session->config.region.x;
+        session->frame_top = session->config.region.y;
     }
     
     // Get the write buffer
@@ -350,8 +530,9 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
     
     // Optimized: Smarter buffer size adjustment
     // Resize buffer if region changes size
-    size_t required_size = capture_width * capture_height * 4;
-    if (write_buffer.size() != required_size) {
+    const size_t required_size = static_cast<size_t>(capture_width) *
+        static_cast<size_t>(capture_height) * 4;
+    if (write_buffer.size() < required_size) {
         try {
             // Pre-allocate slightly larger space to avoid frequent reallocation
             size_t new_size = required_size + (required_size / 10);  // Allocate 10% more
@@ -359,7 +540,7 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
             DEBUG_PRINT("CaptureFrameData: Buffer resized to " << new_size << " bytes (required: " << required_size << ")");
         } catch (const std::bad_alloc&) {
             // handle allocation failure
-            g_d3d_context->Unmap(session->staging_texture, 0);
+            session->d3d_context->Unmap(session->staging_texture, 0);
             desktopTexture->Release();
             session->duplication->ReleaseFrame();
             return false;
@@ -390,7 +571,7 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
     session->writing_to_a = !session->writing_to_a;
     
     // Cleanup (staging texture is reused, not released)
-    g_d3d_context->Unmap(session->staging_texture, 0);
+    session->d3d_context->Unmap(session->staging_texture, 0);
     desktopTexture->Release();
     session->duplication->ReleaseFrame();
     
@@ -399,7 +580,9 @@ static bool CaptureFrameData(DXGICaptureSession* session) {
 
 // API implementations
 CAPTURE_LIB_API CaptureError capture_init() {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (g_initialized) {
+        ++g_init_refcount;
         return CAPTURE_ERROR_NONE;
     }
     
@@ -409,12 +592,18 @@ CAPTURE_LIB_API CaptureError capture_init() {
     }
     
     g_initialized = true;
+    g_init_refcount = 1;
     g_last_error = CAPTURE_ERROR_NONE;
     return CAPTURE_ERROR_NONE;
 }
 
 CAPTURE_LIB_API void capture_cleanup() {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) {
+        return;
+    }
+    if (g_init_refcount > 1) {
+        --g_init_refcount;
         return;
     }
     
@@ -424,22 +613,13 @@ CAPTURE_LIB_API void capture_cleanup() {
     }
     g_sessions.clear();
     
-    if (g_d3d_context) {
-        g_d3d_context->Release();
-        g_d3d_context = nullptr;
-    }
-    
-    if (g_d3d_device) {
-        g_d3d_device->Release();
-        g_d3d_device = nullptr;
-    }
-    
     if (g_dxgi_factory) {
         g_dxgi_factory->Release();
         g_dxgi_factory = nullptr;
     }
     
     g_initialized = false;
+    g_init_refcount = 0;
 }
 
 CAPTURE_LIB_API const char* capture_get_error_string(CaptureError error) {
@@ -462,6 +642,7 @@ CAPTURE_LIB_API const char* capture_get_error_string(CaptureError error) {
 }
 
 CAPTURE_LIB_API CaptureError capture_get_last_error() {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     return g_last_error;
 }
 
@@ -473,12 +654,13 @@ CAPTURE_LIB_API CaptureHandle capture_create_window_session(HWND window) {
 }
 
 CAPTURE_LIB_API CaptureHandle capture_create_window_session_with_config(HWND window, const CaptureConfig* config) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) {
         g_last_error = CAPTURE_ERROR_NOT_INITIALIZED;
         return nullptr;
     }
     
-    if (!window || !IsWindow(window) || !config) {
+    if (!window || !IsWindow(window) || !IsConfigStructurallyValid(config)) {
         g_last_error = CAPTURE_ERROR_INVALID_PARAMETER;
         return nullptr;
     }
@@ -486,7 +668,11 @@ CAPTURE_LIB_API CaptureHandle capture_create_window_session_with_config(HWND win
     try {
         auto session = new DXGICaptureSession();
         session->target_window = window;
-        session->monitor_index = GetMonitorFromWindow(window);
+        if (!GetOutputSelectionForWindow(window, &session->output_selection)) {
+            delete session;
+            g_last_error = CAPTURE_ERROR_CAPTURE_FAILED;
+            return nullptr;
+        }
         session->config = *config;
         
         CaptureHandle handle = reinterpret_cast<CaptureHandle>(session);
@@ -509,19 +695,24 @@ CAPTURE_LIB_API CaptureHandle capture_create_monitor_session(int monitor_index) 
 }
 
 CAPTURE_LIB_API CaptureHandle capture_create_monitor_session_with_config(int monitor_index, const CaptureConfig* config) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) {
         g_last_error = CAPTURE_ERROR_NOT_INITIALIZED;
         return nullptr;
     }
     
-    if (monitor_index < 0 || !config) {
+    if (monitor_index < 0 || !IsConfigStructurallyValid(config)) {
         g_last_error = CAPTURE_ERROR_INVALID_PARAMETER;
         return nullptr;
     }
     
     try {
         auto session = new DXGICaptureSession();
-        session->monitor_index = monitor_index;
+        if (!GetOutputSelectionByGlobalIndex(monitor_index, &session->output_selection)) {
+            delete session;
+            g_last_error = CAPTURE_ERROR_INVALID_PARAMETER;
+            return nullptr;
+        }
         session->config = *config;
         
         CaptureHandle handle = reinterpret_cast<CaptureHandle>(session);
@@ -537,6 +728,7 @@ CAPTURE_LIB_API CaptureHandle capture_create_monitor_session_with_config(int mon
 }
 
 CAPTURE_LIB_API CaptureError capture_start(CaptureHandle handle) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) return CAPTURE_ERROR_NOT_INITIALIZED;
     if (!handle) return CAPTURE_ERROR_INVALID_PARAMETER;
     
@@ -544,9 +736,21 @@ CAPTURE_LIB_API CaptureError capture_start(CaptureHandle handle) {
     if (it == g_sessions.end()) return CAPTURE_ERROR_INVALID_PARAMETER;
     
     auto session = it->second;
-    
+    session->is_running = false;
+    session->cleanup();
+    if (session->target_window) {
+        OutputSelection selection;
+        if (!GetOutputSelectionForWindow(session->target_window, &selection)) {
+            g_last_error = CAPTURE_ERROR_CAPTURE_FAILED;
+            return g_last_error;
+        }
+        session->output_selection = selection;
+    }
+    g_last_error = CAPTURE_ERROR_NONE;
     if (!SetupDuplication(session)) {
-        g_last_error = CAPTURE_ERROR_CAPTURE_FAILED;
+        if (g_last_error == CAPTURE_ERROR_NONE) {
+            g_last_error = CAPTURE_ERROR_CAPTURE_FAILED;
+        }
         return g_last_error;
     }
     
@@ -564,6 +768,7 @@ CAPTURE_LIB_API CaptureError capture_start(CaptureHandle handle) {
 }
 
 CAPTURE_LIB_API CaptureError capture_stop(CaptureHandle handle) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) return CAPTURE_ERROR_NOT_INITIALIZED;
     if (!handle) return CAPTURE_ERROR_INVALID_PARAMETER;
     
@@ -579,6 +784,7 @@ CAPTURE_LIB_API CaptureError capture_stop(CaptureHandle handle) {
 }
 
 CAPTURE_LIB_API void capture_destroy_session(CaptureHandle handle) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!handle) return;
     
     auto it = g_sessions.find(handle);
@@ -589,6 +795,7 @@ CAPTURE_LIB_API void capture_destroy_session(CaptureHandle handle) {
 }
 
 CAPTURE_LIB_API CaptureFrame* capture_get_frame(CaptureHandle handle) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) {
         g_last_error = CAPTURE_ERROR_NOT_INITIALIZED;
         return nullptr;
@@ -611,6 +818,12 @@ CAPTURE_LIB_API CaptureFrame* capture_get_frame(CaptureHandle handle) {
         g_last_error = CAPTURE_ERROR_CAPTURE_FAILED;
         return nullptr;
     }
+    if (!RefreshWindowOutput(session)) {
+        if (g_last_error == CAPTURE_ERROR_NONE) {
+            g_last_error = CAPTURE_ERROR_CAPTURE_FAILED;
+        }
+        return nullptr;
+    }
     
     // Attempt to capture a new frame. This will atomically update the
     // read buffer pointer if successful.
@@ -623,7 +836,8 @@ CAPTURE_LIB_API CaptureFrame* capture_get_frame(CaptureHandle handle) {
     session->shared_frame.width = session->frame_width;
     session->shared_frame.height = session->frame_height;
     session->shared_frame.stride = session->frame_width * 4;
-    session->shared_frame.data_size = session->frame_width * session->frame_height * 4;
+    session->shared_frame.data_size = static_cast<size_t>(session->frame_width) *
+        static_cast<size_t>(session->frame_height) * 4;
     session->shared_frame.timestamp = GetCurrentTimeMs();
 
     if (session->shared_frame.data == nullptr || session->shared_frame.data_size == 0) {
@@ -640,6 +854,7 @@ CAPTURE_LIB_API void capture_free_frame(CaptureFrame* frame) {
 }
 
 CAPTURE_LIB_API int capture_enum_windows(WindowInfo* windows, int max_count) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!windows || max_count <= 0) {
         return 0;
     }
@@ -673,6 +888,7 @@ CAPTURE_LIB_API int capture_enum_windows(WindowInfo* windows, int max_count) {
 }
 
 CAPTURE_LIB_API bool capture_get_window_title(HWND window, char* title, int title_size) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!window || !title || title_size <= 0) {
         return false;
     }
@@ -681,6 +897,7 @@ CAPTURE_LIB_API bool capture_get_window_title(HWND window, char* title, int titl
 }
 
 CAPTURE_LIB_API CaptureError capture_set_config(CaptureHandle handle, const CaptureConfig* config) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) return CAPTURE_ERROR_NOT_INITIALIZED;
     if (!handle || !config) return CAPTURE_ERROR_INVALID_PARAMETER;
     
@@ -689,15 +906,38 @@ CAPTURE_LIB_API CaptureError capture_set_config(CaptureHandle handle, const Capt
     
     auto session = it->second;
     
-    // If region settings change, we may need to re-evaluate buffer sizes,
-    // but for now we just copy the config. The capture loop will handle resizing.
+    if (!IsConfigStructurallyValid(config) ||
+        (session->original_width > 0 &&
+         !IsRegionWithinCurrentOutput(session, *config))) {
+        g_last_error = CAPTURE_ERROR_INVALID_PARAMETER;
+        return g_last_error;
+    }
+
+    const bool spatial_change =
+        session->config.enable_region != config->enable_region ||
+        session->config.region.x != config->region.x ||
+        session->config.region.y != config->region.y ||
+        session->config.region.width != config->region.width ||
+        session->config.region.height != config->region.height;
     session->config = *config;
+    if (spatial_change) {
+        // Never expose a frame captured under the previous rectangle as if it
+        // belonged to the new coordinate contract. The next get_frame call
+        // must publish a fresh frame first.
+        session->frame_width = 0;
+        session->frame_height = 0;
+        session->shared_frame.data = nullptr;
+        session->shared_frame.data_size = 0;
+        session->current_read_buffer.store(nullptr);
+        session->last_capture_time = 0;
+    }
     
     g_last_error = CAPTURE_ERROR_NONE;
     return CAPTURE_ERROR_NONE;
 }
 
 CAPTURE_LIB_API CaptureError capture_get_config(CaptureHandle handle, CaptureConfig* config) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     if (!g_initialized) return CAPTURE_ERROR_NOT_INITIALIZED;
     if (!handle || !config) return CAPTURE_ERROR_INVALID_PARAMETER;
     
@@ -711,7 +951,26 @@ CAPTURE_LIB_API CaptureError capture_get_config(CaptureHandle handle, CaptureCon
     return CAPTURE_ERROR_NONE;
 }
 
+CAPTURE_LIB_API CaptureError capture_get_frame_rect(CaptureHandle handle, CaptureRegion* rect) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
+    if (!g_initialized) return CAPTURE_ERROR_NOT_INITIALIZED;
+    if (!handle || !rect) return CAPTURE_ERROR_INVALID_PARAMETER;
+    auto it = g_sessions.find(handle);
+    if (it == g_sessions.end()) return CAPTURE_ERROR_INVALID_PARAMETER;
+    auto session = it->second;
+    if (!session->is_running || session->frame_width <= 0 || session->frame_height <= 0) {
+        return CAPTURE_ERROR_CAPTURE_FAILED;
+    }
+    rect->x = session->frame_left;
+    rect->y = session->frame_top;
+    rect->width = session->frame_width;
+    rect->height = session->frame_height;
+    g_last_error = CAPTURE_ERROR_NONE;
+    return CAPTURE_ERROR_NONE;
+}
+
 CAPTURE_LIB_API void capture_clear_frame_cache(CaptureHandle handle) {
+    std::lock_guard<std::recursive_mutex> lock(g_api_mutex);
     // This function is less relevant with the double buffer model,
     // but we can clear the buffers if needed.
     if (!g_initialized || !handle) return;
@@ -721,9 +980,15 @@ CAPTURE_LIB_API void capture_clear_frame_cache(CaptureHandle handle) {
     
     auto session = it->second;
     
-    std::lock_guard<std::mutex> lock(g_capture_mutex);
-    std::fill(session->buffer_a.begin(), session->buffer_a.end(), 0);
-    std::fill(session->buffer_b.begin(), session->buffer_b.end(), 0);
+    // Filling the buffers with zero while retaining frame dimensions publishes
+    // a synthetic black frame. Invalidate metadata instead; callers then get
+    // nullptr until Desktop Duplication supplies a real fresh frame.
+    session->frame_width = 0;
+    session->frame_height = 0;
+    session->shared_frame.data = nullptr;
+    session->shared_frame.data_size = 0;
+    session->current_read_buffer.store(nullptr);
+    session->last_capture_time = 0;
     
     DEBUG_PRINT("capture_clear_frame_cache: Frame buffers cleared");
 }

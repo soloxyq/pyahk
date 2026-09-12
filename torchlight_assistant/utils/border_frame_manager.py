@@ -11,6 +11,7 @@ import os
 import cv2
 from .debug_log import LOG, LOG_ERROR, LOG_INFO
 from .region_utils import parse_screen_rect
+from .config_values import config_float, config_int
 
 
 # 导入Native Graphics Capture管理器
@@ -41,6 +42,8 @@ class BorderFrameManager:
         # (顺带保证同轮决策基于同一画面)。快照对消费者是**只读共享**的,不得原地修改。
         self._frame_snapshot: Optional[np.ndarray] = None
         self._frame_snapshot_at: float = 0.0
+        self._frame_origin: Tuple[int, int] = (0, 0)
+        self._last_window_capture_origin: Tuple[int, int] = (0, 0)
         self._snapshot_reuse_window = self._compute_reuse_window(capture_interval)
 
         # 边框区域信息
@@ -65,6 +68,7 @@ class BorderFrameManager:
         self.debug_save_enabled = False
         self.debug_save_path = "D:\\gtemp"
         self.debug_save_count = 0
+        self._cleanup_done = False
 
         # 订阅配置更新事件，确保窗口配置总能同步
         from ..core.event_bus import event_bus
@@ -85,7 +89,15 @@ class BorderFrameManager:
 
     def _on_config_updated(self, skills_config: Dict, global_config: Dict):
         """响应配置更新，更新窗口激活配置"""
-        window_config = global_config.get("window_activation", {})
+        # EventBus.publish 会先复制订阅者列表；cleanup 与一次在飞发布并发时，
+        # unsubscribe 不能撤销那份副本，因此旧实例还需在 handler 入口自我门禁。
+        if getattr(self, "_cleanup_done", False):
+            return
+        window_config = (
+            global_config.get("window_activation", {})
+            if isinstance(global_config, dict)
+            else {}
+        )
         self.set_window_activation_config(window_config)
         LOG_INFO(f"[BorderFrameManager] 窗口配置已更新: {window_config}")
 
@@ -96,28 +108,28 @@ class BorderFrameManager:
             import win32gui
 
             window_config = getattr(self, "window_activation_config", {})
-            ahk_class = window_config.get("ahk_class", "")
-            ahk_exe = window_config.get("ahk_exe", "")
+            if not WindowUtils.is_target_config_valid(window_config):
+                LOG_ERROR("[窗口检测] 目标窗口配置无效，拒绝退化到前台窗口")
+                return None
+            ahk_class, ahk_exe = WindowUtils.normalize_target_config(window_config)
             
             LOG(f"[窗口检测] 开始查找目标窗口，配置: ahk_exe='{ahk_exe}', ahk_class='{ahk_class}'")
 
-            if ahk_exe:
-                target_hwnd = WindowUtils.find_window_by_process_name(ahk_exe)
-                if target_hwnd:
-                    LOG(f"[窗口检测] 通过进程名找到目标窗口，句柄: {target_hwnd}")
-                    return target_hwnd
-                else:
-                    LOG(f"[窗口检测] 未找到进程名为 '{ahk_exe}' 的窗口")
+            target_hwnd = WindowUtils.find_target_window(window_config)
+            if target_hwnd:
+                LOG(f"[窗口检测] 通过统一目标条件找到窗口，句柄: {target_hwnd}")
+                return target_hwnd
+            if ahk_exe or ahk_class:
+                LOG("[窗口检测] 配置的目标窗口当前不存在")
+                # 显式目标是安全边界，不能在目标消失时悄悄改抓当前前台窗口。
+                # 否则 READY 会拿浏览器/编辑器的画面建模板，随后 direct 输入也
+                # 可能落到同一个无关应用。只有完全未配置目标的 direct 模式才
+                # 保留“跟随当前前台窗口”的兼容语义。
+                return None
 
-            if ahk_class:
-                target_hwnd = WindowUtils.find_window_by_class(ahk_class)
-                if target_hwnd:
-                    LOG(f"[窗口检测] 通过类名找到目标窗口，句柄: {target_hwnd}")
-                    return target_hwnd
-                else:
-                    LOG(f"[窗口检测] 未找到类名为 '{ahk_class}' 的窗口")
-
-            foreground_hwnd = win32gui.GetForegroundWindow()
+            foreground_hwnd = WindowUtils.find_target_window(
+                {}, fallback_to_foreground=True
+            )
             LOG(f"[窗口检测] 使用前台窗口，句柄: {foreground_hwnd}")
             return foreground_hwnd
 
@@ -127,38 +139,76 @@ class BorderFrameManager:
 
     def set_window_activation_config(self, config: dict):
         """设置窗口激活配置"""
+        # 保留畸形值，让消费端明确 fail-closed；把它折叠成 ``{}`` 会错误地
+        # 启用“捕获当前前台窗口”的 direct-mode 兼容路径。
         self.window_activation_config = config
 
     def set_skill_coordinates(self, skills_config: Dict[str, Any], resource_config: Optional[Dict[str, Any]] = None):
         """设置技能坐标并计算边框（支持HP/MP区域）"""
+        if not isinstance(skills_config, dict):
+            skills_config = {}
+        if not isinstance(resource_config, dict):
+            resource_config = {}
         LOG(f"[技能坐标] 开始设置技能坐标，技能配置数量: {len(skills_config)}")
         self.skill_coords = []
 
         for skill_name, skill_data in skills_config.items():
-            if not skill_data.get("Enabled", False):
+            if not isinstance(skill_data, dict):
+                LOG_ERROR(f"[技能坐标] 技能 '{skill_name}' 配置不是对象，跳过")
+                continue
+            if skill_data.get("Enabled") is not True:
                 LOG(f"[技能坐标] 技能 '{skill_name}' 未启用，跳过")
                 continue
 
             LOG(f"[技能坐标] 处理技能 '{skill_name}': TriggerMode={skill_data.get('TriggerMode', 0)}, ExecuteCondition={skill_data.get('ExecuteCondition', 0)}")
 
-            if skill_data.get("TriggerMode", 0) == 1 and skill_data.get("CooldownCoordX", 0) > 0:
-                coord_info = {
-                    "name": f"{skill_name}_cooldown", "x": skill_data["CooldownCoordX"], "y": skill_data["CooldownCoordY"], "size": skill_data.get("CooldownSize", 12)
-                }
-                self.skill_coords.append(coord_info)
-                LOG(f"[技能坐标] 添加冷却坐标: {coord_info}")
+            try:
+                trigger_mode = config_int(skill_data.get("TriggerMode", 0))
+                execute_condition = config_int(skill_data.get("ExecuteCondition", 0))
+            except ValueError:
+                LOG_ERROR(f"[技能坐标] 技能 '{skill_name}' 模式字段无效，跳过检测坐标")
+                continue
 
-            if skill_data.get("ExecuteCondition", 0) in [1, 2] and skill_data.get("ConditionCoordX", 0) > 0:
-                coord_info = {
-                    "name": f"{skill_name}_condition", "x": skill_data["ConditionCoordX"], "y": skill_data["ConditionCoordY"], "size": 1
-                }
-                self.skill_coords.append(coord_info)
-                LOG(f"[技能坐标] 添加条件坐标: {coord_info}")
+            if trigger_mode == 1:
+                try:
+                    cooldown_x = config_int(skill_data["CooldownCoordX"])
+                    cooldown_y = config_int(skill_data["CooldownCoordY"])
+                    cooldown_size = config_int(skill_data.get("CooldownSize", 12))
+                    if cooldown_size <= 0:
+                        raise ValueError("size must be positive")
+                except (KeyError, ValueError) as e:
+                    LOG_ERROR(f"[技能坐标] {skill_name} 冷却区域无效，跳过: {e}")
+                else:
+                    coord_info = {
+                        "name": f"{skill_name}_cooldown",
+                        "x": cooldown_x,
+                        "y": cooldown_y,
+                        "size": cooldown_size,
+                    }
+                    self.skill_coords.append(coord_info)
+                    LOG(f"[技能坐标] 添加冷却坐标: {coord_info}")
+
+            if execute_condition in (1, 2):
+                try:
+                    condition_x = config_int(skill_data["ConditionCoordX"])
+                    condition_y = config_int(skill_data["ConditionCoordY"])
+                except (KeyError, ValueError) as e:
+                    LOG_ERROR(f"[技能坐标] {skill_name} 条件坐标无效，跳过: {e}")
+                else:
+                    coord_info = {
+                        "name": f"{skill_name}_condition",
+                        "x": condition_x,
+                        "y": condition_y,
+                        "size": 1,
+                    }
+                    self.skill_coords.append(coord_info)
+                    LOG(f"[技能坐标] 添加条件坐标: {coord_info}")
 
         # 添加HP/MP区域到技能坐标中，确保即使没有冷却技能也能截取模板
         if resource_config:
-            hp_config = resource_config.get("hp_config", {})
-            if hp_config.get("enabled", False):
+            raw_hp_config = resource_config.get("hp_config", {})
+            hp_config = raw_hp_config if isinstance(raw_hp_config, dict) else {}
+            if hp_config.get("enabled") is True:
                 hp_region = self._get_resource_region_from_config(hp_config)
                 if hp_region:
                     x1, y1, x2, y2 = hp_region
@@ -170,8 +220,9 @@ class BorderFrameManager:
                     self.skill_coords.append(coord_info)
                     LOG(f"[技能坐标] 添加HP区域坐标: {coord_info}")
 
-            mp_config = resource_config.get("mp_config", {})
-            if mp_config.get("enabled", False):
+            raw_mp_config = resource_config.get("mp_config", {})
+            mp_config = raw_mp_config if isinstance(raw_mp_config, dict) else {}
+            if mp_config.get("enabled") is True:
                 mp_region = self._get_resource_region_from_config(mp_config)
                 if mp_region:
                     x1, y1, x2, y2 = mp_region
@@ -230,13 +281,13 @@ class BorderFrameManager:
                 return None
 
             if detection_mode == "circle":
-                center_x = int(config.get("center_x", 0))
-                center_y = int(config.get("center_y", 0))
-                radius = int(config.get("radius", 0))
-                if radius > 0 and center_x >= 0 and center_y >= 0:
+                center_x = config_int(config.get("center_x", 0))
+                center_y = config_int(config.get("center_y", 0))
+                radius = config_int(config.get("radius", 0))
+                if radius > 0:
                     return (
-                        max(0, center_x - radius),
-                        max(0, center_y - radius),
+                        center_x - radius,
+                        center_y - radius,
                         center_x + radius,
                         center_y + radius,
                     )
@@ -305,6 +356,7 @@ class BorderFrameManager:
                     # 新会话:作废上个会话可能残留的快照
                     self._frame_snapshot = None
                     self._frame_snapshot_at = 0.0
+                    self._frame_origin = (0, 0)
                 else:
                     if self.graphics_capture: self.graphics_capture.cleanup()
                     self.graphics_capture = None
@@ -328,8 +380,15 @@ class BorderFrameManager:
                     time.sleep(0.1)
                     frame = temp_capture.get_latest_frame()
                     if frame is not None:
-                        self._save_debug_frame(frame)
-                        self._update_template_cache_from_frame(frame)
+                        old_origin = self._frame_origin
+                        rect = temp_capture.get_latest_frame_rect()
+                        if rect is not None:
+                            self._frame_origin = (int(rect["x"]), int(rect["y"]))
+                        try:
+                            self._save_debug_frame(frame)
+                            self._update_template_cache_from_frame(frame)
+                        finally:
+                            self._frame_origin = old_origin
                     temp_capture.cleanup()
             except Exception as e:
                 LOG_ERROR(f"[调试捕获] 异常: {e}")
@@ -355,9 +414,17 @@ class BorderFrameManager:
                     time.sleep(0.1)  # 等待一帧
                     frame = temp_capture.get_latest_frame()
                     if frame is not None:
-                        self._save_debug_frame(frame)  # 保存调试帧
-                        self._update_template_cache_from_frame(frame, resource_regions)
-                        frame_copy = frame.copy()
+                        rect = temp_capture.get_latest_frame_rect()
+                        if rect is None:
+                            LOG_ERROR("[调试捕获和缓存] 原生层未返回帧坐标，丢弃该帧")
+                        else:
+                            # 返回帧的消费者会继续通过本 manager 做绝对坐标切片，
+                            # 因此 origin 必须和 frame_copy 一起保持，不能在返回前恢复
+                            # 成上一条（可能来自另一块显示器或区域捕获的）原点。
+                            self._frame_origin = (int(rect["x"]), int(rect["y"]))
+                            self._save_debug_frame(frame)  # 保存调试帧
+                            self._update_template_cache_from_frame(frame, resource_regions)
+                            frame_copy = frame.copy()
                 if temp_capture:
                     temp_capture.cleanup()
                 return frame_copy
@@ -380,23 +447,49 @@ class BorderFrameManager:
             # 会话结束,快照作废(防止快速重启后在复用窗口内拿到上个会话的旧帧)
             self._frame_snapshot = None
             self._frame_snapshot_at = 0.0
+            self._frame_origin = (0, 0)
+
+    def cleanup(self):
+        """停止捕获并对称解除全局配置订阅；保持幂等。"""
+        if getattr(self, "_cleanup_done", False):
+            return
+        self._cleanup_done = True
+        try:
+            self.stop()
+        finally:
+            from ..core.event_bus import event_bus
+
+            event_bus.unsubscribe("engine:config_updated", self._on_config_updated)
 
     def pause_capture(self):
         """暂停截图循环"""
         with self._capture_lock:
             if self.running and not self.paused:
+                if not self.graphics_capture:
+                    return False
+                paused = self.graphics_capture.pause_capture()
+                if paused is False:
+                    return False
                 self.paused = True
                 # 快照作废:恢复后不得在复用窗口内返回暂停前的过期画面
                 self._frame_snapshot = None
                 self._frame_snapshot_at = 0.0
-                if self.graphics_capture: self.graphics_capture.pause_capture()
+            return bool(self.running and self.paused)
 
     def resume_capture(self):
         """恢复截图循环"""
         with self._capture_lock:
             if self.running and self.paused:
+                if not self.graphics_capture:
+                    return False
+                resumed = self.graphics_capture.resume_capture()
+                if resumed is False:
+                    # 失败时保持 paused=True，MacroEngine 会拒绝提交 RUNNING。
+                    return False
                 self.paused = False
-                if self.graphics_capture: self.graphics_capture.resume_capture()
+                self._frame_snapshot = None
+                self._frame_snapshot_at = 0.0
+            return bool(self.running and not self.paused)
 
     def get_region_from_frame(self, frame: np.ndarray, x: int, y: int, width: int, height: int) -> Optional[np.ndarray]:
         """从当前捕获的帧中提取指定区域 (坐标为绝对屏幕坐标)"""
@@ -405,10 +498,10 @@ class BorderFrameManager:
                 return None
 
             offset_x, offset_y = 0, 0
-            # 如果是区域捕获模式，计算偏移量
-            if self._capture_config and self._capture_config.enable_region:
-                offset_x = self._capture_config.region_x
-                offset_y = self._capture_config.region_y
+            # Frames are output-local in DXGI but all persisted detection
+            # coordinates are virtual-desktop physical pixels.  Native capture
+            # reports the absolute rectangle for the current snapshot.
+            offset_x, offset_y = getattr(self, "_frame_origin", (0, 0))
 
             # 计算相对于当前帧的坐标
             relative_x = x - offset_x
@@ -451,6 +544,15 @@ class BorderFrameManager:
         color_config: Optional[dict] = None,
     ) -> np.ndarray:
         """创建增强的颜色掩码，支持红色双区间和 D4 屏障色处理。"""
+        h_tolerance = self._finite_config_number(
+            h_tolerance, "tolerance_h", 0.0, 179.0
+        )
+        s_tolerance = self._finite_config_number(
+            s_tolerance, "tolerance_s", 0.0, 255.0
+        )
+        v_tolerance = self._finite_config_number(
+            v_tolerance, "tolerance_v", 0.0, 255.0
+        )
         # 对于HP资源，使用红色双区间处理
         if resource_type == 'hp':
             # 红色的H值分布在0-10和170-179两个区间
@@ -490,7 +592,20 @@ class BorderFrameManager:
         """HP 屏障/护盾会把 D4 血球染成蓝紫色,默认将其视为安全填充。"""
         if color_config is None:
             return True
-        return bool(color_config.get("detect_barrier", True))
+        # 只有真正的 JSON false 才关闭；字符串 "false" 等错误类型继续采用
+        # 安全默认 true，避免把护盾误判为空血并触发药剂。
+        return color_config.get("detect_barrier", True) is not False
+
+    @staticmethod
+    def _finite_config_number(
+        value: Any, name: str, minimum: float, maximum: float
+    ) -> float:
+        parsed = config_float(value)
+        if not minimum <= parsed <= maximum:
+            raise ValueError(
+                f"{name} 必须是 {minimum:g}..{maximum:g} 的有限数，实际为 {value!r}"
+            )
+        return parsed
 
     def _create_hp_barrier_mask(self, hsv_region: np.ndarray) -> np.ndarray:
         """识别 D4 血球上的蓝紫色屏障覆盖层。"""
@@ -587,9 +702,9 @@ class BorderFrameManager:
                 elif half == "left":
                     half_mask[:, :width // 2] = 255
                 else:
-                    # 未知值回退整圆,避免空 mask 直接读 0%
-                    LOG_ERROR(f"[圆形检测] 未知 half='{half}', 回退整圆")
-                    half_mask[:, :] = 255
+                    # 显式未知枚举不能偷换成整圆：遮挡区域不同可能反转药剂判定。
+                    LOG_ERROR(f"[圆形检测] 未知 half='{half}', 本轮跳过(不触发)")
+                    return None
                 final_mask = cv2.bitwise_and(circular_mask, half_mask)
             # --- 结束 ---
 
@@ -605,9 +720,13 @@ class BorderFrameManager:
             # 色相无关检测(liquid_by_brightness):中毒等状态会改变液体色相(如 HP 中毒变绿),
             # 但液体始终"高饱和 + 高亮度",空玻璃则是暗灰。开启后只按 S/V 阈值判定"有液体",
             # 完全忽略色相。仅当 hp_config/mp_config 显式开启时生效,不影响冷却/取点色/其他配置。
-            if color_config and color_config.get("liquid_by_brightness"):
-                s_min = float(color_config.get("s_min", 30)) * 2.55  # 0-100 -> OpenCV 0-255
-                v_min = float(color_config.get("v_min", 25)) * 2.55
+            if color_config and color_config.get("liquid_by_brightness") is True:
+                s_min = self._finite_config_number(
+                    color_config.get("s_min", 30), "s_min", 0.0, 100.0
+                ) * 2.55  # 0-100 -> OpenCV 0-255
+                v_min = self._finite_config_number(
+                    color_config.get("v_min", 25), "v_min", 0.0, 100.0
+                ) * 2.55
                 pixel_match = (hsv_region[:, :, 1] > s_min) & (hsv_region[:, :, 2] > v_min)
             else:
                 # 使用增强的颜色匹配（支持红色双区间）
@@ -741,12 +860,12 @@ class BorderFrameManager:
             LOG_INFO(f"[模板缓存] 已设置模板: {template_name}")
     
     def _compare_resource_hsv(self, frame: np.ndarray, x: int, y: int, width: int, height: int, resource_name: str, threshold: float) -> Optional[float]:
-        """使用HSV容差和连续段检测算法。
+        """使用 HSV 容差和有效填充行统计返回资源百分比。
 
         计算方式说明:
         1. 对模板 HSV 与当前区域 HSV 做逐像素容差匹配，得到布尔匹配矩阵。
         2. 统计每一行匹配像素是否超过 60%（视为“有效填充”）。
-        3. 自底向上寻找最长连续有效行段长度 / 总高度 => 近似“当前剩余资源百分比”。
+        3. 统计全部有效行数 / 总高度 => 近似“当前剩余资源百分比”。
 
         该结果是启发式“填充高度”估算，不保证与游戏真实值线性一致。
         失败返回 None。
@@ -890,6 +1009,8 @@ class BorderFrameManager:
                 LOG_ERROR(f"[帧捕获-MSS] 窗口尺寸无效: w={width}, h={height}")
                 return None
 
+            self._last_window_capture_origin = (int(x), int(y))
+
             monitor = {"top": y, "left": x, "width": width, "height": height}
 
             with mss() as sct:
@@ -934,7 +1055,7 @@ class BorderFrameManager:
             from PIL import ImageGrab
             import numpy as np
 
-            screenshot = ImageGrab.grab(bbox=region)
+            screenshot = ImageGrab.grab(bbox=region, all_screens=True)
             frame = np.array(screenshot)
             # ImageGrab返回的是RGB，但有些系统可能是BGR，如果后续OCR不准，可能需要转换
             # frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -1119,6 +1240,9 @@ class BorderFrameManager:
                 snapshot.setflags(write=False)
                 self._frame_snapshot = snapshot
                 self._frame_snapshot_at = now
+                rect = self.graphics_capture.get_latest_frame_rect()
+                if rect is not None:
+                    self._frame_origin = (int(rect["x"]), int(rect["y"]))
                 return self._frame_snapshot
         except Exception as e:
             LOG_ERROR(f"[帧获取] 获取当前帧失败: {e}")
@@ -1145,5 +1269,5 @@ def get_border_frame_manager():
 def cleanup_border_frame_manager():
     global _global_border_frame_manager
     if _global_border_frame_manager:
-        _global_border_frame_manager.stop()
+        _global_border_frame_manager.cleanup()
         _global_border_frame_manager = None

@@ -3,9 +3,9 @@ Window management utilities
 """
 
 import time
-from typing import Optional, Tuple, Dict
+from typing import Any, Dict, Mapping, Optional, Tuple
+
 from .debug_log import LOG, LOG_ERROR, LOG_INFO
-from torchlight_assistant.utils.debug_log import LOG_INFO, LOG
 
 
 try:
@@ -29,6 +29,95 @@ class WindowUtils:
     _cache_timeout = 2.0  # 缓存2秒
     _process_cache: Dict[str, Tuple[bool, float]] = {}  # 进程缓存
     _process_cache_timeout = 5.0  # 进程缓存5秒
+
+    @staticmethod
+    def parse_target_config(
+        config: Optional[Mapping[str, Any]],
+    ) -> Optional[Tuple[str, str]]:
+        """Strictly parse ``ahk_class``/``ahk_exe``.
+
+        ``None`` means the configuration is malformed; ``("", "")`` is a
+        valid, explicitly empty target.  Keeping those states distinct matters:
+        an invalid explicit selector must never degrade to the direct-mode
+        foreground-window compatibility path.
+        """
+        if not isinstance(config, Mapping):
+            return None
+
+        def clean(value: Any) -> Optional[str]:
+            if not isinstance(value, str):
+                return None
+            if "\r" in value or "\n" in value or "\x00" in value:
+                return None
+            return value.strip()
+
+        ahk_class = clean(config.get("ahk_class", ""))
+        ahk_exe = clean(config.get("ahk_exe", ""))
+        if ahk_class is None or ahk_exe is None:
+            return None
+        return ahk_class, ahk_exe
+
+    @staticmethod
+    def is_target_config_valid(config: Optional[Mapping[str, Any]]) -> bool:
+        """Return whether a target configuration is structurally safe."""
+        return WindowUtils.parse_target_config(config) is not None
+
+    @staticmethod
+    def normalize_target_config(config: Optional[Mapping[str, Any]]) -> Tuple[str, str]:
+        """Return a stable ``(ahk_class, ahk_exe)`` target description.
+
+        Window selection is consumed by both the DXGI capture path and AHK.  Keeping
+        normalization here prevents the two sides from silently choosing different
+        windows when both criteria are present.  Newlines are rejected because an
+        AHK WinTitle selector is a single protocol field, not free-form text.
+        """
+        parsed = WindowUtils.parse_target_config(config)
+        return parsed if parsed is not None else ("", "")
+
+    @staticmethod
+    def build_ahk_target(config: Optional[Mapping[str, Any]]) -> str:
+        """Build one AHK WinTitle selector, combining all configured criteria."""
+        ahk_class, ahk_exe = WindowUtils.normalize_target_config(config)
+        parts = []
+        if ahk_class:
+            parts.append(f"ahk_class {ahk_class}")
+        if ahk_exe:
+            parts.append(f"ahk_exe {ahk_exe}")
+        return " ".join(parts)
+
+    @staticmethod
+    def find_target_window(
+        config: Optional[Mapping[str, Any]], *, fallback_to_foreground: bool = False
+    ) -> Optional[int]:
+        """Resolve the same class/executable criteria used by AHK to one HWND."""
+        if not win32gui:
+            return None
+
+        parsed = WindowUtils.parse_target_config(config)
+        if parsed is None:
+            return None
+        ahk_class, ahk_exe = parsed
+        if ahk_class and ahk_exe:
+            matches = WindowUtils.find_windows_by_criteria(
+                ahk_class=ahk_class, ahk_exe=ahk_exe
+            )
+            if matches:
+                return matches[0]
+        elif ahk_exe:
+            hwnd = WindowUtils.find_window_by_process_name(ahk_exe)
+            if hwnd:
+                return hwnd
+        elif ahk_class:
+            hwnd = WindowUtils.find_window_by_class(ahk_class)
+            if hwnd:
+                return hwnd
+
+        if fallback_to_foreground and not ahk_class and not ahk_exe:
+            try:
+                return win32gui.GetForegroundWindow() or None
+            except Exception:
+                return None
+        return None
 
     @staticmethod
     def find_window_by_title(title: str) -> Optional[int]:
@@ -303,6 +392,10 @@ class WindowUtils:
             List of window handles that match the criteria
         """
         if not win32gui:
+            return []
+        # 进程条件无法验证时必须 fail-closed。忽略 ahk_exe 会把“class+exe”
+        # 悄悄降级成仅 class，极端情况下甚至选中第一个可见窗口。
+        if ahk_exe and (not psutil or "win32process" not in globals()):
             return []
 
         matching_windows = []
