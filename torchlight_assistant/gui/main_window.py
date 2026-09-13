@@ -262,8 +262,14 @@ class GameSkillConfigUI(QMainWindow):
         # 使用QTimer避免在锁内执行UI操作导致死锁
         # 必须捕获new_state的值，避免lambda闭包问题
         state = new_state
+        start_epoch = getattr(self.macro_engine, "_runtime_start_epoch", 0)
         
         def delayed_ui_update():
+            if (
+                self.macro_engine.get_current_state() != state
+                or getattr(self.macro_engine, "_runtime_start_epoch", 0) != start_epoch
+            ):
+                return
             LOG_INFO(f"[UI] QTimer回调被执行，状态: {state}")
             self._perform_macro_state_changed_ui(state)
         
@@ -534,7 +540,17 @@ class GameSkillConfigUI(QMainWindow):
 
         try:
             full_config = self._gather_current_config_from_ui()
-            event_bus.publish("ui:sync_and_toggle_state_requested", full_config)
+            # READY 入口同步采集模板，不能等 state_changed 的延后回调才隐藏。
+            # D4 在后台会调暗图标；即使主窗口没有遮住取样框，也会采到错误模板。
+            was_visible = self.isVisible()
+            if was_visible:
+                self.hide()
+            try:
+                event_bus.publish("ui:sync_and_toggle_state_requested", full_config)
+            finally:
+                # READY 失败时不会发布状态变化，必须恢复本次隐藏的配置窗口。
+                if was_visible and self.macro_engine.get_current_state() == MacroState.STOPPED:
+                    self._show_main_window()
         except Exception as e:
             LOG_ERROR(f"[UI] F8 同步当前配置失败,已取消状态切换: {e}")
             # ⚠️ 不能在这里同步弹模态框:本方法可能运行在物理 F8 的 publish 链内

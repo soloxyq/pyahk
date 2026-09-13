@@ -367,11 +367,62 @@ def test_ready_target_syncs_exe_but_only_activates_when_enabled():
     assert calls == [("target", "ahk_exe PathOfExile.exe")]
 
     engine._global_config["window_activation"]["enabled"] = True
-    assert engine._prepare_target_window_for_ready() is True
+    with mock.patch.object(WindowUtils, "find_target_window", return_value=1234), mock.patch.object(
+        WindowUtils, "wait_for_foreground", return_value=True
+    ) as wait:
+        assert engine._prepare_target_window_for_ready() is True
+    wait.assert_called_once_with(1234)
     assert calls[-2:] == [
         ("target", "ahk_exe PathOfExile.exe"),
         ("activate",),
     ]
+
+
+@pytest.mark.parametrize("foreground_ready", [False, True])
+def test_ready_capture_waits_for_actual_foreground_after_activation_ack(foreground_ready):
+    order = []
+    engine = object.__new__(MacroEngine)
+    engine._global_config = {
+        "input_mode": "direct",
+        "window_activation": {"enabled": True, "ahk_exe": "Game.exe"},
+    }
+    engine._prepared_mode = "combat"
+    engine._arm_main_mode = lambda context: order.append("arm") or True
+    engine._sync_ahk_send_mode = lambda: True
+    engine.input_handler = SimpleNamespace(
+        set_target_window=lambda target: True,
+        activate_target_window=lambda: order.append("activation_ack") or True,
+        start=lambda: None,
+    )
+    engine._register_secondary_hotkeys = lambda: True
+    engine.skill_manager = SimpleNamespace(prepare_border_only=lambda: None)
+    engine.border_manager = SimpleNamespace(
+        enable_debug_save=lambda: None,
+        capture_once_for_debug_and_cache=mock.Mock(
+            side_effect=lambda *args: order.append("capture") or object()
+        ),
+    )
+    engine.resource_manager = None
+    engine._collect_resource_regions = lambda: {}
+    engine._capture_interval_ms = lambda: 60
+    engine._open_runtime_gate = mock.Mock(return_value=True)
+    with mock.patch.object(WindowUtils, "find_target_window", return_value=1234), mock.patch.object(
+        WindowUtils, "wait_for_foreground",
+        side_effect=lambda hwnd: order.append("foreground_check") or foreground_ready,
+    ):
+        if foreground_ready:
+            assert engine._on_state_enter(MacroState.READY) is True
+        else:
+            with pytest.raises(RuntimeError, match="目标窗口配置或激活失败"):
+                engine._on_state_enter(MacroState.READY)
+
+    assert order[:3] == ["arm", "activation_ack", "foreground_check"]
+    if foreground_ready:
+        assert order[-1] == "capture"
+        engine._open_runtime_gate.assert_called_once()
+    else:
+        engine.border_manager.capture_once_for_debug_and_cache.assert_not_called()
+        engine._open_runtime_gate.assert_not_called()
 
 
 def test_control_mode_without_target_fails_closed_before_ready():

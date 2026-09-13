@@ -6,6 +6,7 @@ import os
 import json
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -127,6 +128,7 @@ def test_ui_f8_bridge_publishes_current_widget_config():
     ui = SimpleNamespace(
         macro_engine=SimpleNamespace(get_current_state=lambda: MacroState.STOPPED),
         _gather_current_config_from_ui=lambda: full_config,
+        isVisible=lambda: False,
     )
     published = []
 
@@ -142,6 +144,127 @@ def test_ui_f8_bridge_publishes_current_widget_config():
     assert published == [
         ("ui:sync_and_toggle_state_requested", (full_config,), {})
     ]
+
+
+def test_ui_f8_hides_before_ready_capture_and_stays_hidden_on_success():
+    full_config = _valid_config()
+    state = [MacroState.STOPPED]
+    visible = [True]
+    order = []
+    ui = SimpleNamespace(
+        macro_engine=SimpleNamespace(get_current_state=lambda: state[0]),
+        _gather_current_config_from_ui=lambda: full_config,
+        isVisible=lambda: visible[0],
+        hide=lambda: (visible.__setitem__(0, False), order.append("hide")),
+        _show_main_window=Mock(),
+    )
+
+    def prepare(name, config):
+        assert name == "ui:sync_and_toggle_state_requested"
+        assert config is full_config
+        assert visible[0] is False
+        order.append("capture")
+        state[0] = MacroState.READY
+
+    with patch.object(main_window_module.event_bus, "publish", side_effect=prepare):
+        GameSkillConfigUI._toggle_visibility_and_macro(ui)
+
+    assert order == ["hide", "capture"]
+    ui._show_main_window.assert_not_called()
+
+
+def test_ui_f8_failed_ready_restores_window_hidden_for_capture():
+    ui = SimpleNamespace(
+        macro_engine=SimpleNamespace(get_current_state=lambda: MacroState.STOPPED),
+        _gather_current_config_from_ui=_valid_config,
+        isVisible=lambda: True,
+        hide=Mock(),
+        _show_main_window=Mock(),
+    )
+    with patch.object(main_window_module.event_bus, "publish") as publish:
+        GameSkillConfigUI._toggle_visibility_and_macro(ui)
+    ui.hide.assert_called_once_with()
+    publish.assert_called_once()
+    ui._show_main_window.assert_called_once_with()
+
+
+def test_ui_old_state_callback_cannot_restore_window_over_new_ready():
+    engine = SimpleNamespace(
+        get_current_state=lambda: MacroState.STOPPED,
+        _runtime_attempt_epoch=1,
+        _runtime_start_epoch=1,
+    )
+    ui = SimpleNamespace(
+        macro_engine=engine,
+        _perform_macro_state_changed_ui=Mock(),
+    )
+    deferred = []
+    with patch.object(
+        main_window_module.QTimer, "singleShot",
+        side_effect=lambda ms, fn: deferred.append(fn),
+    ):
+        GameSkillConfigUI._on_macro_state_changed(ui, MacroState.STOPPED, MacroState.RUNNING)
+
+    assert MacroEngine._begin_runtime_attempt(engine, "main") == 2
+    engine.get_current_state = lambda: MacroState.READY
+    deferred[0]()
+    ui._perform_macro_state_changed_ui.assert_not_called()
+    # 即使新世代也已经停止，旧世代回调仍不能重新抢前台。
+    engine.get_current_state = lambda: MacroState.STOPPED
+    deferred[0]()
+    ui._perform_macro_state_changed_ui.assert_not_called()
+
+
+def test_ui_current_state_callback_still_updates_visibility():
+    ui = SimpleNamespace(
+        macro_engine=SimpleNamespace(
+            get_current_state=lambda: MacroState.READY,
+            _runtime_attempt_epoch=1,
+            _runtime_start_epoch=1,
+        ),
+        _perform_macro_state_changed_ui=Mock(),
+    )
+    deferred = []
+    with patch.object(
+        main_window_module.QTimer, "singleShot",
+        side_effect=lambda ms, fn: deferred.append(fn),
+    ):
+        GameSkillConfigUI._on_macro_state_changed(ui, MacroState.READY, MacroState.STOPPED)
+    deferred[0]()
+    ui._perform_macro_state_changed_ui.assert_called_once_with(MacroState.READY)
+
+
+def test_repeated_f8_stop_keeps_pending_stopped_ui_restore():
+    engine = MacroEngine.__new__(MacroEngine)
+    engine._state = MacroState.STOPPED
+    engine._state_lock = threading.RLock()
+    engine._transition_lock = threading.RLock()
+    engine._runtime_attempt_epoch = 2
+    engine._runtime_start_epoch = 1
+    engine.input_handler = SimpleNamespace(reset_runtime=Mock(return_value=True))
+    engine.skill_manager = SimpleNamespace(stop=Mock())
+    engine.pathfinding_manager = SimpleNamespace(stop=Mock())
+    engine.resource_manager = SimpleNamespace(stop=Mock())
+    engine.border_manager = SimpleNamespace(stop=Mock())
+    engine._set_boss_mode_active = Mock()
+    engine._sync_stopped_debug_mode = Mock()
+    ui = SimpleNamespace(
+        macro_engine=engine,
+        _perform_macro_state_changed_ui=Mock(),
+    )
+    deferred = []
+    with patch.object(
+        main_window_module.QTimer, "singleShot",
+        side_effect=lambda ms, fn: deferred.append(fn),
+    ):
+        GameSkillConfigUI._on_macro_state_changed(ui, MacroState.STOPPED, MacroState.RUNNING)
+        engine._handle_ahk_intercept_key("f8_stop")
+
+    assert engine._runtime_attempt_epoch == 3
+    assert engine._runtime_start_epoch == 1
+    assert len(deferred) == 1
+    deferred[0]()
+    ui._perform_macro_state_changed_ui.assert_called_once_with(MacroState.STOPPED)
 
 
 def test_ui_f7_f9_bridges_publish_current_widget_config():

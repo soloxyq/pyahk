@@ -69,6 +69,7 @@ class MacroEngine:
         # Python 侧运行所有权世代。延迟到下一轮 Qt 事件循环的失败回滚只允许
         # 清理创建它的那次启动，不能误伤其后已经启动的 F7/F9 新模式。
         self._runtime_attempt_epoch = 0
+        self._runtime_start_epoch = 0
         self._runtime_owner = "none"
         self._runtime_owner_epoch = 0
         self._is_debug_mode_active = (
@@ -1704,7 +1705,15 @@ class MacroEngine:
         if not activation_enabled:
             return True
         try:
-            return bool(self.input_handler.activate_target_window())
+            if not self.input_handler.activate_target_window():
+                return False
+            # CMD_ACTIVATE 只确认 AHK 已登记异步 WinActivate，不能当作已经前台。
+            # 此处仍在 READY 的关闸阶段；不泵 Qt 事件，避免 F8/状态事务重入。
+            target_hwnd = WindowUtils.find_target_window(window_config)
+            if not target_hwnd or not WindowUtils.wait_for_foreground(target_hwnd):
+                LOG_ERROR(f"[目标窗口] {context} 激活后未进入前台，取消准备以免采集后台模板")
+                return False
+            return True
         except Exception as e:
             LOG_ERROR(f"[目标窗口] 激活异常: {e}")
             return False
@@ -1756,6 +1765,9 @@ class MacroEngine:
     def _begin_runtime_attempt(self, owner: Optional[str] = None) -> int:
         """Claim a new runtime generation and invalidate older delayed callbacks."""
         self._runtime_attempt_epoch = getattr(self, "_runtime_attempt_epoch", 0) + 1
+        # UI 只需隔离新的启动；幂等 STOPPED 清理也会递增 attempt_epoch，
+        # 但不能因此作废唯一一次恢复主窗口的通知。
+        self._runtime_start_epoch = self._runtime_attempt_epoch
         if owner is not None:
             self._runtime_owner = owner
             self._runtime_owner_epoch = self._runtime_attempt_epoch

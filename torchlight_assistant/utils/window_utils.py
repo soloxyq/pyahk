@@ -2,6 +2,7 @@
 Window management utilities
 """
 
+import math
 import time
 from typing import Any, Dict, Mapping, Optional, Tuple
 
@@ -188,6 +189,36 @@ class WindowUtils:
             LOG(f"WARNING: 检查活动窗口 '{window_title}' 时出错: {e}")
 
         return False
+
+    @staticmethod
+    def wait_for_foreground(hwnd: int, timeout: float = 0.5) -> bool:
+        """Wait for an existing HWND to become foreground without activating it.
+
+        A zero timeout performs one immediate query. No Qt events are pumped:
+        callers can keep READY preparation inside its existing transaction.
+        """
+        if not win32gui or not hwnd:
+            return False
+
+        try:
+            timeout = float(timeout)
+            if not math.isfinite(timeout) or timeout < 0:
+                return False
+            deadline = time.monotonic() + timeout
+
+            while True:
+                if not win32gui.IsWindow(hwnd):
+                    return False
+                if win32gui.GetForegroundWindow() == hwnd:
+                    return True
+
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return False
+                time.sleep(min(0.01, remaining))
+        except Exception as e:
+            LOG(f"WARNING: 等待目标窗口进入前台失败: {e}")
+            return False
 
     @staticmethod
     def is_process_running(process_name: str) -> bool:
