@@ -47,6 +47,7 @@ def _extract_function(lines, name):
 _STUBS = r"""
 #Requires AutoHotkey v2.0
 #SingleInstance Off
+#Warn All, StdOut
 
 global FakeNow := 100
 global KeyPressDurationMs := 50
@@ -59,6 +60,7 @@ global EdgeLog := []
 global ReconcileCalls := 0
 global FailControlKey := ""
 global DirectAllowed := true
+global ReentryOnUp := 0
 global SendKeyMode := "direct"
 global TargetWin := ""
 global ResultFile := A_Args[1]
@@ -78,13 +80,43 @@ ReconcileSkillHoldKeys() {
 }
 
 SendTransientKeyEdge(mode, target, key, isDown) {
-    global EdgeLog, FailControlKey
+    global EdgeLog, FailControlKey, ReentryOnUp
     edge := isDown ? "down" : "up"
     if (mode = "control" && isDown && key = FailControlKey) {
         return false
     }
     EdgeLog.Push(mode ":" target ":" key ":" edge)
+    if (!isDown && IsObject(ReentryOnUp)) {
+        callback := ReentryOnUp
+        ReentryOnUp := 0
+        callback.Call()
+    }
     return true
+}
+
+ReenterTransientRelease(kind, restart := false) {
+    if (kind = "due") {
+        ReleaseDueTransientPressKeys()
+    } else {
+        ReleaseAllTransientPressKeys(false)
+    }
+    if (restart) {
+        usedDirect := false
+        StartTransientPress("+LButton", "direct", "", &usedDirect)
+    }
+}
+
+TryTransientRelease(kind) {
+    try {
+        if (kind = "due") {
+            ReleaseDueTransientPressKeys()
+        } else {
+            ReleaseAllTransientPressKeys(false)
+        }
+        return ""
+    } catch Error as err {
+        return err.Message " / " err.Extra
+    }
 }
 
 CanEmitDirectInput(target := "") {
@@ -115,7 +147,7 @@ Expect(label, actual, expected) {
 ResetProbe() {
     global FakeNow, KeyPressDurationMs, TransientPressKeys, TransientPressOrder
     global PersistentPressRoutes, SkillHeldKeys, SkillHeldOrder, SendKeyMode, TargetWin
-    global EdgeLog, ReconcileCalls, FailControlKey, DirectAllowed
+    global EdgeLog, ReconcileCalls, FailControlKey, DirectAllowed, ReentryOnUp
     SetTimer(ReleaseDueTransientPressKeys, 0)
     FakeNow := 100
     KeyPressDurationMs := 50
@@ -128,6 +160,7 @@ ResetProbe() {
     ReconcileCalls := 0
     FailControlKey := ""
     DirectAllowed := true
+    ReentryOnUp := 0
     SendKeyMode := "direct"
     TargetWin := ""
 }
@@ -331,6 +364,49 @@ ReleaseAllTransientPressKeys(false)
 Expect("forced-release", Join(EdgeLog), "direct::q:down,direct::q:up")
 Expect("forced-release-clears-ledger", TransientPressKeys.Count, 0)
 
+; 模拟 Send 的 up 边沿处理中重入暂停清场/释放定时器；全部按键均由 stub 记录。
+; 同时验证不会重复 up、旧索引不会越界，且普通键仍先于修饰键释放。
+for outerKind in ["due", "all"] {
+    for innerKind in ["due", "all"] {
+        ResetProbe()
+        StartTransientPress("+LButton", "direct", "", &usedDirect)
+        FakeNow := 150
+        ReentryOnUp := ReenterTransientRelease.Bind(innerKind)
+        label := "reentrant-" outerKind "-" innerKind
+        Expect(label "-no-error", TryTransientRelease(outerKind), "")
+        Expect(label "-exact-edges", Join(EdgeLog),
+            "direct::Shift:down,direct::LButton:down,direct::LButton:up,direct::Shift:up")
+        Expect(label "-empty-ledger", TransientPressKeys.Count, 0)
+        Expect(label "-empty-order", TransientPressOrder.Length, 0)
+    }
+}
+
+; up 中清场后立刻重建相同 ID：旧释放过程不得删除新条目或清空其顺序表，
+; 也不能用旧快照继续抬起新一轮按下的 Shift/LButton。
+for outerKind in ["due", "all"] {
+    ResetProbe()
+    StartTransientPress("+LButton", "direct", "", &usedDirect)
+    FakeNow := 150
+    ReentryOnUp := ReenterTransientRelease.Bind("all", true)
+    label := "reentrant-restart-" outerKind
+    Expect(label "-no-error", TryTransientRelease(outerKind), "")
+    Expect(label "-keeps-new-edges", Join(EdgeLog),
+        "direct::Shift:down,direct::LButton:down,direct::LButton:up,direct::Shift:up,"
+        "direct::Shift:down,direct::LButton:down")
+    Expect(label "-keeps-new-ledger", TransientPressKeys.Count, 2)
+    Expect(label "-keeps-new-order", TransientPressOrder.Length, 2)
+    FakeNow := 199
+    Expect(label "-before-due-no-error", TryTransientRelease("due"), "")
+    Expect(label "-before-due-no-up", EdgeLog.Length, 6)
+    FakeNow := 200
+    Expect(label "-final-release-no-error", TryTransientRelease("due"), "")
+    Expect(label "-final-release-edges", Join(EdgeLog),
+        "direct::Shift:down,direct::LButton:down,direct::LButton:up,direct::Shift:up,"
+        "direct::Shift:down,direct::LButton:down,direct::LButton:up,direct::Shift:up")
+    Expect(label "-final-empty-ledger", TransientPressKeys.Count, 0)
+    Expect(label "-final-empty-order", TransientPressOrder.Length, 0)
+}
+
 report := "CHECKS=" Checks "`nRESULT=" (Failures.Length ? "FAIL" : "OK") "`n"
 for index, failure in Failures {
     report .= "FAIL " failure "`n"
@@ -352,6 +428,8 @@ def _build_harness():
         "TrackTransientPressKey",
         "StartTransientPress",
         "ScheduleTransientPressRelease",
+        "SnapshotTransientPressKeys",
+        "DetachTransientPressKey",
         "ReleaseDueTransientPressKeys",
         "ReleaseAllTransientPressKeys",
         "IsTransientGlobalPressActive",

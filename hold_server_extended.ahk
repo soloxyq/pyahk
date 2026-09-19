@@ -2324,6 +2324,40 @@ ScheduleTransientPressRelease() {
     SetTimer(ReleaseDueTransientPressKeys, -Max(nextDue - now, 1))
 }
 
+SnapshotTransientPressKeys() {
+    global TransientPressKeys, TransientPressOrder
+
+    ; 保存 entry 身份，不能只保存 id：暂停后同名键可能已属于下一次 press。
+    entries := []
+    idx := TransientPressOrder.Length
+    while (idx > 0) {
+        id := TransientPressOrder[idx]
+        if (TransientPressKeys.Has(id)) {
+            entries.Push({id: id, entry: TransientPressKeys[id]})
+        }
+        idx -= 1
+    }
+    return entries
+}
+
+DetachTransientPressKey(id, entry) {
+    global TransientPressKeys, TransientPressOrder
+
+    if (!TransientPressKeys.Has(id) || TransientPressKeys[id] != entry) {
+        return false
+    }
+    ; 必须在可能泵浦 WM_COPYDATA 的 Send/ControlSend 之前完成摘除。
+    ; Critical 不能阻止这种消息重入；重入清场只处理尚未摘除的记录。
+    TransientPressKeys.Delete(id)
+    for index, pendingId in TransientPressOrder {
+        if (pendingId = id) {
+            TransientPressOrder.RemoveAt(index)
+            break
+        }
+    }
+    return true
+}
+
 ReleaseDueTransientPressKeys() {
     global TransientPressKeys, TransientPressOrder
 
@@ -2332,27 +2366,19 @@ ReleaseDueTransientPressKeys() {
     try {
         now := MonotonicMs()
         reconcileNeeded := false
+        pending := SnapshotTransientPressKeys()
         ; 即使一条 chord 的 base 在更早的重叠 press 中已存在，释放时也必须
         ; 先抬普通键、后抬 modifier。不能单纯依赖“首次出现顺序”做 LIFO。
         loop 2 {
             releaseModifiers := (A_Index = 2)
-            idx := TransientPressOrder.Length
-            while (idx > 0) {
-                id := TransientPressOrder[idx]
-                if (!TransientPressKeys.Has(id)) {
-                    TransientPressOrder.RemoveAt(idx)
-                    idx -= 1
-                    continue
-                }
-                entry := TransientPressKeys[id]
+            for item in pending {
+                entry := item.entry
                 if (entry.due <= now
-                    && IsTransientModifierKey(entry.key) = releaseModifiers) {
+                    && IsTransientModifierKey(entry.key) = releaseModifiers
+                    && DetachTransientPressKey(item.id, entry)) {
                     SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
                     reconcileNeeded := true
-                    TransientPressKeys.Delete(id)
-                    TransientPressOrder.RemoveAt(idx)
                 }
-                idx -= 1
             }
         }
         ScheduleTransientPressRelease()
@@ -2369,29 +2395,34 @@ ReleaseDueTransientPressKeys() {
 }
 
 ReleaseAllTransientPressKeys(reconcile := true) {
-    global TransientPressKeys, TransientPressOrder
-
-    SetTimer(ReleaseDueTransientPressKeys, 0)
-    reconcileNeeded := false
-    loop 2 {
-        releaseModifiers := (A_Index = 2)
-        idx := TransientPressOrder.Length
-        while (idx > 0) {
-            id := TransientPressOrder[idx]
-            if (TransientPressKeys.Has(id)) {
-                entry := TransientPressKeys[id]
-                if (IsTransientModifierKey(entry.key) = releaseModifiers) {
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        SetTimer(ReleaseDueTransientPressKeys, 0)
+        reconcileNeeded := false
+        pending := SnapshotTransientPressKeys()
+        loop 2 {
+            releaseModifiers := (A_Index = 2)
+            for item in pending {
+                entry := item.entry
+                if (IsTransientModifierKey(entry.key) = releaseModifiers
+                    && DetachTransientPressKey(item.id, entry)) {
                     SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
                     reconcileNeeded := true
                 }
             }
-            idx -= 1
         }
-    }
-    TransientPressKeys := Map()
-    TransientPressOrder := []
-    if (reconcile && reconcileNeeded) {
-        ReconcileSkillHoldKeys()
+        ; 重入期间可能创建新 press，不能在此无条件清空新账本/取消它的 up。
+        ScheduleTransientPressRelease()
+        if (reconcile && reconcileNeeded) {
+            ReconcileSkillHoldKeys()
+        }
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
+        }
     }
 }
 
