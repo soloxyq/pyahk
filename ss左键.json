@@ -4,13 +4,13 @@
             "Enabled": true,
             "Key": "c",
             "Priority": false,
-            "Timer": 256,
-            "TriggerMode": 1,
+            "Timer": 4900,
+            "TriggerMode": 0,
             "BossOnly": false,
             "CooldownCoordX": 790,
             "CooldownCoordY": 993,
             "CooldownSize": 12,
-            "ExecuteCondition": 1,
+            "ExecuteCondition": 0,
             "ConditionCoordX": 776,
             "ConditionCoordY": 968,
             "ConditionColor": 6989066,
@@ -33,7 +33,7 @@
             "AltKey": ""
         },
         "Skill3": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "3",
             "Priority": false,
             "Timer": 256,
@@ -49,7 +49,7 @@
             "AltKey": ""
         },
         "Skill4": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "4",
             "Priority": false,
             "Timer": 1000,
@@ -97,11 +97,11 @@
             "AltKey": ""
         },
         "Skill7": {
-            "Enabled": true,
-            "Key": "5",
+            "Enabled": false,
+            "Key": "2",
             "Priority": false,
             "Timer": 1000,
-            "TriggerMode": 1,
+            "TriggerMode": 0,
             "BossOnly": false,
             "CooldownCoordX": 1044,
             "CooldownCoordY": 994,
