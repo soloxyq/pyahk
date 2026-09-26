@@ -846,6 +846,27 @@ class MacroEngine:
             if not self._open_runtime_gate("进入 RUNNING"):
                 return False
 
+            # PAUSED 入口会把 AHK 的原地模式关掉，避免旧的 shift_modifier
+            # 影响暂停期间的真实鼠标输入。恢复时必须在生产者启动前明确同步
+            # Python 侧的期望值；否则 AHK 可能继续沿用暂停前的旧模式，或在
+            # 一次通信失败后两端状态分叉。
+            if hasattr(self.input_handler, "set_stationary_mode"):
+                stationary_config = self._global_config.get(
+                    "stationary_mode_config", {}
+                )
+                if not isinstance(stationary_config, dict):
+                    stationary_config = {}
+                stationary_mode_type = str(
+                    stationary_config.get("mode_type", "block_mouse") or ""
+                ).strip().lower()
+                if stationary_mode_type not in STATIONARY_MODE_TYPES:
+                    stationary_mode_type = "block_mouse"
+                stationary_synced = self.input_handler.set_stationary_mode(
+                    bool(self._stationary_mode_active), stationary_mode_type
+                )
+                if stationary_synced is False:
+                    raise RuntimeError("原地模式状态恢复失败")
+
             # AHK 在开闸时已按本地物理 monitor 账本恢复强制移动。
             # Python 仍回发自己的 OSD 账本作纵深对齐；AHK 只触发重算，
             # 不盲写迟到的 true/false，因此不会覆盖更新的物理边沿。
@@ -901,6 +922,26 @@ class MacroEngine:
                 "[暂停] 关闭运行时闸门",
                 lambda: self._set_runtime_gate(False),
             )
+            # 原地模式是 AHK 端的全局输入修饰状态，不随队列清空自动复位。
+            # 暂停后若继续保留旧的 shift_modifier，真实鼠标输入可能仍受旧
+            # 状态影响；先安全关掉，Python 侧保留期望值，恢复时再显式同步。
+            if hasattr(self.input_handler, "set_stationary_mode"):
+                stationary_config = self._global_config.get(
+                    "stationary_mode_config", {}
+                )
+                if not isinstance(stationary_config, dict):
+                    stationary_config = {}
+                stationary_mode_type = str(
+                    stationary_config.get("mode_type", "block_mouse") or ""
+                ).strip().lower()
+                if stationary_mode_type not in STATIONARY_MODE_TYPES:
+                    stationary_mode_type = "block_mouse"
+                self._run_safety_step(
+                    "[暂停] 关闭原地模式",
+                    lambda: self.input_handler.set_stationary_mode(
+                        False, stationary_mode_type
+                    ),
+                )
             if self._prepared_mode == "combat":
                 self._run_safety_step("[暂停] 暂停技能管理器", self.skill_manager.pause)
             elif self._prepared_mode == "pathfinding":
@@ -1003,6 +1044,23 @@ class MacroEngine:
         )
 
         if old_state == MacroState.PAUSED:
+            if hasattr(self.input_handler, "set_stationary_mode"):
+                stationary_config = self._global_config.get(
+                    "stationary_mode_config", {}
+                )
+                if not isinstance(stationary_config, dict):
+                    stationary_config = {}
+                stationary_mode_type = str(
+                    stationary_config.get("mode_type", "block_mouse") or ""
+                ).strip().lower()
+                if stationary_mode_type not in STATIONARY_MODE_TYPES:
+                    stationary_mode_type = "block_mouse"
+                self._run_safety_step(
+                    "[状态回滚] 关闭原地模式",
+                    lambda: self.input_handler.set_stationary_mode(
+                        False, stationary_mode_type
+                    ),
+                )
             if self._prepared_mode == "combat":
                 self._run_safety_step(
                     "[状态回滚] 重新暂停技能管理器", self.skill_manager.pause

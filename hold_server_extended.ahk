@@ -84,6 +84,8 @@ global ForceMoveKey := ""  ; 由Python设置，默认为空（未启用）
 global ForceMoveActive := false  ; 强制移动键是否处于按下状态
 global ForceMoveReplacementKey := ""  ; 强制移动时的替换键，由Python设置，默认为空
 global ForceMovePassthroughKeys := Map()  ; 强制移动期间不被替换的白名单(位移技能,如 RButton 闪现)
+global FORCE_MOVE_INTERACTION_INTERVAL_MS := 100
+global ForceMoveInteractionTimer := ForceMoveInteractionTick
 
 ; 发送模式
 global SendKeyMode := "direct"  ; "direct"=直接发送(SendInput) "control"=控件发送(ControlSend)
@@ -159,6 +161,9 @@ global CoordinateMouseHoldPriority := -1
 ; 进程启动必须 fail-closed：只有主状态机进入 READY/RUNNING，或独立
 ; 洗练模式成功启动时，才能显式开闸。
 global RuntimeAcceptingActions := false
+; 每次完整清场递增；瞬态 press 在发送 down 与登记账本之间若遇到
+; STOPPED/PAUSED 清场，即使闸门随后重开，也必须按旧世代回滚而不能入账。
+global RuntimeInputGeneration := 0
 ; WM_COPYDATA 返回值:0 留给未处理/默认窗口过程,业务拒绝必须返回非零专用值。
 ; Python 据此区分“AHK 明确拒绝”与“没有取得协议层结果”。
 global AHK_RESULT_REJECTED := 2
@@ -1075,11 +1080,14 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 参数格式: "active:mode_type" 例如: "true:shift_modifier"
             parts := CachedStrSplit(param, ":")
             if (parts.Length >= 2) {
-                global StationaryModeActive, StationaryModeType
+                global StationaryModeActive, StationaryModeType, RuntimeAcceptingActions
                 nextActive := (parts[1] = "true")
                 nextModeType := CachedStrLower(Trim(parts[2]))
                 ; 激活是危险方向，只接受已知模式；关闭始终安全放行并清掉旧类型。
-                if (nextActive && !IsSupportedStationaryMode(nextModeType))
+                ; 闸门关闭时拒绝迟到的 true，避免 PAUSED/STOPPED 后旧回调复活
+                ; shift_modifier 或 block_mouse；false 仍作为安全清理命令放行。
+                if (nextActive && (!RuntimeAcceptingActions
+                    || !IsSupportedStationaryMode(nextModeType)))
                     return AHK_RESULT_REJECTED
                 StationaryModeActive := nextActive
                 StationaryModeType := nextActive ? nextModeType : ""
@@ -1735,6 +1743,7 @@ ClearQueue(priority) {
     global EmergencyQueue, HighQueue, NormalQueue, LowQueue
     global ActiveManagedKeys
     global ManagedDelayUntil
+    global RuntimeInputGeneration
 
     switch priority {
         case 0:
@@ -1764,6 +1773,10 @@ ClearQueue(priority) {
             QueueCounts["low"] := 0
             LowQueue := []
         case -1:
+            ; 先切断当前输入世代，再释放队列/账本。StartTransientPress
+            ; 会在每个 down 边沿和登记前复核这个代数，覆盖 WM_COPYDATA
+            ; 重入造成的“down 已发出但清场时尚未入账”窗口。
+            RuntimeInputGeneration += 1
             ReleaseCoordinateMouseHoldIfCleared(-1)
             ; 🚀 清空所有队列（使用计数器）
             TotalQueueCount := 0
@@ -2231,13 +2244,21 @@ TrackTransientPressKey(mode, target, key, dueAt, affectsGlobal) {
 }
 
 StartTransientPress(key, preferredMode, target, &usedDirect) {
-    global KeyPressDurationMs
+    global KeyPressDurationMs, RuntimeAcceptingActions, RuntimeInputGeneration
 
     usedDirect := false
     keys := ParseTransientPressKeys(key)
     if (!IsObject(keys) || keys.Length = 0) {
         return false
     }
+
+    ; STOPPED/PAUSED 的关闸必须封住所有新的全局输入。这个检查位于
+    ; WM_COPYDATA/物理 F8 可能重入的临界区之外，作为快速拒绝；发送过程
+    ; 结束后还会再次复核，覆盖“down 已发出、账本尚未登记”这一窗口。
+    if (!RuntimeAcceptingActions) {
+        return false
+    }
+    startGeneration := RuntimeInputGeneration
 
     previousCritical := A_IsCritical
     Critical "On"
@@ -2250,18 +2271,27 @@ StartTransientPress(key, preferredMode, target, &usedDirect) {
         ; chord 回退到 direct。不允许把半条 Control chord 留在目标窗口里。
         if (mode = "control") {
             for index, actualKey in keys {
+                if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+                    ReleaseSentTransientEdges(mode, routeTarget, sentKeys)
+                    return false
+                }
                 if (!SendTransientKeyEdge(mode, routeTarget, actualKey, true)) {
-                    idx := sentKeys.Length
-                    while (idx > 0) {
-                        SendTransientKeyEdge(mode, routeTarget, sentKeys[idx], false)
-                        idx -= 1
-                    }
+                    ReleaseSentTransientEdges(mode, routeTarget, sentKeys)
                     mode := "direct"
                     routeTarget := ""
                     sentKeys := []
+                    ; ControlSend 失败可能同时伴随停机重入；不要在关闸后
+                    ; 把同一 chord 回退到全局 direct 输入。
+                    if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+                        return false
+                    }
                     break
                 }
                 sentKeys.Push(actualKey)
+                if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+                    ReleaseSentTransientEdges(mode, routeTarget, sentKeys)
+                    return false
+                }
             }
         }
 
@@ -2272,22 +2302,42 @@ StartTransientPress(key, preferredMode, target, &usedDirect) {
                 return false
             }
             for index, actualKey in keys {
+                if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+                    ReleaseSentTransientEdges(mode, "", sentKeys)
+                    return false
+                }
                 if (!SendTransientKeyEdge(mode, "", actualKey, true)) {
-                    idx := sentKeys.Length
-                    while (idx > 0) {
-                        SendTransientKeyEdge(mode, "", sentKeys[idx], false)
-                        idx -= 1
-                    }
+                    ReleaseSentTransientEdges(mode, "", sentKeys)
                     return false
                 }
                 sentKeys.Push(actualKey)
+                if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+                    ReleaseSentTransientEdges(mode, "", sentKeys)
+                    return false
+                }
             }
             usedDirect := true
         }
 
+        ; 关闸可能在上面的 Send/ControlSend 期间重入。此时清场栈尚未看见
+        ; 本次 press 的账本，必须在登记前按已发送顺序的逆序补齐 up；否则
+        ; Shift+LButton 可能把修饰键或鼠标按钮留在系统输入状态。
+        if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+            ReleaseSentTransientEdges(mode, routeTarget, sentKeys)
+            return false
+        }
+
         dueAt := MonotonicMs() + KeyPressDurationMs
         for index, actualKey in keys {
+            if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+                ReleaseSentTransientEdges(mode, routeTarget, sentKeys)
+                return false
+            }
             TrackTransientPressKey(mode, routeTarget, actualKey, dueAt, usedDirect)
+        }
+        if (!RuntimeAcceptingActions || RuntimeInputGeneration != startGeneration) {
+            ReleaseSentTransientEdges(mode, routeTarget, sentKeys)
+            return false
         }
 
         ; 临时 press 的最终 up 会剪断同一 route 上的键。不仅 base，
@@ -2304,6 +2354,14 @@ StartTransientPress(key, preferredMode, target, &usedDirect) {
         } else {
             Critical "Off"
         }
+    }
+}
+
+ReleaseSentTransientEdges(mode, routeTarget, sentKeys) {
+    idx := sentKeys.Length
+    while (idx > 0) {
+        SendTransientKeyEdge(mode, routeTarget, sentKeys[idx], false)
+        idx -= 1
     }
 }
 
@@ -2802,7 +2860,7 @@ UnregisterHook(key) {
     ; 🔧 AHK v2 作用域:函数内对全局变量赋值会自动 local 化,顶部统一 global 声明
     global RegisteredHooks, SpecialKeysPressed, SpecialKeysPaused
     global ManagedKeysConfig, ActiveManagedKeys
-    global MonitorKeysState, ForceMoveKey, ForceMoveActive
+    global MonitorKeysState, ForceMoveKey, ForceMoveActive, ForceMoveInteractionTimer
     global PendingPythonStateEvents, InterceptKeysPressed
 
     ; 注销不存在的动态 Hook 是幂等成功；永久根热键也不在此表中。
@@ -2882,6 +2940,7 @@ UnregisterHook(key) {
         }
         if (StrUpper(ForceMoveKey) = key_upper) {
             ForceMoveActive := false
+            SetTimer(ForceMoveInteractionTimer, 0)
         }
         if (was_active || had_pending) {
             QueuePythonStateEvent(channel, "monitor_key_up:" key, false)
@@ -3204,12 +3263,54 @@ ReconcileForceMoveState() {
     ; AHK 是按键替换的执行端，因此物理 monitor 账本才是权威。
     ; 闸门关闭时始终 false；开闸/换键/物理边沿都调用本函数重算。
     global MonitorKeysState, ForceMoveKey, ForceMoveActive, RuntimeAcceptingActions
+    global ForceMoveInteractionTimer
+    global FORCE_MOVE_INTERACTION_INTERVAL_MS
 
     key_upper := StrUpper(Trim(ForceMoveKey))
     ForceMoveActive := RuntimeAcceptingActions
         && key_upper != ""
         && MonitorKeysState.Has(key_upper)
         && MonitorKeysState[key_upper]
+
+    ; 交互键的周期发送独立于普通动作队列。队列替换仍由 SendPress 保留，
+    ; 这里额外保证 A 按住而队列为空时也能持续触发交互键。
+    if (ForceMoveActive) {
+        SetTimer(ForceMoveInteractionTimer, FORCE_MOVE_INTERACTION_INTERVAL_MS)
+    } else {
+        SetTimer(ForceMoveInteractionTimer, 0)
+    }
+}
+
+ForceMoveInteractionTick() {
+    global RuntimeAcceptingActions, ForceMoveActive, ForceMoveReplacementKey
+    global IsPaused, SpecialKeysPaused, ManagedDelayUntil, QueueCounts
+    global MacroManagedSuppressed, ActiveManagedKeys, ForceMoveInteractionTimer
+
+    ; 定时器可能在物理 up、暂停或停止后仍有一个已排队的 tick，
+    ; 发送前再次检查所有安全闸门，避免迟到的交互键穿透新状态。
+    if (!RuntimeAcceptingActions || !ForceMoveActive) {
+        SetTimer(ForceMoveInteractionTimer, 0)
+        return
+    }
+    if (IsPaused || SpecialKeysPaused
+        || (ManagedDelayUntil > 0 && ManagedDelayUntil > MonotonicMs())) {
+        return
+    }
+    if (MacroManagedSuppressed || ActiveManagedKeys.Count > 0) {
+        return
+    }
+    ; 急救队列中的原始按键（如 1 喝药）必须优先执行；周期交互键只补足
+    ; 空队列场景，不能在急救动作等待执行时插入额外 F。
+    if (QueueCounts.Has("emergency") && QueueCounts["emergency"] > 0) {
+        return
+    }
+    if (Trim(ForceMoveReplacementKey) = "") {
+        return
+    }
+
+    ; 与队列替换使用同一底层路径，避免交互键再次套用强制移动替换，
+    ; 也保持原有交互键不受 shift_modifier/block_mouse 的二次处理。
+    SendKeyInternal(ForceMoveReplacementKey)
 }
 
 SetRuntimeOwner(param) {
@@ -3789,6 +3890,7 @@ ClearAllConfigurableHooks(barrierAlreadyApplied := false) {
     ; F8/F7/F9 永久根热键不在 RegisteredHooks 中,自动被保留(见 RegisterHook 的 key_upper 检查)
     global ActiveManagedKeys, SpecialKeysPressed, SpecialKeysPaused, ManagedKeysConfig
     global MonitorKeysState, ForceMoveActive, PendingPythonStateEvents
+    global ForceMoveInteractionTimer
     global F8StopIntentPending, MainModeArmed, MainModeF8AwaitRelease
     global PhysicalStopLatched
 
@@ -3823,6 +3925,7 @@ ClearAllConfigurableHooks(barrierAlreadyApplied := false) {
     ; 下一轮 timer 中迟到；逐键注销生成的 monitor up/special end 也无需再回发。
     MonitorKeysState := Map()
     ForceMoveActive := false
+    SetTimer(ForceMoveInteractionTimer, 0)
     PendingPythonStateEvents := Map()
 
     ; 动态 Hook 已确认清完才解除物理 stop latch。先在 Critical 区内再次确认关闸

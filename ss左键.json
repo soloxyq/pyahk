@@ -17,16 +17,16 @@
             "AltKey": "9"
         },
         "Skill2": {
-            "Enabled": false,
+            "Enabled": true,
             "Key": "2",
             "Priority": false,
             "Timer": 96,
-            "TriggerMode": 1,
+            "TriggerMode": 2,
             "BossOnly": false,
             "CooldownCoordX": 857,
             "CooldownCoordY": 995,
             "CooldownSize": 12,
-            "ExecuteCondition": 1,
+            "ExecuteCondition": 0,
             "ConditionCoordX": 839,
             "ConditionCoordY": 968,
             "ConditionColor": 6989066,
@@ -65,10 +65,10 @@
             "AltKey": ""
         },
         "Skill5": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "LButton",
             "Priority": false,
-            "Timer": 115,
+            "Timer": 75,
             "TriggerMode": 0,
             "BossOnly": false,
             "CooldownCoordX": 1044,

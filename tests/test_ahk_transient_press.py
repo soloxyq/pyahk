@@ -61,6 +61,10 @@ global ReconcileCalls := 0
 global FailControlKey := ""
 global DirectAllowed := true
 global ReentryOnUp := 0
+global ReentryOnDown := 0
+global ReentryOnDownKey := ""
+global RuntimeAcceptingActions := true
+global RuntimeInputGeneration := 0
 global SendKeyMode := "direct"
 global TargetWin := ""
 global ResultFile := A_Args[1]
@@ -80,12 +84,18 @@ ReconcileSkillHoldKeys() {
 }
 
 SendTransientKeyEdge(mode, target, key, isDown) {
-    global EdgeLog, FailControlKey, ReentryOnUp
+    global EdgeLog, FailControlKey, ReentryOnUp, ReentryOnDown, ReentryOnDownKey
     edge := isDown ? "down" : "up"
     if (mode = "control" && isDown && key = FailControlKey) {
         return false
     }
     EdgeLog.Push(mode ":" target ":" key ":" edge)
+    if (isDown && IsObject(ReentryOnDown)
+        && (ReentryOnDownKey = "" || key = ReentryOnDownKey)) {
+        callback := ReentryOnDown
+        ReentryOnDown := 0
+        callback.Call()
+    }
     if (!isDown && IsObject(ReentryOnUp)) {
         callback := ReentryOnUp
         ReentryOnUp := 0
@@ -104,6 +114,25 @@ ReenterTransientRelease(kind, restart := false) {
         usedDirect := false
         StartTransientPress("+LButton", "direct", "", &usedDirect)
     }
+}
+
+CloseRuntimeDuringTransientDown() {
+    global RuntimeAcceptingActions, RuntimeInputGeneration
+    ; 模拟暂停/F8 在 down 边沿发送期间重入 AHK 清场。此时 transient 账本
+    ; 仍为空，旧实现会让 StartTransientPress 在清场后继续登记一条新账本。
+    RuntimeAcceptingActions := false
+    RuntimeInputGeneration += 1
+    ReleaseAllTransientPressKeys(false)
+}
+
+ReenterResetAndResumeDuringTransientDown() {
+    global RuntimeAcceptingActions, RuntimeInputGeneration
+    ; 清场后很快恢复（例如 PAUSED → RUNNING）。单看 gate 已恢复 true，
+    ; 但当前 press 仍属于被清场的旧世代，必须继续回滚而不能入账。
+    RuntimeAcceptingActions := false
+    RuntimeInputGeneration += 1
+    ReleaseAllTransientPressKeys(false)
+    RuntimeAcceptingActions := true
 }
 
 TryTransientRelease(kind) {
@@ -147,7 +176,9 @@ Expect(label, actual, expected) {
 ResetProbe() {
     global FakeNow, KeyPressDurationMs, TransientPressKeys, TransientPressOrder
     global PersistentPressRoutes, SkillHeldKeys, SkillHeldOrder, SendKeyMode, TargetWin
-    global EdgeLog, ReconcileCalls, FailControlKey, DirectAllowed, ReentryOnUp
+    global EdgeLog, ReconcileCalls, FailControlKey, DirectAllowed
+    global ReentryOnUp, ReentryOnDown, ReentryOnDownKey, RuntimeAcceptingActions
+    global RuntimeInputGeneration
     SetTimer(ReleaseDueTransientPressKeys, 0)
     FakeNow := 100
     KeyPressDurationMs := 50
@@ -161,6 +192,10 @@ ResetProbe() {
     FailControlKey := ""
     DirectAllowed := true
     ReentryOnUp := 0
+    ReentryOnDown := 0
+    ReentryOnDownKey := ""
+    RuntimeAcceptingActions := true
+    RuntimeInputGeneration := 0
     SendKeyMode := "direct"
     TargetWin := ""
 }
@@ -364,6 +399,27 @@ ReleaseAllTransientPressKeys(false)
 Expect("forced-release", Join(EdgeLog), "direct::q:down,direct::q:up")
 Expect("forced-release-clears-ledger", TransientPressKeys.Count, 0)
 
+; 关闸在 Shift+LButton 的 down 发送期间重入：清场时账本尚未登记，
+; StartTransientPress 必须在登记前补发逆序 up，不能把两条边沿带出 STOPPED。
+ResetProbe()
+ReentryOnDownKey := "LButton"
+ReentryOnDown := CloseRuntimeDuringTransientDown
+Expect("gate-reentry-aborts", StartTransientPress("+LButton", "direct", "", &usedDirect) ? 1 : 0, 0)
+Expect("gate-reentry-releases", Join(EdgeLog),
+    "direct::Shift:down,direct::LButton:down,direct::LButton:up,direct::Shift:up")
+Expect("gate-reentry-empty-ledger", TransientPressKeys.Count, 0)
+Expect("gate-reentry-empty-order", TransientPressOrder.Length, 0)
+
+; 清场后立即恢复 gate 也不能让同一次旧 press 越过世代边界继续登记。
+ResetProbe()
+ReentryOnDownKey := "Shift"
+ReentryOnDown := ReenterResetAndResumeDuringTransientDown
+Expect("generation-reentry-aborts", StartTransientPress("+LButton", "direct", "", &usedDirect) ? 1 : 0, 0)
+Expect("generation-reentry-releases", Join(EdgeLog),
+    "direct::Shift:down,direct::Shift:up")
+Expect("generation-reentry-empty-ledger", TransientPressKeys.Count, 0)
+Expect("generation-reentry-empty-order", TransientPressOrder.Length, 0)
+
 ; 模拟 Send 的 up 边沿处理中重入暂停清场/释放定时器；全部按键均由 stub 记录。
 ; 同时验证不会重复 up、旧索引不会越界，且普通键仍先于修饰键释放。
 for outerKind in ["due", "all"] {
@@ -426,6 +482,7 @@ def _build_harness():
         "TransientPressId",
         "IsTransientModifierKey",
         "TrackTransientPressKey",
+        "ReleaseSentTransientEdges",
         "StartTransientPress",
         "ScheduleTransientPressRelease",
         "SnapshotTransientPressKeys",

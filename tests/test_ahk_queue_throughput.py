@@ -138,6 +138,7 @@ global OverloadNotifications := []
 global IsPaused := false
 global SpecialKeysPaused := false
 global RuntimeAcceptingActions := true
+global RuntimeInputGeneration := 0
 global ManagedDelayUntil := 0
 global ActiveManagedKeys := Map()
 global SkillHeldKeys := Map()

@@ -113,7 +113,13 @@ global ForceMoveKey := "a"
 global ForceMoveActive := false
 global ForceMoveReplacementKey := "f"
 global ForceMovePassthroughKeys := Map()
+global FORCE_MOVE_INTERACTION_INTERVAL_MS := 100
+global ForceMoveInteractionTimer := ForceMoveInteractionTick
 global RuntimeAcceptingActions := true
+global IsPaused := false
+global ManagedDelayUntil := 0
+global QueueCounts := Map("emergency", 0)
+global MacroManagedSuppressed := false
 global SendKeyMode := "direct"
 global TargetWin := ""
 global KeyLog := []
@@ -220,6 +226,8 @@ ResetAll() {
     global MainModeF8AwaitRelease, SimulatedF8PhysicalDown, PhysicalStopLatched
     global RuntimeOwnerStopLatched, RuntimeOwner, RuntimeOwnerEpoch, RuntimeOwnerEpochs
     global ReplacementEventDuringSend
+    global IsPaused, ManagedDelayUntil, QueueCounts, MacroManagedSuppressed
+    SetTimer(ForceMoveInteractionTimer, 0)
     SetTimer(PollMainModeF8Release, 0)
     FakeNow := 100
     CachedPythonHwnd := 123
@@ -243,6 +251,10 @@ ResetAll() {
     ForceMoveReplacementKey := "f"
     ForceMovePassthroughKeys := Map()
     RuntimeAcceptingActions := true
+    IsPaused := false
+    ManagedDelayUntil := 0
+    QueueCounts := Map("emergency", 0)
+    MacroManagedSuppressed := false
     KeyLog := []
     SimulatedQueueCount := 0
     SimulatedMacroActive := false
@@ -345,6 +357,21 @@ Expect("s7-force-move-cleared", ForceMoveActive ? 1 : 0, 0)
 Expect("s7-up-replaces-pending-down",
     PendingPythonStateEvents["monitor:F13"], "monitor_key_up:F13")
 Expect("s7-unregister-does-not-send-inline", SendAttempts, 0)
+
+; 强制移动期间即使普通队列为空，也应由 AHK 每100ms补发一次交互键。
+ResetAll()
+RegisterHook("a", "monitor")
+ForceMoveKey := "a"
+HandleMonitorKey("a")
+KeyLog := []
+Critical "Off"
+Sleep 250
+Expect("s7b-periodic-interaction", KeyLog.Length >= 2 ? 1 : 0, 1)
+HandleMonitorKeyUp("a")
+countAfterUp := KeyLog.Length
+Sleep 130
+Expect("s7b-stops-on-release", KeyLog.Length, countAfterUp)
+Critical "On"
 
 ; CLEAR_HOOKS 进入 STOPPED:两类状态与所有待补发事件一并清空,不得跨轮迟到。
 ResetAll()
@@ -754,6 +781,7 @@ def _build_harness():
         _extract_function(lines, "HandleMonitorKey"),
         _extract_function(lines, "HandleMonitorKeyUp"),
         _extract_function(lines, "ReconcileForceMoveState"),
+        _extract_function(lines, "ForceMoveInteractionTick"),
         _extract_function(lines, "SetRuntimeOwner"),
         _extract_function(lines, "RuntimeOwnerMatches"),
         _extract_function(lines, "SetRuntimeActionGateFromParam"),
@@ -765,7 +793,9 @@ def _build_harness():
         _extract_function(lines, "SendPress"),
         _extract_function(lines, "IsWheelKey"),
     ]
-    return "\n".join([_STUBS, _SCENARIOS, *functions])
+    return "\n".join(
+        [_STUBS, *functions, "ForceMoveInteractionTimer := ForceMoveInteractionTick", _SCENARIOS]
+    )
 
 
 def test_event_backoff_and_state_retry_with_real_ahk():
@@ -865,7 +895,8 @@ def test_stationary_mode_protocol_rejects_unknown_activation_and_allows_clear():
     )
     assert command_case
     body = command_case.group(1)
-    assert "nextActive && !IsSupportedStationaryMode(nextModeType)" in body
+    assert "nextActive && (!RuntimeAcceptingActions" in body
+    assert "!IsSupportedStationaryMode(nextModeType)" in body
     assert "return AHK_RESULT_REJECTED" in body
     assert 'StationaryModeType := nextActive ? nextModeType : ""' in body
 

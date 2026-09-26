@@ -681,6 +681,88 @@ def test_running_entry_exception_rolls_back_to_ready():
     assert ("open", "RUNNING 入口失败后恢复 READY") in order
 
 
+def test_pause_closes_stationary_mode_and_resume_restores_requested_state():
+    """暂停时清掉 AHK 原地修饰，恢复时在生产者前恢复 Python 期望状态。"""
+    order = []
+    engine = object.__new__(MacroEngine)
+    engine._prepared_mode = "combat"
+    engine._stationary_mode_active = True
+    engine._force_move_active = False
+    engine._global_config = {
+        "stationary_mode_config": {"mode_type": "shift_modifier"}
+    }
+    engine._set_runtime_gate = lambda enabled: order.append(("gate", enabled)) or True
+    engine._open_runtime_gate = lambda context: order.append(("open", context)) or True
+    engine.input_handler = SimpleNamespace(
+        set_stationary_mode=lambda active, mode: order.append(
+            ("stationary", active, mode)
+        )
+        or True,
+        set_force_move_state=lambda active: order.append(("force_move", active)) or True,
+    )
+    engine.skill_manager = SimpleNamespace(
+        pause=lambda: order.append("skill_pause"),
+        resume=lambda: order.append("skill_resume"),
+        _is_running=True,
+        _is_paused=False,
+    )
+    engine.resource_manager = SimpleNamespace(
+        pause=lambda: order.append("resource_pause"),
+        resume=lambda: order.append("resource_resume"),
+        is_running=lambda: True,
+    )
+    engine.border_manager = SimpleNamespace(
+        pause_capture=lambda: order.append("capture_pause"),
+        resume_capture=lambda: order.append("capture_resume"),
+        running=True,
+        paused=False,
+    )
+
+    assert engine._on_state_enter(MacroState.PAUSED, MacroState.RUNNING) is True
+    assert ("stationary", False, "shift_modifier") in order
+    assert order.index(("gate", False)) < order.index(
+        ("stationary", False, "shift_modifier")
+    )
+
+    order.clear()
+    assert engine._on_state_enter(MacroState.RUNNING, MacroState.PAUSED) is True
+    assert ("stationary", True, "shift_modifier") in order
+    assert order.index(("open", "进入 RUNNING")) < order.index(
+        ("stationary", True, "shift_modifier")
+    ) < order.index("skill_resume")
+
+
+def test_running_rollback_from_paused_closes_stationary_mode():
+    order = []
+    engine = _bare_engine(MacroState.PAUSED)
+    engine._prepared_mode = "combat"
+    engine._global_config = {
+        "stationary_mode_config": {"mode_type": "shift_modifier"}
+    }
+    engine.input_handler = SimpleNamespace(
+        set_accepting_actions=lambda enabled, **kwargs: order.append(
+            ("gate", enabled)
+        )
+        or True,
+        set_stationary_mode=lambda active, mode: order.append(
+            ("stationary", active, mode)
+        )
+        or True,
+    )
+    engine.skill_manager = SimpleNamespace(pause=lambda: order.append("skill_pause"))
+    engine.pathfinding_manager = SimpleNamespace(pause=lambda: order.append("path_pause"))
+    engine.resource_manager = SimpleNamespace(pause=lambda: order.append("resource_pause"))
+    engine.border_manager = SimpleNamespace(pause_capture=lambda: order.append("capture_pause"))
+
+    engine._rollback_failed_state_entry(MacroState.RUNNING, MacroState.PAUSED)
+
+    assert ("gate", False) in order
+    assert ("stationary", False, "shift_modifier") in order
+    assert order.index(("gate", False)) < order.index(
+        ("stationary", False, "shift_modifier")
+    )
+
+
 def test_running_rollback_cannot_reopen_gate_after_physical_f8_latch():
     from PySide6.QtCore import QTimer
 
