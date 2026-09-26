@@ -1,4 +1,6 @@
-# AHK完整输入系统架构设计
+# AHK完整输入系统架构设计（历史档案）
+
+> **历史档案，不是当前实现规范。** 本文保留 2025 年迁移阶段的设计记录，其中的旧命令示例、10/20ms 队列周期、TCP 事件接收和“自动重启”等内容可能与当前源码不一致。当前实现请阅读 [AHK_CURRENT_ARCHITECTURE.md](AHK_CURRENT_ARCHITECTURE.md) 和 [wiki/02 — 架构与通信](../wiki/02-架构与核心概念.md)；命令 ID 以 `torchlight_assistant/config/ahk_commands.py` 与 `ahk_commands.ahk` 为准。
 
 ## 🎯 核心理念
 

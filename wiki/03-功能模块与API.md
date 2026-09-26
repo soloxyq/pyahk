@@ -66,6 +66,12 @@ class MacroEngine:
 - `managed_key_complete` → 记录完成;AHK 自行解除抑制并补齐持键
 - `monitor_key_down/up` → 强制移动状态切换
 
+暂停/恢复的输入边界由 `MacroEngine` 事务控制：进入 PAUSED 先调用
+`set_accepting_actions(False)`，再调用 `set_stationary_mode(False, mode_type)`；恢复 RUNNING
+先开闸，再同步 Python 保存的原地模式期望值和强制移动状态，最后恢复技能/资源/捕获生产者。
+RUNNING 入口任一步失败时，回滚路径会再次关闸并关闭原地模式，避免 AHK 仍以
+`shift_modifier` 或 `block_mouse` 影响暂停期间的物理输入。
+
 ---
 
 ### SkillManager `core/skill_manager.py`
@@ -193,6 +199,7 @@ class AHKInputHandler:
 
     # 状态切换
     def set_python_window_state(self, state: str) -> bool:  # "main"/"osd"
+    def set_stationary_mode(self, active: bool, mode_type: str = "block_mouse") -> bool: ...
     def set_force_move_state(self, active: bool) -> bool: ...
     def set_force_move_key(self, key: str) -> bool: ...
     def set_force_move_replacement_key(self, key: str) -> bool: ...
@@ -211,6 +218,7 @@ class AHKInputHandler:
     # 运行时闸门/所有权
     def set_accepting_actions(self, enabled: bool, owner=None, epoch=None) -> bool: ...
     def set_runtime_owner(self, owner: str, epoch: int) -> bool: ...
+    def arm_main_mode(self) -> bool: ...                    # READY 两阶段入口，先关闸再武装
     def reset_runtime(self) -> bool: ...
 
     def cleanup(self) / stop(): ...                      # 断开事件入口并终止 AHK 进程
@@ -224,6 +232,8 @@ class AHKInputHandler:
 均沿 down 时的目标与发送方式配对释放，可在后台投递；**屏幕坐标点击始终是全局输入**，
 即使配置了 `control` 也要求明确目标且目标当前在前台，坐标必须位于
 该前台 HWND 当前客户区的半开边界内。动作入队后若窗口移动或缩放，执行时会重新校验。
+
+`set_stationary_mode(True, type)` 只有 `shift_modifier` 和 `block_mouse` 且运行时闸门已开启时才会被 AHK 接受；关闭方向是安全清理命令，在 PAUSED/STOPPED 仍可发送。`set_accepting_actions(False)` 是原子停止屏障，不等同于旧的 `pause()`：它会清队、停宏、释放所有持键并拒绝迟到的输入生产命令。
 
 `dry_run_mode=True` 时，普通动作、非空持键声明和宏启动只记录到 `debug_display_manager`；空持键声明、停宏、关闸、清队、重置运行时等**安全清理命令仍会真实下发**，否则从真实运行切到干跑时可能留下卡键或后台宏。
 
