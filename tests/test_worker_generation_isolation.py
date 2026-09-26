@@ -107,6 +107,18 @@ class _BlockingBorderManager:
         return None
 
 
+def test_pathfinding_stop_is_idempotent_when_not_running():
+    """STOPPED 的统一清理不应把未启动寻路误报为失败。"""
+    border = _BlockingBorderManager()
+    manager = PathfindingManager(
+        border, SimpleNamespace(click_mouse_at=lambda *args: True)
+    )
+
+    assert manager.stop() is True
+    assert manager.is_running is False
+    assert manager._active_run is None
+
+
 def test_pathfinding_old_capture_result_is_discarded_after_restart():
     border = _BlockingBorderManager()
     input_handler = SimpleNamespace(click_mouse_at=lambda *args, **kwargs: True)

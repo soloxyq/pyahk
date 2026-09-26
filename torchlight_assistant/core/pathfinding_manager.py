@@ -162,11 +162,15 @@ class PathfindingManager:
         return True
 
     def stop(self):
+        """请求停止当前寻路世代；没有活动世代时也视为成功的幂等清理。"""
         with self._run_lock:
             run = self._active_run
             if run is None:
-                return False
-            was_running = self.is_running
+                # MacroEngine 在进入 STOPPED 时会统一调用所有 manager 的 stop。
+                # 未进入过寻路或 worker 已自然退出都属于已经满足的安全状态，
+                # 不能用 False 让上层把一次正常的幂等清理记录成“停止失败”。
+                self.is_running = False
+                return True
             self.is_running = False
             run.stop_event.set()
 
@@ -189,7 +193,7 @@ class PathfindingManager:
                 self._active_run = None
                 self._thread = None
         LOG_INFO("[寻路管理器] 自动寻路已停止")
-        return was_running or bool(thread and thread.is_alive())
+        return True
 
     def cleanup(self):
         """停止工作线程并对称解除全局 EventBus 订阅。"""
