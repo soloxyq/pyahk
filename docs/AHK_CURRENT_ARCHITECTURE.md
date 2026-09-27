@@ -6,7 +6,7 @@
 
 | 主题 | 实现文件 | 关键入口 |
 |------|----------|----------|
-| AHK 执行端 | `hold_server_extended.ahk` | `WM_COPYDATA`、`ProcessQueue`、`ExecuteAction`、`RegisterHook` |
+| AHK 执行端 | `hold_server_extended.ahk` | `WM_COPYDATA`、`ProcessQueue`、`ExecuteAction`、`RegisterHook`、`StartIndependentZeroBurst` |
 | 命令 ID | `torchlight_assistant/config/ahk_commands.py`、`ahk_commands.ahk` | `CMD_*` |
 | Python 命令边界 | `torchlight_assistant/core/ahk_command_sender.py` | `set_accepting_actions`、`reset_runtime`、`set_runtime_owner` |
 | Python 输入 API | `torchlight_assistant/core/ahk_input_handler.py` | `set_skill_hold_keys`、`set_stationary_mode`、`set_force_move_state` |
@@ -57,6 +57,8 @@ AHK → Python 同样使用 WM_COPYDATA，但响应预算为 50ms。状态通道
 
 AHK 支持五种 Hook：`intercept`（`$` 拦截，F8/F7/F9/Z 等）、`priority`（`$` 拦截并映射管理键）、`special`（`~` 透传并抑制自动输入）、`monitor`（`~` 透传并跟踪强制移动）和 `block`（`$` 完全屏蔽）。滚轮没有可靠 up 边沿，不能注册为 special/monitor；intercept 滚轮按刻度发送，不参加自动重复去重。
 
+另有一条不进入 `RegisteredHooks` 的永久 `$0` 热键：在运行时闸门关闭的 STOPPED/PAUSED 期间启动独立 burst，运行时闸门开启时拒绝；把 60 个 `0` 的 down/up 合并为一次 `SendInput` 后自动结束。发送不经过 Python、队列或目标窗口路由。这里不额外调用 `Sleep`，因此按键间隔由批量 `SendInput` 和 Windows 调度决定，不承诺精确 1ms；`0` 不能再作为 Python 动态 Hook 注册。
+
 四级队列为 emergency/high/normal/low。`ProcessQueue` 请求周期 15ms，Windows 上实测约 15.8ms，每 tick 最多执行一个动作，约 63 动作/秒。非紧急队列共享 `MAX_PENDING_ATOMS=16` 的原子预算；超过预算按 low→normal→high 丢最旧可丢项。普通动作等待 500ms 后过期丢弃； release、cleanup、notify、delay_clear、seqrun、紧急动作和在飞账本受保护。emergency 不设上限。
 
 `sequence:` 是一个队列决策，不展开成多个队列项。每个 tick 推进一个原子；普通 `delay` 变成同队列 `notBefore`，只阻塞本队列。`delay_clear` 仅用于管理键，是全局独占窗口，并在窗口内清空非紧急队列但放行 HP/MP。
@@ -70,6 +72,7 @@ AHK 宏解释器独立于四级队列：5ms 轮询只推进步骤，步骤节奏
 - 普通 press 使用非阻塞账本，`key_press_duration` 默认 10ms、合法范围 1–1000ms；坐标长按上限 5000ms。关闸清场直接释放账本；队列中的 release 只在开闸或特殊保护路径按规则执行。
 - `block_mouse` 原地模式吞掉自动鼠标 down/click 但放行 up；`shift_modifier` 为自动按键增加 Shift。闸门关闭时拒绝迟到的激活命令，关闭原地模式的命令始终允许。
 - 强制移动键按住时，非白名单、非 HP/MP 的自动按键替换为互动键（空配置回退 `f`）。AHK 的 `ForceMoveInteractionTick` 由 `FORCE_MOVE_INTERACTION_INTERVAL_MS=100` 驱动补发互动键；物理松开、暂停、管理键独占、特殊键保护期和 emergency 动作会停止或让路。停止/注销 Hook 会关闭该定时器。
+- 独立 `0` burst 只在 STOPPED/PAUSED 接受启动请求，固定用一次批量 `SendInput` 发送 60 次后自动结束；不额外 `Sleep`，实际间隔不保证精确 1ms。第二次 `0` 不承担停止语义，进程正常 shutdown/OnExit 会清掉尚未完成的 burst。
 
 ## 7. 修改后的最小验证
 

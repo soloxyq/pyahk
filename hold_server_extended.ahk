@@ -168,6 +168,15 @@ global RuntimeInputGeneration := 0
 ; Python 据此区分“AHK 明确拒绝”与“没有取得协议层结果”。
 global AHK_RESULT_REJECTED := 2
 
+; 独立 0 连发：完全由 AHK 管理，不进入 Python 或队列。物理按下 0 启动一次
+; 固定 burst；每个 burst 发送 60 个 0 后自动结束。运行时闸门开启时不启动，
+; 让这段功能只在 STOPPED/PAUSED 使用，不介入 Z 运行期间的输入。
+; generation 用来废弃退出时已经排队的一次性 timer 回调。
+global IndependentZeroBurstActive := false
+global IndependentZeroPhysicalDown := false
+global IndependentZeroBurstGeneration := 0
+global INDEPENDENT_ZERO_BURST_COUNT := 60
+
 ; 🎯 基于F8状态的智能窗口句柄缓存
 global CurrentPythonWindow := "TorchLightAssistant_MainWindow_12345"  ; 启动时默认主窗口
 global CachedPythonHwnd := 0  ; 缓存的Python窗口句柄
@@ -313,6 +322,12 @@ gui1 := Gui()
 gui1.Title := WinTitle
 gui1.Hide()
 hWnd := gui1.Hwnd
+
+; 独立 0 连发永久热键：AHK 进程启动后立即生效，停止/清理动态 Hook 不会影响它。
+; $ 防止本功能发出的 SendInput 重新触发自身；up 变体用于吞掉物理释放边沿并
+; 解除按下锁存，避免长按 0 的键盘自动重复启动多个 burst。
+Hotkey("$0", (*) => StartIndependentZeroBurst(), "On")
+Hotkey("$0 up", (*) => ReleaseIndependentZeroToggle(), "On")
 
 ; 注册WM_COPYDATA消息
 OnMessage(0x4A, WM_COPYDATA)
@@ -498,6 +513,9 @@ SetTimer(FlushPendingPythonEvents, 100)
 ; (走到 terminate 时持键可能残留,无法避免)。
 OnExit(AhkOnExitHandler)
 AhkOnExitHandler(reason, code) {
+    ; 正常退出时让独立 burst 立即失效；Python 强杀 AHK 不会进入 OnExit，
+    ; 这与现有持键释放路径相同，必须依赖 Python 的优雅 shutdown。
+    StopIndependentZeroBurst()
     try {
         ReleaseAllTransientPressKeys(false)
     } catch {
@@ -520,6 +538,75 @@ AhkOnExitHandler(reason, code) {
     } catch {
     }
     return 0  ; 允许退出
+}
+
+; ===============================================================================
+; 独立 0 连发（发送不经过 Python / 队列；启动只接受 STOPPED/PAUSED）
+; ===============================================================================
+StartIndependentZeroBurst() {
+    global IndependentZeroBurstActive, IndependentZeroPhysicalDown
+    global IndependentZeroBurstGeneration
+    global RuntimeAcceptingActions
+
+    ; 物理 0 的 auto-repeat 只保留第一次 down；真正的 up 由独立 up Hook 解锁。
+    if (IndependentZeroPhysicalDown) {
+        return
+    }
+    IndependentZeroPhysicalDown := true
+
+    ; 闸门开启代表主模式正在运行，此时直接丢弃启动请求，不改变现有
+    ; Python/队列输入；STOPPED/PAUSED 的闸门均为关闭状态，可以使用本功能。
+    if (RuntimeAcceptingActions || IndependentZeroBurstActive) {
+        return
+    }
+
+    IndependentZeroBurstGeneration += 1
+    generation := IndependentZeroBurstGeneration
+
+    IndependentZeroBurstActive := true
+    SetTimer(() => RunIndependentZeroBurst(generation), -1)
+}
+
+StopIndependentZeroBurst() {
+    global IndependentZeroBurstActive, IndependentZeroPhysicalDown
+    global IndependentZeroBurstGeneration
+
+    IndependentZeroBurstActive := false
+    IndependentZeroPhysicalDown := false
+    IndependentZeroBurstGeneration += 1
+}
+
+ReleaseIndependentZeroToggle() {
+    global IndependentZeroPhysicalDown
+    IndependentZeroPhysicalDown := false
+}
+
+RunIndependentZeroBurst(generation) {
+    global IndependentZeroBurstActive, IndependentZeroBurstGeneration
+    global INDEPENDENT_ZERO_BURST_COUNT
+
+    if (!IndependentZeroBurstActive || generation != IndependentZeroBurstGeneration) {
+        return
+    }
+
+    ; 把 60 个成对边沿合并为一次 SendInput，避免 120 次函数调用之间的额外开销。
+    ; SendInput 会按序注入完整的 down/up 事件；$0 防止本批输入重新触发热键。
+    burst := ""
+    Loop INDEPENDENT_ZERO_BURST_COUNT {
+        burst .= "{0 down}{0 up}"
+    }
+
+    if (IndependentZeroBurstActive && generation = IndependentZeroBurstGeneration) {
+        try {
+            SendInput burst
+        } catch {
+            ; 发送失败时仍走统一的结束路径，避免 active 状态卡住后无法再次启动。
+        }
+    }
+
+    if (generation = IndependentZeroBurstGeneration) {
+        IndependentZeroBurstActive := false
+    }
 }
 
 ; ===============================================================================
@@ -1023,6 +1110,8 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
         case CMD_SHUTDOWN:
             ; SHUTDOWN - 优雅关闭。Python 的 Popen.terminate() 在 Windows 上是
             ; TerminateProcess,**不会**触发 OnExit,所以这里是唯一可靠的释放时机。
+            ; 独立 0 连发也必须先停掉，避免等待退出 timer 的短窗口继续发键。
+            StopIndependentZeroBurst()
             ; 必须先原子清场:若只释放持键不清队列,本消息返回后、退出定时器触发前,
             ; 已到期的 ProcessQueue 可能先执行一次旧队列 → 退出前多发按键。
             ; ClearQueue(-1) 已包含 停宏(含宏持键)+队列级临时持键+技能持键 三类释放。
@@ -2790,6 +2879,10 @@ RegisterHook(key, mode) {
     }
 
     key_upper := StrUpper(key)
+    ; 0 是独立连发功能的永久热键，不能被 Python 业务 Hook 覆盖。
+    if (key_upper = "0") {
+        return false
+    }
     is_root := (key_upper = "F8" || key_upper = "F7" || key_upper = "F9")
     ; 永久根热键只能使用 intercept。即使调用方绕过 Python 的双层保留键检查，
     ; 也不能用 priority/special 等模式覆盖 down handler；root 不进 RegisteredHooks，
