@@ -13,22 +13,24 @@
             "ConditionCoordX": 900,
             "ConditionCoordY": 600,
             "ConditionColor": 0,
-            "AltKey": "9"
+            "AltKey": "9",
+            "BossOnly": false
         },
         "Skill2": {
-            "Enabled": false,
-            "Key": "c",
+            "Enabled": true,
+            "Key": "w",
             "Priority": false,
             "Timer": 175,
             "TriggerMode": 1,
-            "CooldownCoordX": 870,
-            "CooldownCoordY": 1000,
-            "CooldownSize": 12,
+            "CooldownCoordX": 914,
+            "CooldownCoordY": 955,
+            "CooldownSize": 14,
             "ExecuteCondition": 0,
             "ConditionCoordX": 1310,
             "ConditionCoordY": 992,
             "ConditionColor": 0,
-            "AltKey": "2"
+            "AltKey": "2",
+            "BossOnly": false
         },
         "Skill3": {
             "Enabled": false,
@@ -43,7 +45,8 @@
             "ConditionCoordX": 0,
             "ConditionCoordY": 0,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "",
+            "BossOnly": false
         },
         "Skill4": {
             "Enabled": false,
@@ -58,14 +61,15 @@
             "ConditionCoordX": 0,
             "ConditionCoordY": 0,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "",
+            "BossOnly": false
         },
         "Skill5": {
-            "Enabled": false,
+            "Enabled": true,
             "Key": "RButton",
             "Priority": false,
             "Timer": 150,
-            "TriggerMode": 1,
+            "TriggerMode": 2,
             "CooldownCoordX": 1035,
             "CooldownCoordY": 1000,
             "CooldownSize": 12,
@@ -73,7 +77,8 @@
             "ConditionCoordX": 126,
             "ConditionCoordY": 970,
             "ConditionColor": 1,
-            "AltKey": ""
+            "AltKey": "",
+            "BossOnly": false
         },
         "Skill6": {
             "Enabled": true,
@@ -88,7 +93,8 @@
             "ConditionCoordX": 1800,
             "ConditionCoordY": 970,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "",
+            "BossOnly": false
         },
         "Skill7": {
             "Enabled": false,
@@ -103,7 +109,8 @@
             "ConditionCoordX": 0,
             "ConditionCoordY": 0,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "",
+            "BossOnly": false
         },
         "Skill8": {
             "Enabled": false,
@@ -118,7 +125,8 @@
             "ConditionCoordX": 0,
             "ConditionCoordY": 0,
             "ConditionColor": 0,
-            "AltKey": ""
+            "AltKey": "",
+            "BossOnly": false
         }
     },
     "global": {
@@ -126,7 +134,7 @@
         "debug_mode": {
             "enabled": false
         },
-        "input_mode": "control",
+        "input_mode": "direct",
         "key_press_duration": 10,
         "cooldown_checker_interval": 125,
         "capture_interval": 55,
@@ -134,13 +142,14 @@
         "window_activation": {
             "enabled": true,
             "ahk_class": "Qt5156QWindowIcon",
-            "ahk_exe": ""
+            "ahk_exe": "MuMuNxDevice.exe"
         },
         "stationary_mode_config": {
             "hotkey": "",
             "mode_type": "shift_modifier",
             "force_move_hotkey": "",
-            "force_move_replacement_key": "f"
+            "force_move_replacement_key": "f",
+            "force_move_passthrough_keys": []
         },
         "affix_reroll": {
             "enabled": true,
@@ -208,6 +217,46 @@
             "lang": "eng",
             "psm_mode": 7,
             "char_whitelist": "0123456789/,"
-        }
+        },
+        "macro_steps": [
+            {
+                "type": "press",
+                "key": "1"
+            },
+            {
+                "type": "press",
+                "key": "2"
+            },
+            {
+                "type": "press",
+                "key": "3"
+            },
+            {
+                "type": "press",
+                "key": "4"
+            },
+            {
+                "type": "press",
+                "key": "5"
+            },
+            {
+                "type": "press",
+                "key": "6"
+            },
+            {
+                "type": "press",
+                "key": "7"
+            },
+            {
+                "type": "press",
+                "key": "8"
+            },
+            {
+                "type": "press",
+                "key": "9"
+            }
+        ],
+        "boss_mode_hotkey": "",
+        "special_key_resume_delay_ms": 0
     }
 }

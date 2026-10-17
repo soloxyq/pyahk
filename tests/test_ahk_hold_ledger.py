@@ -79,6 +79,8 @@ _EXTRACT = [
     "TrackMacroDown",
     "TrackMacroUp",
     "ReleaseMacroHeldKeys",
+    "HasMacroHeldOrderKey",
+    "PersistentPressId",
     "AbortMacroRuntime",
     "SetMacroSpecialSuppressed",
     "HandleSpecialKeyDown",
@@ -131,6 +133,7 @@ global SpecialKeysPressed := Map()
 global SpecialKeysPaused := false
 global SpecialKeyResumeDelayMs := 0
 global RuntimeAcceptingActions := true
+global RuntimeInputGeneration := 0
 global ManagedDelayUntil := 0
 global MacroSteps := []
 global MacroActive := false
@@ -138,6 +141,7 @@ global MacroIndex := 1
 global MacroDueTime := 0
 global MacroHeldKeys := Map()
 global MacroHeldOrder := []
+global PersistentPressRoutes := Map()
 global MacroSpecialSuppressed := false
 global MacroManagedSuppressed := false
 global ACTION_PRESS := "press"
@@ -162,18 +166,35 @@ IsMouseButtonKeyStub(key) {
     lower := StrLower(key)
     return (lower = "lbutton") || (lower = "rbutton") || (lower = "left") || (lower = "right")
 }
-SendDown(key, forceDirect := false, directTarget := "") {
+SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData := 0) {
     global KeyLog
+    global SkillHeldKeys, SkillHeldOrder, CoordinateMouseHoldActive, CoordinateMouseHoldPriority
     if (ShouldBlockMouseInStationary(key)) {
         return false
     }
     KeyLog.Push("down:" key)
+    if (owner = "macro") {
+        TrackMacroDown(key)
+    } else if (owner = "skill") {
+        SkillHeldKeys[key] := true
+        SkillHeldOrder.Push(key)
+    } else if (owner = "managed" || owner = "coordinate") {
+        MarkManagedHoldTarget(key)
+        if (owner = "coordinate") {
+            CoordinateMouseHoldActive := true
+            CoordinateMouseHoldPriority := ownerData.priority
+            PushFrontWait(ownerData.priority, "release:LButton", ownerData.holdMs)
+        }
+    }
     return true
 }
 SendUp(key) {
     global KeyLog
     KeyLog.Push("up:" key)
     return true
+}
+SendTransientKeyEdge(mode, target, key, isDown) {
+    return isDown ? SendDown(key) : SendUp(key)
 }
 SendPress(key, forceMoveBypass := false) {
     global KeyLog
@@ -216,13 +237,13 @@ ClickMouseAtOnce(x, y, target) {
     KeyLog.Push("clickat:" x "," y)
     return true
 }
-PressMouseAt(x, y, target) {
+PressMouseAt(x, y, target, priority, holdMs) {
     global KeyLog
     if (ShouldBlockMouseInStationary("LButton")) {
         return false
     }
     KeyLog.Push("move:" x "," y)
-    return SendDown("LButton", true, target)
+    return SendDown("LButton", true, target, "coordinate", {priority: priority, holdMs: holdMs})
 }
 ; 序列推进会把剩余部分放回队首;本文件只测持键账本,不测队列,故记录即可
 global PushedBack := []

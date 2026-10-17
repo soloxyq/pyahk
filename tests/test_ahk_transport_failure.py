@@ -422,7 +422,9 @@ def test_notify_transport_failed_emits_event_once():
     marked = []
     state = SimpleNamespace(
         _ahk_transport_failure_notified=False,
-        command_sender=SimpleNamespace(mark_transport_unavailable=marked.append),
+        command_sender=SimpleNamespace(
+            transport_unavailable=True, mark_transport_unavailable=marked.append
+        ),
     )
     fake_bridge = SimpleNamespace(
         ahk_event=SimpleNamespace(emit=lambda s: emitted.append(s))
@@ -433,7 +435,7 @@ def test_notify_transport_failed_emits_event_once():
         AHKInputHandler._notify_transport_failed(state, SEND_TIMEOUT)
         AHKInputHandler._notify_transport_failed(state, SEND_TIMEOUT)  # 第二次必须无动作
     assert emitted == ["ahk_transport_failed:timeout"], f"事件发布不对: {emitted}"
-    assert marked == [SEND_TIMEOUT]
+    assert marked == []  # 发送线程已登记熔断，通知层不能重复改写故障状态。
     assert len(logged) == 1, "挂死告警重复刷屏"
     assert "重启" in logged[0], "告警没有明确提示用户重启应用"
 
@@ -468,6 +470,8 @@ def test_engine_transport_failed_sets_lock_and_schedules_delayed_stop():
     state = object.__new__(MacroEngine)
     state._ahk_transport_failed = False
     state.sound_manager = None
+    state._runtime_start_epoch = 7
+    state._stop_due_to_transport_failure = mock.Mock()
     logged = []
     with mock.patch.object(QTimer, "singleShot") as single_shot, \
          mock.patch.object(me, "LOG_ERROR", new=logged.append), \
@@ -477,8 +481,9 @@ def test_engine_transport_failed_sets_lock_and_schedules_delayed_stop():
     assert single_shot.called, "没有走延迟 STOPPED 流程"
     assert single_shot.call_args[0][0] == 0
     callback = single_shot.call_args[0][1]
-    assert callback.__self__ is state
-    assert callback.__func__ is MacroEngine._stop_due_to_ahk_death
+    state._runtime_start_epoch = 8
+    callback()
+    state._stop_due_to_transport_failure.assert_called_once_with(7)
     assert any("重启" in ln for ln in logged), "没有明确提示用户重启应用"
 
 

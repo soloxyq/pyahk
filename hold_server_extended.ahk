@@ -714,9 +714,7 @@ MacroTick() {
         MacroDueTime := MonotonicMs() + Max(Integer(data), 1)
     } else if (stype = "down") {
         ; 同技能持键账本:被 block_mouse 吞掉时不记账,避免 ReleaseMacroHeldKeys 发出多余的 up
-        if (SendDown(data)) {
-            TrackMacroDown(data)
-        }
+        SendDown(data, false, "", "macro")
     } else if (stype = "up") {
         SendUp(data)
         TrackMacroUp(data)
@@ -757,27 +755,64 @@ TrackMacroUp(key) {
 }
 
 ReleaseMacroHeldKeys() {
-    global MacroHeldKeys, MacroHeldOrder
+    global MacroHeldKeys, MacroHeldOrder, PersistentPressRoutes
 
-    released := Map()
-    idx := MacroHeldOrder.Length
-    while (idx > 0) {
-        key := MacroHeldOrder[idx]
-        if (MacroHeldKeys.Has(key)) {
-            SendUp(key)
-            released[key] := true
+    previousCritical := A_IsCritical
+    Critical "On"
+    try {
+        ; 在任何可能重入的 up 之前捕获路由并摘除宏账本。内层 stop 可释放
+        ; 尚未处理的路由，外层随后只跳过它；不会再遍历被清空的全局数组。
+        pending := []
+        seen := Map()
+        keys := MacroHeldOrder.Clone()
+        for key, _ in MacroHeldKeys {
+            if (!HasMacroHeldOrderKey(keys, key)) {
+                keys.InsertAt(1, key)
+            }
         }
-        idx -= 1
-    }
-
-    for key, _ in MacroHeldKeys {
-        if (!released.Has(key)) {
-            SendUp(key)
+        index := keys.Length
+        while (index > 0) {
+            key := keys[index]
+            id := PersistentPressId(key)
+            if (MacroHeldKeys.Has(key) && !seen.Has(id)) {
+                pending.Push({key: key, id: id,
+                    route: PersistentPressRoutes.Has(id) ? PersistentPressRoutes[id] : 0})
+                seen[id] := true
+            }
+            index -= 1
+        }
+        MacroHeldKeys := Map()
+        MacroHeldOrder := []
+        for item in pending {
+            if (IsObject(item.route)) {
+                if (!PersistentPressRoutes.Has(item.id)
+                    || PersistentPressRoutes[item.id] != item.route) {
+                    continue
+                }
+                PersistentPressRoutes.Delete(item.id)
+                route := item.route
+                SendTransientKeyEdge(route.mode, route.target, route.key, false)
+            } else if (!PersistentPressRoutes.Has(item.id)) {
+                ; 兼容没有 route 的历史/异常账本；新世代路由存在时绝不兜底 up。
+                SendUp(item.key)
+            }
+        }
+    } finally {
+        if (previousCritical) {
+            Critical previousCritical
+        } else {
+            Critical "Off"
         }
     }
+}
 
-    MacroHeldKeys := Map()
-    MacroHeldOrder := []
+HasMacroHeldOrderKey(keys, key) {
+    for existing in keys {
+        if (existing = key) {
+            return true
+        }
+    }
+    return false
 }
 
 AbortMacroRuntime() {
@@ -843,9 +878,13 @@ SetSkillHoldKeys(param) {
 ; 幂等:用同一集合重复调用不会产生额外按键。
 ReconcileSkillHoldKeys() {
     global SkillHoldDesiredOrder, SkillHeldKeys, SkillHeldOrder
+    global RuntimeInputGeneration
+
+    generation := RuntimeInputGeneration
+    desiredOrder := SkillHoldDesiredOrder
 
     desired := Map()
-    for index, key in SkillHoldDesiredOrder {
+    for index, key in desiredOrder {
         desired[key] := true
     }
 
@@ -855,6 +894,9 @@ ReconcileSkillHoldKeys() {
         key := SkillHeldOrder[idx]
         if (!desired.Has(key)) {
             SendUp(key)
+            if (generation != RuntimeInputGeneration || desiredOrder != SkillHoldDesiredOrder) {
+                return
+            }
             SkillHeldKeys.Delete(key)
             SkillHeldOrder.RemoveAt(idx)
         }
@@ -867,7 +909,10 @@ ReconcileSkillHoldKeys() {
     }
 
     ; 3) 按 Python 下发顺序补按缺失键(鼠标键先于键盘键由 Python 侧排序保证)
-    for index, key in SkillHoldDesiredOrder {
+    for index, key in desiredOrder {
+        if (generation != RuntimeInputGeneration || desiredOrder != SkillHoldDesiredOrder) {
+            return
+        }
         if (SkillHeldKeys.Has(key)) {
             continue
         }
@@ -879,11 +924,7 @@ ReconcileSkillHoldKeys() {
         ; 只在**真正发出** down 之后才记账:block_mouse 原地模式会吞掉鼠标键的 down,
         ; 若无条件记账,账本就会谎报"已按住",此后 Reconcile 永远跳过它 → 技能静默失效。
         ; 不记账则该键留在 desired 里,下一次 Reconcile(含关闭原地模式时)会重试。
-        if (!SendDown(key)) {
-            continue
-        }
-        SkillHeldKeys[key] := true
-        SkillHeldOrder.Push(key)
+        SendDown(key, false, "", "skill", desiredOrder)
     }
 }
 
@@ -2068,9 +2109,7 @@ ExecuteAction(action, priority := 2) {
             }
         }
     } else if (actionType = ACTION_HOLD) {
-        if (SendDown(actionData)) {
-            MarkManagedHoldTarget(actionData)
-        }
+        SendDown(actionData, false, "", "managed")
     } else if (actionType = ACTION_RELEASE) {
         SendUp(actionData)
         ClearManagedHoldTarget(actionData)
@@ -2353,7 +2392,14 @@ StartTransientPress(key, preferredMode, target, &usedDirect) {
     Critical "On"
     try {
         mode := preferredMode
-        routeTarget := (mode = "control") ? target : ""
+        routeTarget := (mode = "control") ? ResolveControlTarget(target) : ""
+        if (mode = "control" && !routeTarget) {
+            return false
+        }
+        if (mode = "control") {
+            ; fallback 与最终 up 都绑定本次 down 选中的窗口。
+            target := routeTarget
+        }
         sentKeys := []
 
         ; ControlSend 中途失败时，先在同一目标上 LIFO 补 up，再将整个
@@ -2592,11 +2638,12 @@ PersistentPressId(key) {
 TrackPersistentPressRoute(key, mode, target) {
     global PersistentPressRoutes, TransientPressKeys, TransientPressOrder
 
-    PersistentPressRoutes[PersistentPressId(key)] := {
+    entry := {
         key: key,
         mode: mode,
         target: target
     }
+    PersistentPressRoutes[PersistentPressId(key)] := entry
     ; 成功的显式 down 接管同一路由的临时 press，最终 up 由持键所有者负责。
     ; 只撤销该键的旧 release；同一 chord 的其他键、其他目标仍按原时刻释放。
     transientId := TransientPressId(mode, target, key)
@@ -2610,6 +2657,7 @@ TrackPersistentPressRoute(key, mode, target) {
         }
         ScheduleTransientPressRelease()
     }
+    return entry
 }
 
 ReleaseAllPersistentPressKeys() {
@@ -2621,31 +2669,71 @@ ReleaseAllPersistentPressKeys() {
     PersistentPressRoutes := Map()
 }
 
-SendDown(key, forceDirect := false, directTarget := "") {
-    ; 按住按键。control 模式也必须记录 route，后续 release/STOPPED 才能在
-    ; 原目标上配对 up，而不是误向当前前台窗口发送全局边沿。
-    global TargetWin, SendKeyMode
+SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData := 0) {
+    global TargetWin, SendKeyMode, RuntimeAcceptingActions, RuntimeInputGeneration
+    global MacroHeldKeys, MacroHeldOrder, SkillHeldKeys, SkillHeldOrder, ManagedHoldTargets
 
-    if (ShouldBlockMouseInStationary(key)) {
-        return false   ; 被原地模式吞掉 → 调用方不得记账,否则账本谎报"已按下"
+    ; 仅业务持键受闸门约束。独立 0 仍由 RunIndependentZeroBurst 直接发送，
+    ; 暂停/停止时可用；本次修复不改变其入口、计数或发送路径。
+    if (!RuntimeAcceptingActions || ShouldBlockMouseInStationary(key)
+        || !IsPersistentDownOwnerCurrent(owner, ownerData, key)) {
+        return false
     }
-    ; down 和接管必须原子完成，旧 release timer 不能插在实际 down 与记账之间。
     previousCritical := A_IsCritical
     Critical "On"
     try {
-        if (!forceDirect && SendKeyMode = "control" && TargetWin != "") {
-            if (SendTransientKeyEdge("control", TargetWin, key, true)) {
-                TrackPersistentPressRoute(key, "control", TargetWin)
-                return true
-            }
-            ; ControlSend 失败只能在目标仍是前台时回退 global SendInput。
-        }
+        generation := RuntimeInputGeneration
+        ; Critical 不能挡住同步 WM_COPYDATA。保留本世代容器引用，停止后
+        ; 全局账本被替换时，旧调用不能向新容器迟到登记。
+        held := owner = "macro" ? MacroHeldKeys : owner = "skill" ? SkillHeldKeys : ManagedHoldTargets
+        order := owner = "macro" ? MacroHeldOrder : owner = "skill" ? SkillHeldOrder : []
         targetForDirect := directTarget != "" ? directTarget : TargetWin
-        if (!CanEmitDirectInput(targetForDirect)
-            || !SendTransientKeyEdge("direct", "", key, true)) {
+        mode := "direct"
+        routeTarget := ""
+        sent := false
+        if (!forceDirect && SendKeyMode = "control") {
+            routeTarget := ResolveControlTarget(TargetWin)
+            if (!routeTarget || !RuntimeAcceptingActions || generation != RuntimeInputGeneration
+                || !IsPersistentDownOwnerCurrent(owner, ownerData, key)) {
+                return false
+            }
+            sent := SendTransientKeyEdge("control", routeTarget, key, true)
+            if (sent) {
+                mode := "control"
+            }
+            targetForDirect := routeTarget
+        }
+        if (!sent) {
+            if (!CanEmitDirectInput(targetForDirect)
+                || !RuntimeAcceptingActions || generation != RuntimeInputGeneration
+                || !IsPersistentDownOwnerCurrent(owner, ownerData, key)) {
+                return false
+            }
+            routeTarget := ""
+            if (!SendTransientKeyEdge("direct", "", key, true)) {
+                return false
+            }
+        }
+        entry := {key: key, mode: mode, target: routeTarget}
+        if (!RuntimeAcceptingActions || generation != RuntimeInputGeneration
+            || !IsPersistentDownOwnerCurrent(owner, ownerData, key)) {
+            RollbackPersistentDown(entry)
             return false
         }
-        TrackPersistentPressRoute(key, "direct", "")
+        if (owner = "coordinate") {
+            ownerData.item := QueueItem("release:LButton")
+            ownerData.item.notBefore := MonotonicMs() + ownerData.holdMs
+        }
+        if (!RuntimeAcceptingActions || generation != RuntimeInputGeneration
+            || !IsPersistentDownOwnerCurrent(owner, ownerData, key)) {
+            RollbackPersistentDown(entry)
+            return false
+        }
+        entry := TrackPersistentPressRoute(key, mode, routeTarget)
+        if (!CommitPersistentDownOwner(entry, generation, owner, ownerData, held, order)) {
+            RollbackPersistentDown(entry)
+            return false
+        }
         return true
     } finally {
         if (previousCritical) {
@@ -2653,6 +2741,100 @@ SendDown(key, forceDirect := false, directTarget := "") {
         } else {
             Critical "Off"
         }
+    }
+}
+
+CommitPersistentDownOwner(entry, generation, owner, ownerData, held, order) {
+    global RuntimeAcceptingActions, RuntimeInputGeneration, PersistentPressRoutes
+    global CoordinateMouseHoldActive, CoordinateMouseHoldPriority
+    id := PersistentPressId(entry.key)
+    if (!RuntimeAcceptingActions || generation != RuntimeInputGeneration
+        || !IsPersistentDownOwnerCurrent(owner, ownerData, entry.key)
+        || !PersistentPressRoutes.Has(id) || PersistentPressRoutes[id] != entry) {
+        return false
+    }
+    if (owner != "") {
+        held[entry.key] := entry
+        if (owner = "macro" || owner = "skill") {
+            found := false
+            for existing in order {
+                if (existing = entry.key) {
+                    found := true
+                    break
+                }
+            }
+            if (!found) {
+                order.Push(entry.key)
+            }
+        } else if (owner = "coordinate") {
+            CoordinateMouseHoldActive := true
+            CoordinateMouseHoldPriority := ownerData.priority
+            PushFrontItem(ownerData.priority, ownerData.item)
+        }
+    }
+    if (!RuntimeAcceptingActions || generation != RuntimeInputGeneration
+        || !IsPersistentDownOwnerCurrent(owner, ownerData, entry.key)
+        || !PersistentPressRoutes.Has(id) || PersistentPressRoutes[id] != entry) {
+        if (held.Has(entry.key) && held[entry.key] = entry) {
+            held.Delete(entry.key)
+            index := order.Length
+            while (index > 0) {
+                if (order[index] = entry.key) {
+                    order.RemoveAt(index)
+                }
+                index -= 1
+            }
+        }
+        return false
+    }
+    return true
+}
+
+IsPersistentDownOwnerCurrent(owner, ownerData, key) {
+    global SkillHoldDesiredOrder
+    if (owner != "skill") {
+        return true
+    }
+    ; 同一运行世代内，条件检测也会替换 desired 集合。数组身份就是本轮
+    ; 声明的版本，旧 Reconcile 不能在新声明返回后重新补按旧集合的键。
+    if (!IsObject(ownerData) || ownerData != SkillHoldDesiredOrder) {
+        return false
+    }
+    for desiredKey in ownerData {
+        if (desiredKey = key) {
+            return true
+        }
+    }
+    return false
+}
+
+RollbackPersistentDown(entry) {
+    global PersistentPressRoutes, TransientPressKeys
+    id := PersistentPressId(entry.key)
+    if (PersistentPressRoutes.Has(id)) {
+        current := PersistentPressRoutes[id]
+        if (current = entry) {
+            PersistentPressRoutes.Delete(id)
+        } else if (current.mode = entry.mode && current.target = entry.target) {
+            ; 重入已经按下同一路由的新世代键，旧事务不得抬起它。
+            return
+        }
+    }
+    if (!TransientPressKeys.Has(TransientPressId(entry.mode, entry.target, entry.key))) {
+        SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
+    }
+}
+
+ResolveControlTarget(target) {
+    if (target = "") {
+        return 0
+    }
+    try {
+        ; selector 只在 down 前解析一次；up 使用账本里的确切 HWND，
+        ; 不会因同进程的另一窗口变成最上层而改投到它。
+        return WinExist(target)
+    } catch {
+        return 0
     }
 }
 
@@ -2805,13 +2987,9 @@ ExecuteMouseClickAt(data, priority) {
 
     ; down 后把不可丢 release 放回同一优先级队首并设置 notBefore。
     ; 不用 Sleep，因此其它优先级与 HP/MP 在保持窗口内仍可运行。
-    if (!PressMouseAt(x, y, target)) {
+    if (!PressMouseAt(x, y, target, priority, holdMs)) {
         return false
     }
-    MarkManagedHoldTarget("LButton")
-    CoordinateMouseHoldActive := true
-    CoordinateMouseHoldPriority := priority
-    PushFrontWait(priority, ACTION_RELEASE ":LButton", holdMs)
     return true
 }
 
@@ -2849,7 +3027,9 @@ ClickMouseAtOnce(x, y, target) {
     return true
 }
 
-PressMouseAt(x, y, target) {
+PressMouseAt(x, y, target, priority, holdMs) {
+    global RuntimeAcceptingActions, RuntimeInputGeneration
+    generation := RuntimeInputGeneration
     if (ShouldBlockMouseInStationary("LButton")) {
         return false
     }
@@ -2857,8 +3037,13 @@ PressMouseAt(x, y, target) {
         return false
     }
     MouseMove x, y, 0
+    ; MouseMove/窗口查询也可能泵送同步停止消息，不能让旧坐标动作在
+    ; 新世代开闸后重新捕获 generation 并按下鼠标。
+    if (!RuntimeAcceptingActions || generation != RuntimeInputGeneration) {
+        return false
+    }
     ; SendDown 也使用这份已捕获 target 做最后的前台检查，不读可重入更新的全局值。
-    return SendDown("LButton", true, target)
+    return SendDown("LButton", true, target, "coordinate", {priority: priority, holdMs: holdMs})
 }
 
 ; ===============================================================================
@@ -3607,14 +3792,21 @@ LatchPhysicalStop(event) {
 }
 
 LatchRuntimeOwnerStop(event) {
-    global RuntimeOwnerStopLatched
+    global RuntimeOwnerStopLatched, RuntimeOwner, RuntimeOwnerEpoch
 
     previousCritical := A_IsCritical
     Critical "On"
     try {
+        if ((RuntimeOwner != "affix" && RuntimeOwner != "pathfinding")
+            || !IsInteger(RuntimeOwnerEpoch) || RuntimeOwnerEpoch <= 0) {
+            return false
+        }
+        ; 固化物理按键当时的停止意图。worker 可能在 Qt 消费之前已结束，
+        ; 不能把这条迟到边沿作为 F7/F9 toggle 再启动下一轮。
+        stopEvent := "runtime_owner_stop:" RuntimeOwner ":" RuntimeOwnerEpoch
         RuntimeOwnerStopLatched := true
         SetRuntimeActionGate(false)
-        return QueuePythonReliableEvent(event)
+        return QueuePythonReliableEvent(stopEvent)
     } finally {
         if (previousCritical) {
             Critical previousCritical
@@ -3679,6 +3871,15 @@ QueuePythonReliableEvent(event, tryNow := true, forceStopIntent := false) {
     global PYTHON_RELIABLE_RETRY_BASE_MS
 
     isF8Event := IsF8StopEvent(event)
+    isOwnerStop := RegExMatch(event, "^runtime_owner_stop:(affix|pathfinding):[1-9][0-9]*$") != 0
+    if (isOwnerStop) {
+        for pending in PendingPythonReliableEvents {
+            parts := StrSplit(pending, ":", , 4)
+            if (parts.Length = 4 && parts[4] = event) {
+                return true ; 同一世代的停止尚在 FIFO 中，重复按键无需扩张队列。
+            }
+        }
+    }
     isActiveStopIntent := isF8Event && (forceStopIntent || RegisteredHooks.Count > 0)
     if (isActiveStopIntent && F8StopIntentPending) {
         ; 第一条停机意图已入队或已交给 Qt，继续按 F8 不应在恢复后
@@ -3708,8 +3909,32 @@ QueuePythonReliableEvent(event, tryNow := true, forceStopIntent := false) {
         ; toggle 保留最新意图，不能让根热键永久拒绝新输入。
         softLimit := MAX_PENDING_PYTHON_RELIABLE_EVENTS - PYTHON_RELIABLE_F8_RESERVE
         if (!isF8Event && PendingPythonReliableEvents.Length >= softLimit) {
-            OutputDebug("[pyahk] reliable Python event FIFO full; rejected seq=" PythonReliableEventSeq)
-            return false
+            if (!isOwnerStop
+                || PendingPythonReliableEvents.Length >= MAX_PENDING_PYTHON_RELIABLE_EVENTS) {
+                OutputDebug("[pyahk] reliable Python event FIFO full; rejected seq=" PythonReliableEventSeq)
+                return false
+            }
+            ; owner-stop 保留停止意图，但不能占用 F8 的四个保留槽。
+            ; 只驱逐普通边沿，已有 F8 / owner-stop 继续按 FIFO 递送。
+            evict := []
+            needed := PendingPythonReliableEvents.Length - softLimit + 1
+            loop PendingPythonReliableEvents.Length {
+                index := PendingPythonReliableEvents.Length - A_Index + 1
+                pending := PendingPythonReliableEvents[index]
+                if (!IsF8Envelope(pending)
+                    && !RegExMatch(pending, ":runtime_owner_stop:(affix|pathfinding):[1-9][0-9]*$")) {
+                    evict.Push(index)
+                    if (evict.Length = needed) {
+                        break
+                    }
+                }
+            }
+            if (evict.Length < needed) {
+                return false
+            }
+            for index in evict {
+                PendingPythonReliableEvents.RemoveAt(index)
+            }
         }
         if (isF8Event
             && PendingPythonReliableEvents.Length >= MAX_PENDING_PYTHON_RELIABLE_EVENTS) {

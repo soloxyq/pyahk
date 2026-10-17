@@ -447,7 +447,7 @@ class NativeGraphicsCaptureManager:
             }
 
             # 设置到C++库
-            success = self.capture_manager.set_capture_config(
+            success = self.capture_manager.set_config(
                 self.session_id, native_config
             )
             if success:
@@ -480,7 +480,7 @@ class NativeGraphicsCaptureManager:
 
         try:
             # 从C++库获取配置
-            config = self.capture_manager.get_capture_config(self.session_id)
+            config = self.capture_manager.get_config(self.session_id)
             return config
 
         except Exception as e:

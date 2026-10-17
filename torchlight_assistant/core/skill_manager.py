@@ -1,15 +1,13 @@
 """重构后的SkillManager - 专注于技能执行逻辑，具备自主调度能力"""
 
-import threading
 import time
 from typing import Dict, Any, List, Optional
-from queue import Queue, Empty
 import numpy as np
 
 from .ahk_input_handler import AHKInputHandler
 from .event_bus import event_bus
-from .states import MacroState
 from .unified_scheduler import UnifiedScheduler
+from .runtime_context import ProductionContext, ProductionToken
 from ..utils.border_frame_manager import BorderFrameManager
 from ..utils.debug_log import LOG, LOG_ERROR, LOG_INFO
 from ..utils.key_names import migrate_skill_sequence_to_steps
@@ -50,7 +48,8 @@ class SkillManager:
         self._cleanup_done = False
 
         # 线程安全配置
-        self._config_lock = threading.Lock()
+        self._production = ProductionContext()
+        self._config_lock = self._production.lock
         self._config_generation = 0
         self._resource_condition_history = {}
         self._required_consecutive_checks = 2
@@ -74,12 +73,8 @@ class SkillManager:
         # 移除对engine:state_changed的订阅，避免与MacroEngine的直接调用产生竞态条件
         event_bus.subscribe("engine:config_updated", self._on_config_updated)
 
-        # 🔧 已移除 scheduler_pause_requested / scheduler_resume_requested 订阅:
-        # 管理按键期间暂停整个 UnifiedScheduler 会连 resource_checker 一起停(HP/MP 救命
-        # 药剂检测停摆),且 resume() 会重置**所有**任务的 next_run_time —— 频繁按管理键
-        # 时长周期任务与资源检测会被无限推迟(饿死)。管理按键的输入独占语义已由 AHK 端
-        # HandleManagedKey(清非紧急队列 + delay_clear 期间持续清队)完整保证,Python 侧
-        # 再暂停调度器不产生额外效果,只贡献相位漂移。
+        # 管理键独占由 AHK 的队列策略实现，不暂停技能调度器，避免任务相位漂移。
+        # 资源检测有独立 ResourceScheduler，特殊键/管理键期间仍继续检测救命药剂。
 
     def _on_config_updated(self, skills_config, global_config):
         """把技能配置和全局配置作为一个最终状态事务应用。"""
@@ -108,7 +103,7 @@ class SkillManager:
         is_sequence_mode = self._global_config.get("sequence_enabled") is True
 
         if is_sequence_mode:
-            # 宏模式由 AHK 端解释器执行,Python 调度器只保留资源检测任务。
+            # 宏模式由 AHK 端解释器执行，本调度器不注册业务任务。
             LOG_INFO("[统一调度器] 进入宏模式，宏步骤由 AHK 端循环执行")
         else:
             # 技能模式：添加定时和冷却任务
@@ -126,28 +121,7 @@ class SkillManager:
                 f"[统一调度器] 进入技能模式，添加冷却检查任务，间隔: {cooldown_interval:.3f}s"
             )
 
-        # 3. 添加资源管理任务（独立调度，序列/技能模式都需要 HP/MP 自动药剂）
-        if self.resource_manager:
-            raw_resource_config = self._global_config.get(
-                "resource_management", {}
-            )
-            resource_config = (
-                raw_resource_config
-                if isinstance(raw_resource_config, dict)
-                else {}
-            )
-            resource_interval = self._milliseconds_to_seconds(
-                resource_config.get("check_interval", 200)
-            )
-            if resource_interval is None:
-                LOG_ERROR("[统一调度器] 资源检查间隔无效，回退为 200ms")
-                resource_interval = 0.2
-            self.unified_scheduler.add_task(
-                "resource_checker", resource_interval, self.check_resources
-            )
-            LOG_INFO(
-                f"[统一调度器] 添加资源管理任务，间隔: {resource_interval:.3f}s"
-            )
+        # HP/MP 由模式公共 ResourceScheduler 调度；慢 OCR 不阻塞技能任务。
 
     def _setup_timed_skills_tasks(self):
         """设置定时技能任务"""
@@ -188,7 +162,10 @@ class SkillManager:
 
     def pause(self):
         """暂停所有技能活动"""
-        self._is_paused = True
+        with self._config_lock:
+            self._runtime().pause()
+            self._is_paused = True
+            self._resource_condition_history.clear()
         # 释放所有技能持键(声明空集合) + 停止 AHK 端宏(释放宏持键)
         self._release_skill_hold_keys()
         self._stop_ahk_macro()
@@ -222,7 +199,9 @@ class SkillManager:
             else:
                 self._release_skill_hold_keys()
             return False
-        self._is_paused = False
+        with self._config_lock:
+            self._runtime().resume()
+            self._is_paused = False
         LOG_INFO("[统一调度器] 已恢复")
         return True
 
@@ -322,6 +301,7 @@ class SkillManager:
         was_running = self._is_running
         self._is_running = False
         self._is_paused = False
+        self._runtime().stop()
 
         # UnifiedScheduler.stop() 最长会 join 2 秒；在等待它之前必须先让 AHK
         # fail-closed，否则旧 AHK 宏/已经入队的动作会在 Python 等待时继续执行。
@@ -379,6 +359,7 @@ class SkillManager:
             # 事务门与两份配置在同一临界区提交；调度回调不会看到“新配置、旧门”
             # 或“已开事务门、仍读取旧配置”的中间组合。
             self._config_update_in_progress = True
+            self._runtime().reconfigure()
             self._config_generation += 1
             self._skills_config = skills_config
             self._global_config = global_config
@@ -453,30 +434,6 @@ class SkillManager:
                                 f"{cooldown_interval:.3f}s"
                             )
 
-                    if self.resource_manager:
-                        raw_resource_config = global_config.get(
-                            "resource_management", {}
-                        )
-                        resource_config = (
-                            raw_resource_config
-                            if isinstance(raw_resource_config, dict)
-                            else {}
-                        )
-                        resource_interval = self._milliseconds_to_seconds(
-                            resource_config.get("check_interval", 200)
-                        )
-                        if resource_interval is None:
-                            LOG_ERROR(
-                                "[统一调度器] 资源检查间隔无效，回退为 200ms"
-                            )
-                            resource_interval = 0.2
-                        if self.unified_scheduler.update_task_interval(
-                            "resource_checker", resource_interval
-                        ):
-                            LOG_INFO(
-                                "[统一调度器] 更新资源管理间隔: "
-                                f"{resource_interval:.3f}s"
-                            )
             succeeded = True
             return True
         except Exception as e:
@@ -506,6 +463,10 @@ class SkillManager:
         with self._config_lock:
             skill_config = self._skills_config.get(skill_name)
             config_generation = self._config_generation
+            production_token = self._runtime().capture()
+
+        if production_token is None:
+            return
 
         if isinstance(skill_config, dict) and skill_config.get("Enabled") is True:
             if self._is_skill_suppressed_by_boss_mode(skill_name, skill_config):
@@ -522,6 +483,7 @@ class SkillManager:
                 skill_config,
                 cached_frame,
                 config_generation=config_generation,
+                production_token=production_token,
             )
 
     def _get_macro_steps(self):
@@ -588,23 +550,21 @@ class SkillManager:
         ):
             return
 
+        # token/config 先于捕获，旧截图不能在恢复后借用新阶段许可。
+        with self._config_lock:
+            production_token = self._runtime().capture()
+            config_generation = self._config_generation
+            skills_to_check = sorted(
+                (item for item in self._skills_config.items() if isinstance(item[1], dict)),
+                key=lambda x: (x[1].get("Priority") is not True, x[0]),
+            )
+        if production_token is None:
+            return
         # 🎯 方案2核心：一次性获取帧数据，所有技能检测复用同一帧
         cached_frame = self._prepare_frame_detection_cache()
         if cached_frame is None:
             LOG_ERROR("[帧管理] 无法获取帧数据，跳过本轮技能检测")
             return  # 如果无法获取帧数据，跳过本次检测
-
-        with self._config_lock:
-            config_generation = self._config_generation
-            # 按优先级排序：优先级高的技能先检查
-            skills_to_check = sorted(
-                (
-                    item
-                    for item in self._skills_config.items()
-                    if isinstance(item[1], dict)
-                ),
-                key=lambda x: (x[1].get("Priority") is not True, x[0])
-            )
 
         # 🔄 所有技能检测都使用同一帧数据，确保时序一致性
         priority_skills_executed = 0
@@ -628,6 +588,7 @@ class SkillManager:
                     skill_config,
                     cached_frame,
                     config_generation=config_generation,
+                    production_token=production_token,
                 )
 
         if priority_skills_executed > 0:
@@ -636,7 +597,7 @@ class SkillManager:
         # 注意：资源管理现在有独立的调度任务，不在这里调用
 
     def check_resources(self):
-        """独立的资源管理检查任务（被统一调度器调用）- 使用统一帧管理"""
+        """兼容旧调用口；正式调度由 ResourceScheduler 负责。"""
         if (
             not self._is_running
             or self._is_paused
@@ -645,18 +606,16 @@ class SkillManager:
         ):
             return
 
-        # 🎯 方案2：为资源管理也获取独立的帧数据
-        cached_frame = self._prepare_frame_detection_cache()
-        if cached_frame is None:
-            LOG_ERROR("[帧管理] 资源检查无法获取帧数据，跳过本轮")
-            return
+        self.resource_manager.check_and_execute_resources()
 
-        # 截图可能阻塞；配置事务若在此期间开始，旧回调不得跨过事务边界执行。
-        if self._config_update_in_progress or not self._is_running or self._is_paused:
-            return
-
-        # ✅ 将同一帧数据传递给资源管理器，确保资源检测的一致性
-        self.resource_manager.check_and_execute_resources(cached_frame)
+    def _runtime(self) -> ProductionContext:
+        context = getattr(self, "_production", None)
+        if context is None:
+            context = self._production = ProductionContext(
+                running=getattr(self, "_is_running", False),
+                paused=getattr(self, "_is_paused", False),
+            )
+        return context
 
     def _prepare_frame_detection_cache(self) -> Optional[np.ndarray]:
         """
@@ -698,6 +657,7 @@ class SkillManager:
         cached_frame: Optional[np.ndarray] = None,
         *,
         config_generation: Optional[int] = None,
+        production_token: Optional[ProductionToken] = None,
     ):
         """
         统一的技能执行方法（方案2优化版本）
@@ -708,11 +668,14 @@ class SkillManager:
         # 世代中已进入的配置回调。生产路径传入与 skill_config 同时
         # 快照的令牌；直接调用者则在入口捕获当前令牌。
         with self._config_lock:
+            if production_token is None:
+                production_token = self._runtime().capture()
             if config_generation is None:
                 config_generation = self._config_generation
             if (
                 self._config_update_in_progress
                 or self._config_generation != config_generation
+                or not self._runtime().accepts(production_token)
             ):
                 return
 
@@ -756,6 +719,7 @@ class SkillManager:
                 skill_config,
                 cached_frame,
                 config_generation=config_generation,
+                production_token=production_token,
             )
 
         # None 表示条件未知（缺帧、越界或坏配置）。无论 Key/AltKey 都不发，
@@ -788,6 +752,7 @@ class SkillManager:
                 if (
                     self._config_update_in_progress
                     or self._config_generation != config_generation
+                    or not self._runtime().accepts(production_token)
                 ):
                     return
                 # 🎯 使用语义化接口根据优先级执行技能
@@ -911,6 +876,7 @@ class SkillManager:
         cached_frame: Optional[np.ndarray] = None,
         *,
         config_generation: Optional[int] = None,
+        production_token: Optional[ProductionToken] = None,
     ) -> Optional[bool]:
         try:
             condition = config_int(skill_config.get("ExecuteCondition", 0))
@@ -956,6 +922,7 @@ class SkillManager:
                     normalized_config,
                     cached_frame,
                     config_generation=config_generation,
+                    production_token=production_token,
                 )
         except Exception as e:
             LOG_ERROR(f"[条件检测] {skill_name} - 检查异常: {e}")
@@ -971,6 +938,7 @@ class SkillManager:
         cached_frame: Optional[np.ndarray] = None,
         *,
         config_generation: Optional[int] = None,
+        production_token: Optional[ProductionToken] = None,
     ) -> Optional[bool]:
         x, y = skill_config.get("ConditionCoordX", 0), skill_config.get(
             "ConditionCoordY", 0
@@ -1028,6 +996,7 @@ class SkillManager:
                     skill_name,
                     is_sufficient,
                     config_generation=config_generation,
+                    production_token=production_token,
                 )
                 return final_result
             except Exception as e:
@@ -1043,6 +1012,7 @@ class SkillManager:
         current_result: bool,
         *,
         config_generation: Optional[int] = None,
+        production_token: Optional[ProductionToken] = None,
     ) -> Optional[bool]:
         """
         资源条件连续性检查
@@ -1053,6 +1023,8 @@ class SkillManager:
         # 要么在此后增代并清空样本，要么旧回调先看到已增代而退出。
         # 检测/OCR 本身仍全部在锁外执行。
         with self._config_lock:
+            if production_token is not None and not self._runtime().accepts(production_token):
+                return None
             if config_generation is not None and (
                 self._config_update_in_progress
                 or self._config_generation != config_generation
@@ -1187,6 +1159,7 @@ class SkillManager:
 
         self._is_running = True
         self._is_paused = False
+        self._runtime().start()
         self._boss_mode_active = False
         try:
             self._start_autonomous_scheduling()
@@ -1195,6 +1168,7 @@ class SkillManager:
         except Exception:
             self._is_running = False
             self._is_paused = False
+            self._runtime().stop()
             self._stop_autonomous_scheduling()
             if self._is_macro_mode():
                 self._stop_ahk_macro()
@@ -1214,6 +1188,7 @@ class SkillManager:
         ``reset_runtime`` 后使用，避免再串行发送空持键/stop_macro。默认保持
         独立调用时的完整安全清理语义。
         """
+        self._runtime().stop()
         if not self._is_running:
             return
         # 🔧 停止顺序:停生产者并**等待调度线程退出** → 再释放持键/停宏。
@@ -1244,6 +1219,7 @@ class SkillManager:
         # 强制设置停止标志
         self._is_running = False
         self._is_paused = True
+        self._runtime().stop()
 
         # 释放技能持键与宏持键,防止紧急停止时键悬空
         try:

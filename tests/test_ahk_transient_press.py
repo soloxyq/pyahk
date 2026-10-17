@@ -56,6 +56,12 @@ global TransientPressOrder := []
 global PersistentPressRoutes := Map()
 global SkillHeldKeys := Map()
 global SkillHeldOrder := []
+global SkillHoldDesiredOrder := []
+global MacroHeldKeys := Map()
+global MacroHeldOrder := []
+global ManagedHoldTargets := Map()
+global CoordinateMouseHoldActive := false
+global CoordinateMouseHoldPriority := -1
 global EdgeLog := []
 global ReconcileCalls := 0
 global FailControlKey := ""
@@ -67,6 +73,7 @@ global RuntimeAcceptingActions := true
 global RuntimeInputGeneration := 0
 global SendKeyMode := "direct"
 global TargetWin := ""
+global ResolvedControlTarget := ""
 global ResultFile := A_Args[1]
 
 MonotonicMs() {
@@ -153,6 +160,18 @@ CanEmitDirectInput(target := "") {
     return DirectAllowed
 }
 
+ResolveControlTarget(target) {
+    global ResolvedControlTarget
+    return ResolvedControlTarget != "" ? ResolvedControlTarget : target
+}
+
+QueueItem(action) {
+    return {action: action}
+}
+
+PushFrontItem(priority, item) {
+}
+
 ShouldBlockMouseInStationary(key) {
     return false
 }
@@ -179,6 +198,7 @@ ResetProbe() {
     global EdgeLog, ReconcileCalls, FailControlKey, DirectAllowed
     global ReentryOnUp, ReentryOnDown, ReentryOnDownKey, RuntimeAcceptingActions
     global RuntimeInputGeneration
+    global ResolvedControlTarget
     SetTimer(ReleaseDueTransientPressKeys, 0)
     FakeNow := 100
     KeyPressDurationMs := 50
@@ -198,6 +218,7 @@ ResetProbe() {
     RuntimeInputGeneration := 0
     SendKeyMode := "direct"
     TargetWin := ""
+    ResolvedControlTarget := ""
 }
 
 global Checks := 0
@@ -325,6 +346,25 @@ Expect("persistent-control-edges", Join(EdgeLog),
     "control:ahk_exe game.exe:q:down,control:ahk_exe game.exe:q:up")
 
 ; press 后的显式 down 接管同一路由；旧计时器不能在持键期间插入 up。
+ResetProbe()
+SendKeyMode := "control"
+TargetWin := "ahk_exe multi-window.exe"
+ResolvedControlTarget := 101
+SendDown("q")
+ResolvedControlTarget := 202
+SendUp("q")
+Expect("persistent-pins-resolved-hwnd", Join(EdgeLog),
+    "control:101:q:down,control:101:q:up")
+
+ResetProbe()
+ResolvedControlTarget := 101
+StartTransientPress("q", "control", "ahk_exe multi-window.exe", &usedDirect)
+ResolvedControlTarget := 202
+FakeNow := 150
+ReleaseDueTransientPressKeys()
+Expect("transient-pins-resolved-hwnd", Join(EdgeLog),
+    "control:101:q:down,control:101:q:up")
+
 for mode in ["direct", "control"] {
     ResetProbe()
     SendKeyMode := mode
@@ -494,6 +534,9 @@ def _build_harness():
         "TrackPersistentPressRoute",
         "ReleaseAllPersistentPressKeys",
         "SendDown",
+        "CommitPersistentDownOwner",
+        "IsPersistentDownOwnerCurrent",
+        "RollbackPersistentDown",
         "SendUp",
     )
     return "\n".join([_STUBS, _SCENARIOS, *(_extract_function(lines, n) for n in names)])

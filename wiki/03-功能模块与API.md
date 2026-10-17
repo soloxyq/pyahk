@@ -9,8 +9,8 @@
                           (状态机协调中枢)
             ┌────────┬────────┴────────┬────────┐
             ▼        ▼                 ▼        ▼
-    SkillManager  ResourceManager  PathfindingMgr  AffixRerollMgr
-            │        │                 │            │
+    SkillManager ResourceScheduler PathfindingMgr  AffixRerollMgr
+             │   ResourceManager        │            │
             │        │                 │            │
             └────┬───┴─────────────────┘            │
                  ▼                                  │
@@ -19,7 +19,7 @@
                  ▼                       ▼          │
          AHKCommandSender         NativeCapture(C++)│
                  │                                  │
-                 ▼ WM_COPYDATA                      │
+                 ▼ CommandTransport → WM_COPYDATA   │
             [AHK 子进程]                            │
                                                     │
               SignalBridge / EventBus(单例,所有模块共享)
@@ -35,6 +35,10 @@
 ### MacroEngine `core/macro_engine.py`
 
 状态机协调中枢。持有所有 manager,响应热键事件,在状态转换时启停子系统。
+
+`_initialize_components()` 按依赖顺序创建组件；构造中途异常由引擎清理已建组件。
+`main.py` 的 aboutToQuit/finally 共用幂等清理，覆盖 UI 构造与事件循环异常；
+AHKInputHandler 自身构造失败时也会立即回收已启动的子进程。
 
 ```python
 class MacroEngine:
@@ -65,6 +69,7 @@ class MacroEngine:
 - `managed_key_down` → `clear_non_emergency_queue`(不暂停调度器,避免 HP/MP 检测停摆)
 - `managed_key_complete` → 记录完成;AHK 自行解除抑制并补齐持键
 - `monitor_key_down/up` → 强制移动状态切换
+- `runtime_owner_stop` → 仅停止匹配 owner/epoch 的洗练或寻路
 
 暂停/恢复的输入边界由 `MacroEngine` 事务控制：进入 PAUSED 先调用
 `set_accepting_actions(False)`，再调用 `set_stationary_mode(False, mode_type)`；恢复 RUNNING
@@ -76,11 +81,11 @@ RUNNING 入口任一步失败时，回滚路径会再次关闸并关闭原地模
 
 ### SkillManager `core/skill_manager.py`
 
-技能调度。订阅 `engine:config_updated`,根据配置往 `UnifiedScheduler` 注册 3 类任务:
+技能调度。订阅 `engine:config_updated`,根据配置往自己的 `UnifiedScheduler` 注册两类任务:
 - 定时技能(`TriggerMode=0`)→ `execute_timed_skill(skill_name)`
 - 冷却检查(`TriggerMode=1`)→ `check_cooldowns()`(定时一次性扫所有技能)
 - 通用宏(`sequence_enabled=true`)→ Python 下发 `macro_steps` 给 AHK 端宏解释器,不再注册 Python 步进任务
-- 资源管理 → `check_resources()`(宏/技能模式都注册,2025 修复 B1)
+- 资源管理由独立 `ResourceScheduler` 负责；`check_resources()` 仅保留为兼容调用口
 
 ```python
 class SkillManager:
@@ -117,7 +122,7 @@ class SkillManager:
 
 **配置热更新事务**:`engine:config_updated` 携带的 skills/global 会作为一个最终状态一起应用。事务期间旧调度回调在实际发键前退出；AHK 只收到最终模式需要的持键或宏状态，调度任务在输入提交成功后才变更。例如“技能模式 A 持键 → 宏模式且新配置含 B 持键”只会释放旧集合并启动宏，不会短暂按下 B。任何输入同步失败都会先关闭 AHK 运行时闸门，再等待 Python 调度线程退出并请求状态机回退 STOPPED。
 
-技能检测携带配置世代令牌：即使图像检测阻塞到热更新完成、事务门重新开放后才返回，
+技能检测携带 `ProductionToken`（运行、暂停恢复阶段、配置版本）：即使图像检测阻塞到热更新或暂停恢复完成、事务门重新开放后才返回，
 旧结果仍不得发送旧 Key/AltKey 或写入新配置的连续性历史。检测在锁外执行，
 令牌核对与历史追加/有界发送在短临界区完成；不能只靠布尔“正在更新”标志。
 
@@ -125,13 +130,15 @@ class SkillManager:
 
 **BOSS 模式**:`BossOnly=true` 的定时/冷却技能在 BOSS 模式关闭时跳过;按住型不参与 BOSS 模式,GUI 和配置归一化会禁用该组合。
 
-**通用宏模式**:`sequence_enabled=true` 时,定时/冷却任务不注册,AHK 端 `MacroTick` 循环执行 `macro_steps`;Python 调度器只保留资源检测任务。
+**通用宏模式**:`sequence_enabled=true` 时,定时/冷却任务不注册,AHK 端 `MacroTick` 循环执行 `macro_steps`；资源检测仍由独立 ResourceScheduler 执行。
 
 ---
 
 ### ResourceManager `core/resource_manager.py`
 
-HP/MP 自动药剂。被动调用,不持有线程,被 `SkillManager.check_resources()` 触发。
+HP/MP 自动药剂。被动调用，不持有线程，由 `ResourceScheduler` 周期触发。
+每轮捕获前复制配置并取得 token，最终发键前在同一把锁下核验运行许可和当前配置；
+停止、暂停恢复、禁用药剂或修改按键都会作废在途检测结果。
 
 ```python
 class ResourceManager:
@@ -164,6 +171,16 @@ Tesseract 配置以当前 `global.tesseract_ocr` 为唯一来源。配置签名�
 成功后再原子替换；在途识别可安全使用旧的不可变实例，不会混用两份配置。
 
 ---
+
+### ResourceScheduler / ProductionContext
+
+`core/resource_scheduler.py` 由 MacroEngine 拥有，统一处理 combat/pathfinding 的
+资源 start/stop/pause/resume，并随配置更新检查间隔。它拥有单独的 UnifiedScheduler，
+资源 OCR 与技能调度不共用 worker；STOPPED/PAUSED 时先作废资源 token 再等待或暂停调度。
+
+`core/runtime_context.py` 提供共用的 `ProductionContext` 和不可变 `ProductionToken`。
+技能和资源各持有独立 context；token 包含来源身份、运行世代、阶段世代和配置版本，
+不能在两个生产者间互用。调用顺序是锁内快照、锁外计算、锁内核验并提交有界输入。
 
 ### AHKInputHandler `core/ahk_input_handler.py`
 
@@ -247,7 +264,12 @@ class AHKInputHandler:
 
 ### AHKCommandSender `core/ahk_command_sender.py`
 
-把动作翻译成 AHK 命令并通过 WM_COPYDATA 发送。所有 `CMD_*` 的对外接口在这里。
+把动作翻译成 AHK 命令，交给 `core/command_transport.py` 的共享邮箱串行发送。
+所有 `CMD_*` 的对外接口在这里；返回值仍是同步 bool，失败原因按调用线程保存。
+同目标只有一个发送 worker，关闸/reset/shutdown 撤销旧待发普通命令，安全清理优先；
+排队超时撤销，线上超时或无效回包触发熔断，不自动重放业务命令。
+同目标 sender 共享熔断状态和恢复探测锁；迟到故障通知与延迟停机在执行时复核
+当前通道及运行世代，不能停止恢复后的新运行。
 
 ```python
 class AHKCommandSender:
@@ -344,6 +366,13 @@ ahk_signal_bridge = SignalBridge()
 
 ---
 
+### UiEventBridge `gui/event_bridge.py`
+
+GUI 的 EventBus 订阅适配器。`subscribe_notification()` 深拷贝载荷并通过 queued signal
+交付；`subscribe_command()` 使用 AutoConnection，保留 GUI 同线程 F8 采集配置的同步语义。
+可选 `guard_factory` 捕获运行/洗练世代并在 GUI 交付时验证；`close()` 对称退订并拒绝迟到事件。
+普通后台线程无 Qt 事件循环时也可发布，无需在该线程创建 `QTimer.singleShot`。
+
 ### EventBus `core/event_bus.py`
 
 模块级单例。同步 `publish` 有递归保护(threading.local 调用栈),`publish_async` 有并发上限保护(每事件最多 8 个在飞,防递归炸线程池)。
@@ -389,7 +418,8 @@ class UnifiedScheduler:
     def get_status(self) -> dict: ...
 ```
 
-`SkillManager` 注册的任务:`timed_skill_{name}` / `cooldown_checker` / `resource_checker`。宏模式不注册 `sequence_scheduler`;步骤循环在 AHK 端 `MacroTick` 内执行。
+`SkillManager` 注册 `timed_skill_{name}` / `cooldown_checker`；独立 `ResourceScheduler` 注册
+`resource_checker`。宏模式不注册 `sequence_scheduler`，步骤循环在 AHK 端 `MacroTick` 内执行。
 
 每次 `start()` 都创建私有 generation/stop token。`stop()` 等待 callback 最多 2 秒;
 若第三方 callback 尚未返回,调度器会 fail-closed 拒绝新一代启动。旧 callback 返回后
@@ -556,8 +586,8 @@ class CaptureConfig:
 
 1. **事件广播与生命周期调用分层**:状态/配置通知通过 `event_bus.publish/subscribe`
    解耦；`MacroEngine` 作为所有者可直接调 manager 的 start/stop/pause/resume，
-   `SkillManager` 也会同步调用其 `ResourceManager`。
+   资源生命周期由独立 ResourceScheduler 协调，不依赖 SkillManager 是否运行。
 2. **配置变更**统一发 `engine:config_updated`(skills_config, global_config)
 3. **状态变更**发 `engine:state_changed`(new_state, old_state)
-4. **Qt UI 更新**必须从主线程,跨线程要走 `QTimer.singleShot(0, ...)` 或 SignalBridge
+4. **Qt UI 更新**必须从主线程；主窗口事件通过 UiEventBridge，AHK 原生事件通过 SignalBridge。不要在普通后台线程使用无接收者的 `QTimer.singleShot` 期待它切换到主线程。
 5. **AHK 命令幂等性**:`register_hook` 用 `Hotkey(..., "On")` 选项,重复注册无害

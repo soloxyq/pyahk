@@ -24,6 +24,7 @@ from torchlight_assistant.config.ahk_commands import (
 )
 from torchlight_assistant.utils.debug_log import LOG_INFO, LOG_ERROR
 from torchlight_assistant.utils.config_values import config_int
+from .command_transport import get_command_transport
 
 
 class AHKCommandSender:
@@ -48,13 +49,50 @@ class AHKCommandSender:
         # 失败类型必须按发送线程保存。GUI 与调度线程可能同时发命令,若共用一个字段,
         # 线程 A 超时后会被线程 B 的成功结果覆盖,_check_send 就漏报真正的挂死。
         self._send_state = threading.local()
-        # 首次 timeout 后普通命令立即失败,避免生产侧继续堆积更多 500ms 等待。
-        # no_window 是微秒级的可恢复发现失败,不打开永久熔断。安全清理命令显式
-        # force=True 绕过熔断,保证 STOPPED 仍有一次真实的止血机会。
-        self._transport_failure_kind = ""
-        self._transport_circuit_lock = threading.Lock()
-        self._next_transport_probe_at = 0.0
+        # 同一服务器的 facade 共用发送者和熔断状态；新 facade 不能清掉已有故障。
+        # 每次调用的 last_failure_kind 仍按线程、按 facade 保存。
+        self._command_transport = get_command_transport(window_title)
         self._check_connection()
+
+    @property
+    def _transport_circuit(self):
+        transport = getattr(self, "_command_transport", None)
+        if transport is None:
+            # 兼容不启动 AHK 的隔离测试和延迟构造。
+            transport = self._command_transport = get_command_transport(self.window_title)
+        return transport.circuit
+
+    @property
+    def _transport_failure_kind(self):
+        return self._transport_circuit.failure_kind
+
+    @_transport_failure_kind.setter
+    def _transport_failure_kind(self, value):
+        self._transport_circuit.failure_kind = value
+
+    @property
+    def _transport_circuit_lock(self):
+        return self._transport_circuit.lock
+
+    @_transport_circuit_lock.setter
+    def _transport_circuit_lock(self, value):
+        self._transport_circuit.lock = value
+
+    @property
+    def _next_transport_probe_at(self):
+        return self._transport_circuit.next_probe_at
+
+    @_next_transport_probe_at.setter
+    def _next_transport_probe_at(self, value):
+        self._transport_circuit.next_probe_at = value
+
+    @property
+    def _transport_probe_in_progress(self):
+        return self._transport_circuit.probe_in_progress
+
+    @_transport_probe_in_progress.setter
+    def _transport_probe_in_progress(self, value):
+        self._transport_circuit.probe_in_progress = value
 
     @property
     def last_failure_kind(self) -> str:
@@ -76,7 +114,7 @@ class AHKCommandSender:
 
     @property
     def transport_unavailable(self) -> bool:
-        """普通命令是否正被 timeout 熔断。"""
+        """普通命令是否因超时或无效协议回包而熔断。"""
         return bool(self._transport_failure_kind)
 
     def recover_transport(self) -> bool:
@@ -84,7 +122,7 @@ class AHKCommandSender:
 
         探测只发送无副作用的 PING，并且不会重放触发故障的业务命令。锁使用
         non-blocking 获取：GUI 与调度线程同时请求恢复时只有一个线程最多等待
-        一次 500ms，其余调用立即失败，维持有界等待和 fail-closed 语义。
+        一次排队与 500ms 线上调用，其余调用立即失败，维持有界等待语义。
         """
         if not self.transport_unavailable:
             return True
@@ -98,9 +136,11 @@ class AHKCommandSender:
             return False
 
         try:
-            # 获取锁前后的时间可能跨过较长调度间隙，必须在锁内再次检查。
             if not self._transport_failure_kind:
                 return True
+            if getattr(self, "_transport_probe_in_progress", False):
+                self.last_failure_kind = self._transport_failure_kind
+                return False
             now = time.monotonic()
             if now < self._next_transport_probe_at:
                 self.last_failure_kind = self._transport_failure_kind
@@ -111,24 +151,37 @@ class AHKCommandSender:
             self._next_transport_probe_at = (
                 now + self.TRANSPORT_PROBE_COOLDOWN_SECONDS
             )
+            self._transport_probe_in_progress = True
+        finally:
+            # 不能持有调用线程的锁等待 mailbox：发送 worker 也需要登记故障。
+            self._transport_circuit_lock.release()
+
+        def probe():
             try:
                 ok, kind = send_ahk_cmd_ex(self.window_title, CMD_PING, "")
             except Exception as e:
                 LOG_ERROR(f"[AHKCommandSender] 通信恢复探测异常: {e}")
                 ok, kind = False, SEND_ERROR
+            if ok:
+                # 在同一传输线程提交恢复，不能由迟到调用方清掉下一条命令的新故障。
+                with self._transport_circuit_lock:
+                    self._transport_failure_kind = ""
+                    self._next_transport_probe_at = 0.0
+            return ok, kind
 
+        try:
+            ok, kind = get_command_transport(self.window_title).send(probe, safety=True)
             self.last_failure_kind = "" if ok else kind
             if not ok:
                 # 保留原 timeout 熔断原因。探测时暂时找不到窗口不代表可以重新
                 # 放行业务命令；用户重启 AHK 后下一次冷却探测仍可恢复。
                 return False
 
-            self._transport_failure_kind = ""
-            self._next_transport_probe_at = 0.0
             LOG_INFO("[AHKCommandSender] AHK 通信探测成功，普通命令熔断已解除")
             return True
         finally:
-            self._transport_circuit_lock.release()
+            with self._transport_circuit_lock:
+                self._transport_probe_in_progress = False
 
     def probe_transport(self) -> bool:
         """兼容别名；新调用方使用 recover_transport。"""
@@ -147,19 +200,55 @@ class AHKCommandSender:
             self.last_failure_kind = terminal_kind
             return False
 
+        from torchlight_assistant.config.ahk_commands import (
+            CMD_SET_ACCEPTING_ACTIONS, CMD_SHUTDOWN, CMD_SET_SKILL_HOLD_KEYS,
+        )
+        barrier = cmd_id in (CMD_RESET_RUNTIME, CMD_SHUTDOWN) or (
+            cmd_id == CMD_SET_ACCEPTING_ACTIONS
+            and (param == "arm_main" or param.split(":", 1)[0] == "false")
+        )
+        safety = force or barrier or cmd_id == CMD_STOP_MACRO or (
+            cmd_id == CMD_SET_SKILL_HOLD_KEYS and not param
+        )
+        delivery_finished = False
+
+        def deliver():
+            nonlocal delivery_finished
+            # 入队之后其他命令可能已熔断。只在唯一发送者上决定是否真正上线路。
+            failure = getattr(self, "_transport_failure_kind", "")
+            if failure and not force:
+                delivery_finished = True
+                return False, failure
+            try:
+                ok, kind = send_ahk_cmd_ex(self.window_title, cmd_id, param)
+            except Exception as e:
+                LOG_ERROR(f"[AHKCommandSender] 发送命令异常(cmd={cmd_id}): {e}")
+                ok, kind = False, SEND_ERROR
+            if not ok and kind in (SEND_TIMEOUT, SEND_ERROR):
+                self.mark_transport_unavailable(kind)
+            delivery_finished = True
+            return ok, kind
+
         try:
-            ok, kind = send_ahk_cmd_ex(self.window_title, cmd_id, param)
-        except Exception as e:  # 防御性兜底,正常情况下 send_ahk_cmd_ex 不抛
-            LOG_ERROR(f"[AHKCommandSender] 发送命令异常(cmd={cmd_id}): {e}")
+            ok, kind = get_command_transport(self.window_title).send(
+                deliver, safety=safety, barrier=barrier
+            )
+        except Exception as e:
+            LOG_ERROR(f"[AHKCommandSender] 提交命令异常(cmd={cmd_id}): {e}")
             ok, kind = False, SEND_ERROR
         self.last_failure_kind = "" if ok else kind
-        if not ok and kind == SEND_TIMEOUT:
+        if not ok and kind in (SEND_TIMEOUT, SEND_ERROR) and not delivery_finished:
             self.mark_transport_unavailable(kind)
         return ok
 
     def _check_connection(self):
-        """检查AHK连接"""
-        if not self._send(CMD_PING):
+        """检查连接；同名新 facade 沿用共享冷却和安全 PING 恢复入口。"""
+        connected = (
+            self.recover_transport()
+            if self.transport_unavailable
+            else self._send(CMD_PING)
+        )
+        if not connected:
             raise ConnectionError(
                 "无法连接到AHK服务器！\n"
                 "请确保 hold_server_extended.ahk 正在运行。\n"

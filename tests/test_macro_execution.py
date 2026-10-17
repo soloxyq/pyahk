@@ -173,7 +173,8 @@ def test_start_macro_mode_delegates_steps_to_ahk():
     assert _calls(sm, "start_macro")
     assert not _calls(sm, "skill_hold")  # 技能按住配置不属于宏模式
     assert all(task[0] != "sequence_scheduler" for task in sm.unified_scheduler.added_tasks)
-    assert any(task[0] == "resource_checker" for task in sm.unified_scheduler.added_tasks)
+    # 公共资源调度已移到 ResourceScheduler，宏/技能只拥有本模式任务。
+    assert all(task[0] != "resource_checker" for task in sm.unified_scheduler.added_tasks)
 
 
 def test_macro_start_failure_does_not_publish_local_running_state():
@@ -357,6 +358,7 @@ def test_switch_macro_to_skill_stops_ahk_macro_and_rebuilds_scheduler():
 
 def test_boss_only_skips_until_boss_mode_enabled():
     sm = _make_sm(sequence_enabled=False)
+    sm.start()
     skill = {
         "Enabled": True,
         "TriggerMode": 0,
@@ -377,6 +379,7 @@ def test_boss_only_skips_until_boss_mode_enabled():
 
 def test_string_false_priority_does_not_escalate_skill_queue():
     sm = _make_sm(sequence_enabled=False)
+    sm.start()
     skill = {
         "Enabled": True,
         "TriggerMode": 0,

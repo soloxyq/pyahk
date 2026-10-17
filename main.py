@@ -28,9 +28,26 @@ def main():
     """主函数"""
     # 设置全局异常处理器
     sys.excepthook = global_exception_handler
+    macro_engine = None
+    cleanup_done = False
+
+    def cleanup_all():
+        """正常退出和构造/事件循环异常共用同一确定性清理边界。"""
+        nonlocal cleanup_done
+        if cleanup_done or macro_engine is None:
+            return
+        cleanup_done = True
+        try:
+            LOG_INFO("开始清理所有资源...")
+            macro_engine.cleanup()
+            LOG_INFO("资源清理完成")
+        except Exception as e:
+            LOG_ERROR(f"清理资源时出错: {e}")
+            traceback.print_exc()
 
     try:
         app = QApplication(sys.argv)
+        app.aboutToQuit.connect(cleanup_all)
 
         # 安装全局 AHK 事件过滤器(替代 main_window / status_window 各自的 nativeEvent)
         # attach 到 app 防 GC,确保过滤器在整个应用生命周期内存活
@@ -42,33 +59,18 @@ def main():
         ui = GameSkillConfigUI(macro_engine, sound_manager)
         ui.show()
 
-        def cleanup_all():
-            """清理所有资源"""
-            try:
-                LOG_INFO("开始清理所有资源...")
-                macro_engine.cleanup()
-                LOG_INFO("资源清理完成")
-            except Exception as e:
-                LOG_ERROR(f"清理资源时出错: {e}")
-                traceback.print_exc()
-
-        app.aboutToQuit.connect(cleanup_all)
-
-        # 添加异常处理
-        try:
-            exit_code = app.exec()
-            LOG_INFO(f"应用程序正常退出，退出码: {exit_code}")
-            sys.exit(exit_code)
-        except Exception as e:
-            LOG_ERROR(f"应用程序执行异常: {e}")
-            traceback.print_exc()
-            sys.exit(1)
+        exit_code = app.exec()
+        LOG_INFO(f"应用程序正常退出，退出码: {exit_code}")
+        return exit_code
 
     except Exception as e:
-        LOG_ERROR(f"应用程序初始化失败: {e}")
+        LOG_ERROR(f"应用程序执行失败: {e}")
         traceback.print_exc()
-        sys.exit(1)
+        return 1
+    finally:
+        # UI 构造失败时尚未进入 app.exec，不会触发 aboutToQuit。
+        cleanup_all()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

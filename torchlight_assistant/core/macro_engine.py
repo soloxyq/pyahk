@@ -86,6 +86,19 @@ class MacroEngine:
         self._current_boss_mode_key = ""
         self._boss_mode_active = False
 
+        try:
+            self._initialize_components(sound_manager)
+        except Exception:
+            # 构造尚未返回时 main.py 无法持有本实例，必须由组合根回滚
+            # 已成功创建的组件；组件自身负责其构造中途失败的局部资源。
+            try:
+                self.cleanup()
+            except Exception as cleanup_error:
+                LOG_ERROR(f"[初始化] 部分构造失败后清理失败: {cleanup_error}")
+            raise
+
+    def _initialize_components(self, sound_manager):
+        """按依赖顺序创建组件，由 __init__ 统一处理失败回滚。"""
         self.config_manager = ConfigManager()
 
         # Initialize DebugDisplayManager first, as others depend on it
@@ -114,6 +127,9 @@ class MacroEngine:
             self.input_handler,
             debug_display_manager=self.debug_display_manager,
         )
+        from .resource_scheduler import ResourceScheduler
+
+        self.resource_scheduler = ResourceScheduler(self.resource_manager)
 
         # Pass debug_display_manager to SkillManager
         self.skill_manager = SkillManager(
@@ -221,6 +237,7 @@ class MacroEngine:
         # AHK 进程活着但消息循环挂死(命令 500ms 无响应):同样延迟停机,并锁定 READY 入口
         self._subscribe_event("ahk_transport_failed", self._on_ahk_transport_failed)
         self._subscribe_event("ahk_transport_recovered", self._on_ahk_transport_recovered)
+        self._subscribe_event("runtime_owner_stop", self._on_runtime_owner_stop)
         self._subscribe_event(
             "skill_manager:input_sync_failed", self._on_skill_input_sync_failed
         )
@@ -633,6 +650,34 @@ class MacroEngine:
         else:
             LOG_INFO(f"[热键管理] 未处理的按键: {key}")
 
+    def _on_runtime_owner_stop(self, key: str = ""):
+        """消费物理按键当时的停止意图；已结束/旧世代绝不能反向启动。"""
+        if not isinstance(key, str):
+            return
+        parts = key.split(":")
+        if (len(parts) != 2 or parts[0] not in {"affix", "pathfinding"}
+                or not parts[1].isascii() or not parts[1].isdecimal()):
+            return
+        try:
+            owner, epoch = parts[0], int(parts[1])
+        except ValueError:
+            return
+        if epoch <= 0:
+            return
+        with self._transition_lock:
+            if owner == "affix":
+                self.affix_reroll_manager.stop_reroll(
+                    "用户按 F7 停止", expected_generation=epoch
+                )
+            elif (getattr(self, "_runtime_owner", "none") == owner
+                    and getattr(self, "_runtime_owner_epoch", 0) == epoch
+                    and self._state != MacroState.STOPPED):
+                self.stop_macro()
+
+    def _resource_runtime(self):
+        """模式公共资源生命周期；保留独立嵌入者的 manager 兼容入口。"""
+        return getattr(self, "resource_scheduler", self.resource_manager)
+
     def _handle_ahk_special_key_down(self, key: str):
         """处理特殊按键按下（如space）- 不拦截，持续状态检测"""
         LOG(f"[特殊按键] 按下: {key}")
@@ -896,10 +941,13 @@ class MacroEngine:
                         or (pause_event is not None and pause_event.is_set())
                     ):
                         raise RuntimeError("寻路管理器恢复失败")
-                self.resource_manager.resume()
+                resources = self._resource_runtime()
+                resource_resumed = resources.resume()
+                if resource_resumed is False:
+                    raise RuntimeError("资源调度器恢复失败")
                 capture_resumed = self.border_manager.resume_capture()
-                if hasattr(self.resource_manager, "is_running"):
-                    if not self.resource_manager.is_running():
+                if hasattr(resources, "is_running"):
+                    if not resources.is_running():
                         raise RuntimeError("资源管理器恢复失败")
                 if (
                     capture_resumed is False
@@ -948,7 +996,7 @@ class MacroEngine:
                 self._run_safety_step(
                     "[暂停] 暂停寻路管理器", self.pathfinding_manager.pause
                 )
-            self._run_safety_step("[暂停] 暂停资源管理器", self.resource_manager.pause)
+            self._run_safety_step("[暂停] 暂停资源管理器", self._resource_runtime().pause)
             self._run_safety_step("[暂停] 暂停捕获", self.border_manager.pause_capture)
 
         elif state == MacroState.STOPPED:
@@ -1001,7 +1049,7 @@ class MacroEngine:
             lambda: self.skill_manager.stop(cleanup_input=False),
         )
         self._run_safety_step("[停止] 停止寻路管理器", self.pathfinding_manager.stop)
-        self._run_safety_step("[停止] 停止资源管理器", self.resource_manager.stop)
+        self._run_safety_step("[停止] 停止资源管理器", self._resource_runtime().stop)
         self._run_safety_step("[停止] 停止捕获", self.border_manager.stop)
         self._run_safety_step(
             "[停止] 复位 BOSS 模式",
@@ -1070,7 +1118,7 @@ class MacroEngine:
                     "[状态回滚] 重新暂停寻路管理器", self.pathfinding_manager.pause
                 )
             self._run_safety_step(
-                "[状态回滚] 重新暂停资源管理器", self.resource_manager.pause
+                "[状态回滚] 重新暂停资源管理器", self._resource_runtime().pause
             )
             self._run_safety_step(
                 "[状态回滚] 重新暂停捕获", self.border_manager.pause_capture
@@ -1084,7 +1132,7 @@ class MacroEngine:
             lambda: self.skill_manager.stop(cleanup_input=False),
         )
         self._run_safety_step("[状态回滚] 停止寻路管理器", self.pathfinding_manager.stop)
-        self._run_safety_step("[状态回滚] 停止资源管理器", self.resource_manager.stop)
+        self._run_safety_step("[状态回滚] 停止资源管理器", self._resource_runtime().stop)
         self._run_safety_step("[状态回滚] 停止捕获", self.border_manager.stop)
         self._run_safety_step(
             "[状态回滚] 恢复 READY 运行时闸门",
@@ -1144,9 +1192,11 @@ class MacroEngine:
         self.border_manager.resume_capture()
 
         # 启动资源管理器（如果有启用配置）
-        self.resource_manager.start()
-        if hasattr(self.resource_manager, "is_running"):
-            if not self.resource_manager.is_running():
+        resources = self._resource_runtime()
+        if resources.start() is False:
+            raise RuntimeError("资源调度器启动失败")
+        if hasattr(resources, "is_running"):
+            if not resources.is_running():
                 raise RuntimeError("资源管理器启动失败")
 
         LOG_INFO("[状态转换] 子系统启动完成")
@@ -1392,6 +1442,9 @@ class MacroEngine:
             self.resource_manager.update_config(
                 resource_config, tesseract_config
             )
+            resource_scheduler = getattr(self, "resource_scheduler", None)
+            if resource_scheduler is not None:
+                resource_scheduler.update_interval()
 
             # 更新调试模式
             raw_debug_config = global_config.get("debug_mode", {})
@@ -1928,11 +1981,14 @@ class MacroEngine:
     def _on_ahk_transport_failed(self, key: str = ""):
         """AHK 传输挂死(进程活着但命令 500ms 无响应)的应急处理(已在 GUI 线程)。
 
-        与 ahk_process_died 汇入同一个延迟 STOPPED 流程,并暂时熔断 READY 入口。
+        延迟停止发生故障的运行世代，并暂时熔断 READY 入口。
         冷却后 F8 只发送无副作用 PING；成功才恢复，不自动重放超时业务命令，
         也不通过 TerminateProcess 强杀可能仍持键的 AHK。
         """
+        if self._current_transport_unavailable() is False:
+            return
         self._ahk_transport_failed = True
+        failed_epoch = getattr(self, "_runtime_start_epoch", 0)
         reason = key or "unknown"
         LOG_ERROR(
             f"[引擎] ⚠️ AHK 通信失效({reason})。已停止主功能并暂时熔断启动入口；"
@@ -1953,13 +2009,32 @@ class MacroEngine:
             event_bus.publish("engine:ahk_transport_notice")
         except Exception:
             pass
-        # 与 ahk_process_died 相同:延后停机,避免在状态转换内部同步重入 _set_state
+        # 恢复通知/下一次启动可能先于本回调执行；只停止仍然故障的原世代。
         try:
             from PySide6.QtCore import QTimer
 
-            QTimer.singleShot(0, self._stop_due_to_ahk_death)
+            QTimer.singleShot(
+                0, lambda epoch=failed_epoch: self._stop_due_to_transport_failure(epoch)
+            )
         except Exception as e:
             LOG_ERROR(f"[引擎] 调度 AHK 挂死停机失败,改为直接停机: {e}")
+            self._stop_due_to_transport_failure(failed_epoch)
+
+    def _current_transport_unavailable(self) -> Optional[bool]:
+        """Read the sender's live circuit; legacy adapters may not expose it."""
+        sender = getattr(getattr(self, "input_handler", None), "command_sender", None)
+        status = getattr(sender, "transport_unavailable", None)
+        return status if isinstance(status, bool) else None
+
+    def _stop_due_to_transport_failure(self, failed_epoch: int):
+        with self._transition_lock:
+            if (
+                getattr(self, "_cleanup_done", False)
+                or failed_epoch != getattr(self, "_runtime_start_epoch", 0)
+                or not self._ahk_transport_failed
+                or self._current_transport_unavailable() is False
+            ):
+                return
             self._stop_due_to_ahk_death()
 
     def _recover_ahk_transport_for_start(self) -> bool:
@@ -1984,6 +2059,8 @@ class MacroEngine:
 
     def _on_ahk_transport_recovered(self, key: str = ""):
         """同步输入层的恢复结果；幂等安全。"""
+        if self._current_transport_unavailable() is True:
+            return
         if self._ahk_transport_failed:
             LOG_INFO("[引擎] 收到 AHK 通信恢复通知")
         self._ahk_transport_failed = False
@@ -2289,14 +2366,23 @@ class MacroEngine:
             (
                 "业务逻辑层",
                 [
-                    self.skill_manager,
-                    self.pathfinding_manager,
-                    self.affix_reroll_manager,
-                    self.resource_manager,
+                    getattr(self, "skill_manager", None),
+                    getattr(self, "pathfinding_manager", None),
+                    getattr(self, "affix_reroll_manager", None),
+                    getattr(self, "resource_scheduler", None),
+                    getattr(self, "resource_manager", None),
                 ],
             ),
             # Layer 2: 停止核心服务和IO
-            ("核心服务层", [self.border_manager, self.input_handler]),
+            (
+                "核心服务层",
+                [
+                    getattr(self, "debug_display_manager", None),
+                    getattr(self, "debug_scheduler", None),
+                    getattr(self, "border_manager", None),
+                    getattr(self, "input_handler", None),
+                ],
+            ),
         ]
 
         # 执行分层清理

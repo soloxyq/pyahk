@@ -57,7 +57,12 @@ class AHKInputHandler:
         self._recent_ahk_event_ids = deque()
         self._recent_ahk_event_id_set = set()
         
-        self._init_ahk_system()
+        try:
+            self._init_ahk_system()
+        except Exception:
+            # 构造失败时调用方尚未拿到实例，不能依赖上层 cleanup 或析构时机。
+            self.stop()
+            raise
         
         LOG_INFO("[AHK输入] 初始化完成")
     
@@ -140,6 +145,16 @@ class AHKInputHandler:
         parts = event.split(':', 1)
         event_type = parts[0]
         data = parts[1] if len(parts) > 1 else ""
+
+        # 跨线程排队期间通道可能已经恢复或再次失败。旧通知只能描述当时的
+        # 结果，不能覆盖当前通道状态或停止刚恢复的新运行。
+        sender = getattr(self, "command_sender", None)
+        if sender is not None:
+            unavailable = getattr(sender, "transport_unavailable", None)
+            if event_type == "ahk_transport_failed" and unavailable is False:
+                return
+            if event_type == "ahk_transport_recovered" and unavailable is True:
+                return
         
         # 🎯 特殊处理special_key_pause事件
         if event_type == "special_key_pause":
@@ -210,7 +225,7 @@ class AHKInputHandler:
 
         两类发送失败,分开处置:
         - 进程已退出 → check_ahk_alive 一次性发布 ahk_process_died;
-        - 进程活着但 timeout → 一次性发布 ahk_transport_failed。
+        - 进程活着但超时/无效协议回包 → 一次性发布 ahk_transport_failed。
           失联后不强杀 AHK:它可能还压着物理按键,强杀会跳过 OnExit 释放。
           普通命令先 fail-closed 熔断；冷却后仅允许串行 PING 探测恢复。
         no_window 不熔断也不锁 F8:FindWindow 失败本身是微秒级且可能因脚本重启恢复,
@@ -226,22 +241,23 @@ class AHKInputHandler:
 
     def _last_transport_failure_kind(self) -> str:
         """返回最近一次致命传输失败类型；业务拒绝和本地异常不在此处停机。"""
-        from hold_client import SEND_TIMEOUT
+        from hold_client import SEND_ERROR, SEND_TIMEOUT
 
         sender = self.command_sender
         if sender is None:
             return ""
         kind = sender.last_failure_kind
-        return kind if kind == SEND_TIMEOUT else ""
+        return kind if kind in (SEND_TIMEOUT, SEND_ERROR) else ""
 
     def _notify_transport_failed(self, failure_kind: str = "timeout"):
         """AHK 传输失效的一次性告警 + 上报(经信号桥切回 GUI 线程)。"""
+        if getattr(self.command_sender, "transport_unavailable", None) is False:
+            return
         if self._ahk_transport_failure_notified:
             return
         self._ahk_transport_failure_notified = True
-        if self.command_sender is not None:
-            self.command_sender.mark_transport_unavailable(failure_kind)
-        reason = "500ms 无响应"
+        # 熔断由唯一发送线程在交付失败时登记；迟到调用方不能再次熔断已恢复通道。
+        reason = "500ms 无响应" if failure_kind == "timeout" else "未取得有效协议回包"
         LOG_ERROR(
             f"[AHK输入] ⚠️ 命令发送失败({reason}):AHK 进程仍在,但通信通道已失效。"
             "普通按键命令已暂时熔断。不会自动重启或强杀 AHK(可能残留按住的键),"
@@ -253,7 +269,7 @@ class AHKInputHandler:
             LOG_ERROR(f"[AHK输入] 上报 AHK 传输失效事件失败: {e}")
 
     def recover_transport(self) -> bool:
-        """有界探测 timeout 后的 AHK 通信；不发送或重放业务动作。"""
+        """有界探测熔断后的 AHK 通信；不发送或重放业务动作。"""
         sender = self.command_sender
         if sender is None or not self.check_ahk_alive():
             return False
@@ -637,7 +653,7 @@ class AHKInputHandler:
             #    OnExit,持键会残留在游戏里。所以先请 AHK 自己释放持键再退出。
             graceful = False
             try:
-                if self.command_sender.shutdown():
+                if self.command_sender is not None and self.command_sender.shutdown():
                     process.wait(timeout=2)
                     graceful = True
                     LOG_INFO("[AHK输入] AHK已优雅退出(持键已由AHK自行释放)")

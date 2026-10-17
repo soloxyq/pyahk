@@ -184,7 +184,7 @@ SendPress(key, forceMoveBypass := false) {
     ExecLog.Push("press:" key "@" CurrentTick)
     return true
 }
-SendDown(key) {
+SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData := 0) {
     return true
 }
 SendUp(key) {

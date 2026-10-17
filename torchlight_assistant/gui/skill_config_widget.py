@@ -285,11 +285,20 @@ class SimplifiedSkillWidget(QWidget):
         # UI 只展示常用字段；从完整快照合并，才能保留 ColorTolerance
         # 以及未来新增但旧版 UI 尚未认识的嵌套字段。
         changes = deepcopy(self._skills_config_snapshot)
+
+        def read_integer(field: str, *, color: bool = False) -> int:
+            text = self._ui_widgets[field].text().strip()
+            try:
+                base = 16 if color and text.lower().startswith("0x") else 10
+                return int(text or "0", base)
+            except ValueError as exc:
+                raise ValueError(f"字段 {field} 的值 {text!r} 不是有效整数") from exc
+
         try:
             changes["Enabled"] = self._ui_widgets["Enabled"].isChecked()
             changes["Key"] = normalize_key_field(self._ui_widgets["Key"].text())
             changes["Priority"] = self._ui_widgets["Priority"].isChecked()
-            changes["Timer"] = int(self._ui_widgets["Timer"].text() or 0)
+            changes["Timer"] = read_integer("Timer")
             # 触发方式：0=定时, 1=冷却, 2=按住
             trigger_text = self._ui_widgets["TriggerModeCombo"].currentText()
             trigger_modes = {"定时": 0, "冷却": 1, "按住": 2}
@@ -299,13 +308,9 @@ class SimplifiedSkillWidget(QWidget):
                 self._ui_widgets["BossOnly"].isChecked()
                 and changes["TriggerMode"] != 2
             )
-            changes["CooldownCoordX"] = int(
-                self._ui_widgets["CooldownCoordX"].text() or 0
-            )
-            changes["CooldownCoordY"] = int(
-                self._ui_widgets["CooldownCoordY"].text() or 0
-            )
-            changes["CooldownSize"] = int(self._ui_widgets["CooldownSize"].text() or 0)
+            changes["CooldownCoordX"] = read_integer("CooldownCoordX")
+            changes["CooldownCoordY"] = read_integer("CooldownCoordY")
+            changes["CooldownSize"] = read_integer("CooldownSize")
             # InternalCooldown 字段已移除 - 该功能未实现
             condition_modes = {
                 "无限制": 0,
@@ -317,20 +322,11 @@ class SimplifiedSkillWidget(QWidget):
                 changes["ExecuteCondition"] = condition_modes[condition_text]
             # 普通条件检测配置
             if "ConditionCoordX" in self._ui_widgets:
-                changes["ConditionCoordX"] = int(
-                    self._ui_widgets["ConditionCoordX"].text() or 0
-                )
+                changes["ConditionCoordX"] = read_integer("ConditionCoordX")
             if "ConditionCoordY" in self._ui_widgets:
-                changes["ConditionCoordY"] = int(
-                    self._ui_widgets["ConditionCoordY"].text() or 0
-                )
+                changes["ConditionCoordY"] = read_integer("ConditionCoordY")
             if "ConditionColor" in self._ui_widgets:
-                color_text = self._ui_widgets["ConditionColor"].text()
-                changes["ConditionColor"] = (
-                    int(color_text, 16)
-                    if color_text.startswith("0x")
-                    else int(color_text or 0)
-                )
+                changes["ConditionColor"] = read_integer("ConditionColor", color=True)
 
             # 区域资源检测配置已移至独立的"智能药剂"配置
             # 不再在skill配置中保存resource相关字段
@@ -339,12 +335,10 @@ class SimplifiedSkillWidget(QWidget):
                 self._ui_widgets["AltKey"].text()
             )
         except (ValueError, TypeError) as e:
-            LOG_ERROR(
-                f"Error gathering config for skill '{self.skill_name}': {e}"
-            )  # Log the error
-            return (
-                deepcopy(self._skills_config_snapshot)
-            )  # Return last known good config on error
+            # The caller owns the F8/save transaction and displays this error.
+            # Reusing a previous snapshot could re-enable a skill the user has
+            # just disabled or restore an obsolete input key.
+            raise ValueError(f"技能 {self.skill_name} 配置无效：{e}") from e
         return changes
 
     def refresh(self, skill_config: Dict[str, Any]):
@@ -489,8 +483,9 @@ class SimplifiedSkillWidget(QWidget):
             return
 
         # 获取当前配置并更新界面可见性
-        current_config = self.get_current_config()
-        self._update_ui_visibility(current_config)
+        # Visibility only depends on these enums, not on partially edited
+        # numeric fields. Validation belongs to the F8/save transaction.
+        self._update_ui_visibility(self._current_visibility_config())
 
     def _on_condition_changed(self):
         """执行条件改变时的回调函数"""
@@ -502,8 +497,17 @@ class SimplifiedSkillWidget(QWidget):
             return
 
         # 获取当前配置并更新界面可见性
-        current_config = self.get_current_config()
-        self._update_ui_visibility(current_config)
+        self._update_ui_visibility(self._current_visibility_config())
+
+    def _current_visibility_config(self):
+        return {
+            "TriggerMode": {"定时": 0, "冷却": 1, "按住": 2}.get(
+                self._ui_widgets["TriggerModeCombo"].currentText()
+            ),
+            "ExecuteCondition": {"无限制": 0, "BUFF限制": 1, "资源条件": 2}.get(
+                self._ui_widgets["ExecuteCondition"].currentText()
+            ),
+        }
 
     def _all_widgets_created(self):
         """检查所有必要的控件是否已创建"""

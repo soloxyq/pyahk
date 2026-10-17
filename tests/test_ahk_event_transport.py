@@ -566,6 +566,22 @@ Expect("s16-f8-evicts-business-when-full",
     QueuePythonReliableEvent("intercept_key_down:F8", false) ? 1 : 0, 1)
 Expect("s16-still-bounded", PendingPythonReliableEvents.Length, 64)
 
+ResetAll()
+Loop 60 {
+    QueuePythonReliableEvent("intercept_key_down:WheelUp", false)
+}
+Expect("s16c-owner-stop-replaces-business",
+    QueuePythonReliableEvent("runtime_owner_stop:affix:7", false) ? 1 : 0, 1)
+Expect("s16c-owner-stop-keeps-f8-reserve", PendingPythonReliableEvents.Length, 60)
+Loop 4 {
+    QueuePythonReliableEvent("intercept_key_down:F8", false)
+}
+Expect("s16c-four-f8-slots-remain", PendingPythonReliableEvents.Length, 64)
+Expect("s16c-owner-stop-cannot-evict-at-absolute-limit",
+    QueuePythonReliableEvent("runtime_owner_stop:affix:8", false) ? 1 : 0, 0)
+Expect("s16c-original-stop-remains", PendingPythonReliableEvents[60],
+    "evt:777:61:runtime_owner_stop:affix:7")
+
 ; 64 项全是普通 STOPPED F8 时也必须保持有界并接受最新 toggle；主模式随后活跃时，
 ; stop-only F8 直接取代整批旧世代 toggle，不能因“全是 F8、无业务项可驱逐”而失败。
 ResetAll()
@@ -726,7 +742,7 @@ Expect("s22-affix-f7-latches-owner-stop", RuntimeOwnerStopLatched ? 1 : 0, 1)
 Expect("s22-affix-f7-rejects-reopen", SetRuntimeActionGate(true) ? 1 : 0, 0)
 FlushPendingPythonReliableEvents()
 Expect("s22-affix-f7-remains-reliable", EventsStr(),
-    "evt:777:1:intercept_key_down:F7")
+    "evt:777:1:runtime_owner_stop:affix:7")
 
 ; 寻路同样由永久 F9 当地止血，不能等待 Python GUI/OCR 恢复。
 ResetAll()
@@ -740,7 +756,23 @@ Expect("s23-path-f9-latches-owner-stop", RuntimeOwnerStopLatched ? 1 : 0, 1)
 Expect("s23-path-f9-rejects-reopen", SetRuntimeActionGate(true) ? 1 : 0, 0)
 FlushPendingPythonReliableEvents()
 Expect("s23-path-f9-remains-reliable", EventsStr(),
-    "evt:777:1:intercept_key_down:F9")
+    "evt:777:1:runtime_owner_stop:pathfinding:8")
+
+; owner 停止是可靠 FIFO 边沿，不能被新 owner 状态覆盖或合并。
+ResetAll()
+SendSucceeds := false
+QueuePythonReliableEvent("intercept_key_down:z")
+QueuePythonReliableEvent("runtime_owner_stop:affix:7")
+QueuePythonReliableEvent("runtime_owner_stop:affix:7")
+QueuePythonReliableEvent("runtime_owner_stop:affix:8")
+Expect("s24-owner-stop-deduplicates-only-identical-pending-epoch",
+    PendingPythonReliableEvents.Length, 3)
+SendSucceeds := true
+Loop 3 {
+    FlushPendingPythonReliableEvents()
+}
+Expect("s24-owner-stop-preserves-fifo-and-epoch", EventsStr(),
+    "evt:777:1:intercept_key_down:z,evt:777:2:runtime_owner_stop:affix:7,evt:777:3:runtime_owner_stop:affix:8")
 
 report := "CHECKS=" Checks "`nRESULT=" (Failures.Length ? "FAIL" : "OK") "`n"
 for index, failure in Failures {
@@ -967,9 +999,10 @@ def test_coordinate_click_action_is_validated_and_non_blocking():
     assert "target := TargetWin" in execute
     assert "IsPointInsideTargetClient(target, x, y)" in execute
     assert "ClickMouseAtOnce(x, y, target)" in execute
-    assert "PressMouseAt(x, y, target)" in execute
-    assert "MarkManagedHoldTarget(\"LButton\")" in execute
-    assert 'PushFrontWait(priority, ACTION_RELEASE ":LButton", holdMs)' in execute
+    assert "PressMouseAt(x, y, target, priority, holdMs)" in execute
+    commit = _extract_function(lines, "CommitPersistentDownOwner")
+    assert "CoordinateMouseHoldActive := true" in commit
+    assert "PushFrontItem(ownerData.priority, ownerData.item)" in commit
     assert not re.search(r"^\s*Sleep\b", execute, re.M)
 
     target_guard = _extract_function(lines, "IsPointInsideTargetClient")
@@ -986,7 +1019,7 @@ def test_coordinate_click_action_is_validated_and_non_blocking():
     press_at = _extract_function(lines, "PressMouseAt")
     assert "IsPointInsideTargetClient(target, x, y)" in click_once
     assert "IsPointInsideTargetClient(target, x, y)" in press_at
-    assert 'SendDown("LButton", true, target)' in press_at
+    assert 'SendDown("LButton", true, target, "coordinate",' in press_at
 
 
 def test_direct_input_is_suspended_and_released_when_target_loses_foreground():
@@ -1344,6 +1377,7 @@ def test_resume_from_paused_resyncs_force_move_state_after_gate_opens():
         resource_manager=SimpleNamespace(resume=lambda: None),
         border_manager=SimpleNamespace(resume_capture=lambda: None),
     )
+    state._resource_runtime = lambda: state.resource_manager
     with mock.patch.object(macro_mod.event_bus, "publish"):
         MacroEngine._on_state_enter(state, MacroState.RUNNING, MacroState.PAUSED)
     assert ("force_move", True) in order

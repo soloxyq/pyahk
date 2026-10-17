@@ -9,6 +9,7 @@
 | AHK 执行端 | `hold_server_extended.ahk` | `WM_COPYDATA`、`ProcessQueue`、`ExecuteAction`、`RegisterHook`、`StartIndependentZeroBurst` |
 | 命令 ID | `torchlight_assistant/config/ahk_commands.py`、`ahk_commands.ahk` | `CMD_*` |
 | Python 命令边界 | `torchlight_assistant/core/ahk_command_sender.py` | `set_accepting_actions`、`reset_runtime`、`set_runtime_owner` |
+| 串行传输 | `torchlight_assistant/core/command_transport.py` | 同目标单一 worker、停止屏障、过期撤销、native-only 等待 |
 | Python 输入 API | `torchlight_assistant/core/ahk_input_handler.py` | `set_skill_hold_keys`、`set_stationary_mode`、`set_force_move_state` |
 | 状态机 | `torchlight_assistant/core/macro_engine.py` | `_on_state_enter`、`_rollback_failed_state_entry` |
 | AHK 事件接收 | `torchlight_assistant/core/ahk_event_filter.py`、`signal_bridge.py`、`ahk_input_handler.py` | 全局 `QAbstractNativeEventFilter` + `Qt.QueuedConnection`；`_unwrap_ahk_event()` 使用 `RECENT_AHK_EVENT_LIMIT` |
@@ -33,13 +34,30 @@ STOPPED → READY → RUNNING ↔ PAUSED
 
 ## 3. 运行时闸门和世代
 
-`RuntimeAcceptingActions` 是 AHK 端唯一的输入生产闸门。`CMD_SET_ACCEPTING_ACTIONS=false` 在同一条 WM_COPYDATA 消息内执行 `ClearQueue(-1)`、`StopMacro()`、释放临时/持久/技能/管理持键，并拒绝新的队列、宏、管理键和非空持键声明。关闸期间 `CMD_ENQUEUE`（包括 release/up）仍被拒绝；只有清场、停宏、空持键集合和 reset 在 AHK 内部生成释放动作并作为安全清理路径执行。
+`RuntimeAcceptingActions` 是 AHK 端业务输入的生产闸门。`CMD_SET_ACCEPTING_ACTIONS=false` 在同一条 WM_COPYDATA 消息内执行 `ClearQueue(-1)`、`StopMacro()`、释放临时/持久/技能/管理持键，并拒绝新的队列、宏、管理键和非空持键声明。关闸期间 `CMD_ENQUEUE`（包括 release/up）仍被拒绝；只有清场、停宏、空持键集合和 reset 在 AHK 内部生成释放动作并作为安全清理路径执行。独立 0 连发直接走其自身 SendInput 路径，PAUSED/STOPPED 仍可使用。
 
 `RuntimeOwner`、`RuntimeOwnerEpoch` 和各 owner 的 tombstone 防止旧的 F8/F7/F9 回调重新打开新运行。`RuntimeInputGeneration` 由完整清场递增；`StartTransientPress` 在每个 down 边沿、账本登记前后都复核闸门和世代。若 WM_COPYDATA 重入恰好发生在 down 与登记之间，它按逆序补发 up，不会把旧 press 带入下一轮运行。
 
+持久 `SendDown` 也把实际边沿、route 与 macro/skill/managed/coordinate 所有者记录
+放入同一提交事务，调用方不在返回后追加记录。停止重入会作废旧事务；补发 up 时
+核验路由身份，不释放同一路由的新世代持键。control 在 down 前解析确切 HWND，
+后续 up 沿该句柄配对。
+
+宏多键释放先按 LIFO 保存路由快照、摘除宏所有者账本，再逐条按 route 身份释放。
+同步停止消息重入后，外层不会继续索引已清空的数组，也不会重复释放内层已处理的键。
+技能持键同步还校验整轮 generation 和 desired 数组身份，停止重开或同代替换声明后，
+不继续旧集合的剩余键，也不提交已经被新声明移除的在途持键。
+
 ## 4. WM_COPYDATA 协议
 
-Python → AHK 使用 `hold_client.send_ahk_cmd_ex()` 和 `SendMessageTimeoutW`，单条命令预算为 500ms。返回值为 `1=成功`、`2=业务拒绝`、`0=未处理/窗口过程默认值`。超时进入传输熔断；冷却 2 秒后启动尝试只串行发送 PING，不重放超时业务命令。STOPPED 的 `reset_runtime` 和关闭类命令使用 force 路径。
+Python → AHK 经 `AHKCommandSender` 和共享 `CommandTransport` 串行调用
+`hold_client.send_ahk_cmd_ex()` / `SendMessageTimeoutW`，线上预算 500ms。待发队列上限
+64（普通最多 60），排队最多 500ms，过期撤销；调用方为线上结果交付额外预留 50ms。
+安全清理优先；关闸、arm_main、reset 和 shutdown 作为屏障撤销此前待发普通命令。
+GUI 等待时只处理 Win32 sent messages，不泵浦 Qt 业务事件。
+返回值为 `1=成功`、`2=业务拒绝`、`0=未处理/窗口过程默认值`。超时或无效协议回包
+进入传输熔断；冷却 2 秒后启动尝试只串行发送 PING，不重放超时业务命令。
+STOPPED 的 `reset_runtime` 和关闭类命令使用 force 路径。
 
 当前命令 ID：
 
@@ -52,6 +70,9 @@ Python → AHK 使用 `hold_client.send_ahk_cmd_ex()` 和 `SendMessageTimeoutW`�
 | 26–29 | SET_ACCEPTING_ACTIONS、SHUTDOWN、RESET_RUNTIME、SET_RUNTIME_OWNER | 闸门、退出、原子清场和 owner 世代 |
 
 AHK → Python 同样使用 WM_COPYDATA，但响应预算为 50ms。状态通道（monitor、special pause）合并为 latest-wins；可靠边沿进入上限 64 的 FIFO，普通边沿软上限 60，保留 4 个 F8 槽。`evt:<session>:<seq>:<event>` 信封让 Python 在最近 512 个 `(session, seq)` 窗口内去重，窗口外不再承诺去重。AHK 只入队并立即返回，Python 由全局 `AHKEventFilter` 解码后经 Qt 队列处理。
+
+活跃 owner 的物理 F7/F9 发送 `runtime_owner_stop:<affix|pathfinding>:<epoch>`，
+接收方只停止该世代，旧停止意图不得重新启动洗练或寻路。
 
 ## 5. Hook、队列和动作
 

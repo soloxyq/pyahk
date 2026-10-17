@@ -212,6 +212,8 @@ def test_blocked_old_condition_result_cannot_send_key_after_transaction():
 
 def _bare_resource_manager() -> ResourceManager:
     manager = object.__new__(ResourceManager)
+    manager._is_running = True
+    manager._is_paused = False
     manager.hp_config = {
         "enabled": True,
         "key": "1",

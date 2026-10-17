@@ -8,14 +8,16 @@ AHK 端每秒推送 `stats:e=..,h=..,n=..,l=..,p=..,d=..,x=..`(载荷格式与
 
 - format_queue_stats_line 的格式化契约(紧凑一行;丢弃计数零时不加噪音;
   坏载荷返回 "" 而不是抛异常);
-- main_window 确实订阅了 "stats" 并把队列行挂到 OSD(源码级钉死 ——
-  实例化 MainWindow 需要 QApplication 与完整引擎);
+- main_window 的真实订阅和 Qt 桥将 stats 投递到 OSD（隔离引擎）；
 - 损坏且从未工作过的 get_stats() 请求路径已删除,不再有人把字符串当命令 ID 发。
 """
 
 import os
-import re
 import sys
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -52,18 +54,43 @@ def test_missing_cumulative_fields_default_to_zero():
 
 
 def test_main_window_subscribes_stats_and_mounts_queue_line():
-    path = os.path.join(REPO, "torchlight_assistant", "gui", "main_window.py")
-    with open(path, encoding="utf-8") as fp:
-        src = fp.read()
-    assert re.search(r'event_bus\.subscribe\(\s*"stats"', src), (
-        "main_window 没有订阅 stats 事件 —— AHK 的每秒推送无人消费"
+    from PySide6.QtWidgets import QApplication, QMainWindow
+    from torchlight_assistant.core.states import MacroState
+    from torchlight_assistant.gui import main_window
+
+    app = QApplication.instance() or QApplication([])
+    subscribers = {}
+    bus = SimpleNamespace(
+        subscribe=lambda name, handler: subscribers.__setitem__(name, handler),
+        unsubscribe=lambda name, handler: subscribers.pop(name, None),
     )
-    assert "format_queue_stats_line" in src, "OSD 队列行没有使用统一的格式化函数"
-    m = re.search(r"def _on_queue_stats\b(.*?)\n    def ", src, re.S)
-    assert m, "未找到 _on_queue_stats 处理器"
-    assert '"RUNNING", "PAUSED"' in m.group(1), (
-        "队列行没有限制在 RUNNING/PAUSED 展示"
-    )
+
+    class QueueWindow(main_window.GameSkillConfigUI):
+        def __init__(self):
+            QMainWindow.__init__(self)
+            self.macro_engine = SimpleNamespace(get_current_state=lambda: MacroState.RUNNING)
+            self.osd_status_window = SimpleNamespace(update_status=Mock())
+            self._osd_state_name = "RUNNING"
+            self._osd_base_text = "运行中"
+            self._osd_base_color = "lime"
+            self._connect_to_engine()
+
+    with patch.object(main_window, "event_bus", bus):
+        window = QueueWindow()
+    try:
+        subscribers["stats"](key="e=0,h=1,n=3,l=0,p=120,d=0,x=0")
+        window.osd_status_window.update_status.assert_not_called()
+        app.processEvents()
+        window.osd_status_window.update_status.assert_called_once_with(
+            "运行中\n队列 e0 h1 n3 l0", "lime"
+        )
+        window.osd_status_window.update_status.reset_mock()
+        window._osd_state_name = "STOPPED"
+        subscribers["stats"](key="e=0,h=0,n=0,l=0")
+        app.processEvents()
+        window.osd_status_window.update_status.assert_not_called()
+    finally:
+        window.close()
 
 
 def test_broken_get_stats_request_path_is_gone():

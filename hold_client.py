@@ -53,6 +53,20 @@ SendMessageTimeoutW.argtypes = [
 ]
 SendMessageTimeoutW.restype = LRESULT
 
+PeekMessageW = user32.PeekMessageW
+PeekMessageW.argtypes = [
+    ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+    wintypes.UINT, wintypes.UINT, wintypes.UINT,
+]
+PeekMessageW.restype = wintypes.BOOL
+PM_QS_SENDMESSAGE = 0x00400000
+
+
+def pump_sent_messages() -> None:
+    """Service synchronous native IPC without running queued Qt business work."""
+    msg = wintypes.MSG()
+    PeekMessageW(ctypes.byref(msg), None, 0, 0, PM_QS_SENDMESSAGE)
+
 
 class COPYDATASTRUCT(ctypes.Structure):
     _fields_ = [
@@ -64,7 +78,7 @@ class COPYDATASTRUCT(ctypes.Structure):
 
 # 🎯 性能优化：AHK窗口句柄缓存
 # AHK窗口启动后句柄不变，首次获取后可一直使用
-_ahk_hwnd = 0  # 缓存的窗口句柄
+_ahk_hwnds = {}  # 按服务器标题隔离，测试服务器/重建实例不能借用另一目标的 HWND
 
 
 def _classify_send(ret: int, msg_result: int, last_error: int) -> "tuple[bool, str]":
@@ -91,17 +105,16 @@ def send_ahk_cmd_ex(window_title: str, cmd_id: int, param: str = "") -> "tuple[b
     保证**永不抛异常**:上层把本调用作为 _check_send 的参数求值,异常在那一步
     逃逸会绕过所有失败处理(死亡探测/挂死告警)。任何意外都折叠成 SEND_ERROR。
     """
-    global _ahk_hwnd
-
     try:
         # 🎯 优先使用缓存的句柄
-        if _ahk_hwnd:
-            hwnd = _ahk_hwnd
+        cached_hwnd = _ahk_hwnds.get(window_title, 0)
+        if cached_hwnd:
+            hwnd = cached_hwnd
         else:
             # 首次查找并缓存
             hwnd = FindWindowW(None, window_title)
             if hwnd:
-                _ahk_hwnd = hwnd
+                _ahk_hwnds[window_title] = hwnd
             else:
                 print(f"[AHK客户端][ERROR] Window not found: {window_title}")
                 return False, SEND_NO_WINDOW
@@ -146,7 +159,7 @@ def send_ahk_cmd_ex(window_title: str, cmd_id: int, param: str = "") -> "tuple[b
         # 🎯 窗口失效时清除缓存,下次重新查找;超时**不**清缓存 —— 窗口还在,只是挂了,
         # 反复 FindWindow 只会把同一个挂死窗口再找回来。
         if kind == SEND_NO_WINDOW:
-            _ahk_hwnd = 0
+            _ahk_hwnds.pop(window_title, None)
         return ok, kind
     except Exception as e:  # 防御:ctypes 层意外异常不得逃逸(见 docstring)
         try:

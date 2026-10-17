@@ -253,9 +253,13 @@ def test_missing_deepai_does_not_disable_independent_tesseract_engine():
 def test_failed_potion_send_does_not_arm_internal_cooldown():
     manager = object.__new__(ResourceManager)
     manager.input_handler = SimpleNamespace(execute_hp_potion=lambda key: False)
+    manager._is_running = True
+    manager._is_paused = False
+    manager.hp_config = {"enabled": True, "key": "1"}
+    manager.mp_config = {}
     manager._flask_cooldowns = {}
 
-    assert manager._execute_resource("hp", {"key": "1"}) is False
+    assert manager._execute_resource("hp", manager.hp_config) is False
     assert "hp" not in manager._flask_cooldowns
 
 

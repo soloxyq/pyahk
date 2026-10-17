@@ -12,11 +12,13 @@
 """
 
 import time
+import copy
 from typing import Dict, Any, Optional, Tuple
 import numpy as np
 
 from ..utils.border_frame_manager import BorderFrameManager
 from .ahk_input_handler import AHKInputHandler
+from .runtime_context import ProductionContext, ProductionToken
 from ..utils.debug_log import LOG_INFO, LOG_ERROR, LOG
 from ..utils.region_utils import parse_screen_rect
 from ..utils.config_values import config_float, config_int
@@ -44,6 +46,7 @@ class ResourceManager:
         # 状态管理
         self._is_running = False
         self._is_paused = False
+        self._production = ProductionContext()
 
         # 当前配置的 Tesseract OCR 管理器。MacroEngine 首次发布完整配置时初始化，
         # 后续按 global.tesseract_ocr 的签名变化原子替换。
@@ -104,14 +107,33 @@ class ResourceManager:
         tesseract_config: Optional[Dict[str, Any]] = None,
     ):
         """更新资源配置"""
+        with self._runtime().lock:
+            self._runtime().reconfigure()
+            self._apply_config(resource_config, tesseract_config)
+
+    def _runtime(self) -> ProductionContext:
+        # 兼容旧的独立调用方；正常构造时已创建，生产路径不会竞争初始化。
+        context = getattr(self, "_production", None)
+        if context is None:
+            context = self._production = ProductionContext(
+                running=getattr(self, "_is_running", False),
+                paused=getattr(self, "_is_paused", False),
+            )
+        return context
+
+    def _apply_config(self, resource_config, tesseract_config):
         if not isinstance(resource_config, dict):
             LOG_ERROR("[ResourceManager] resource_management 必须是对象，已禁用资源输入")
             resource_config = {}
         old_configs = {"hp": self.hp_config, "mp": self.mp_config}
         raw_hp_config = resource_config.get("hp_config", {})
         raw_mp_config = resource_config.get("mp_config", {})
-        self.hp_config = raw_hp_config if isinstance(raw_hp_config, dict) else {}
-        self.mp_config = raw_mp_config if isinstance(raw_mp_config, dict) else {}
+        self.hp_config = (
+            copy.deepcopy(raw_hp_config) if isinstance(raw_hp_config, dict) else {}
+        )
+        self.mp_config = (
+            copy.deepcopy(raw_mp_config) if isinstance(raw_mp_config, dict) else {}
+        )
         try:
             check_interval = config_int(resource_config.get("check_interval", 200))
         except ValueError:
@@ -196,23 +218,39 @@ class ResourceManager:
 
     def check_and_execute_resources(self, cached_frame: Optional[np.ndarray] = None) -> bool:
         """检查并执行资源管理（被动调用）"""
-        if not self._is_running or self._is_paused:
+        context = self._runtime()
+        # token 必须先于捕获；慢截图/OCR 返回时不能借用新运行的生产许可。
+        with context.lock:
+            token = context.capture()
+            if token is None:
+                return False
+            configs = [
+                ("hp", copy.deepcopy(self.hp_config)),
+                ("mp", copy.deepcopy(self.mp_config)),
+            ]
+        if not any(config.get("enabled") is True for _, config in configs):
             return False
-
+        if cached_frame is None:
+            cached_frame = self.border_frame_manager.get_current_frame()
         executed = False
-        if self.hp_config.get("enabled") is True:
-            if self._is_resource_low("hp", cached_frame):
-                executed = self._execute_resource("hp", self.hp_config) or executed
-
-        if self.mp_config.get("enabled") is True:
-            if self._is_resource_low("mp", cached_frame):
-                executed = self._execute_resource("mp", self.mp_config) or executed
-
+        for resource_type, config in configs:
+            with context.lock:
+                if not context.accepts(token):
+                    break
+                if config.get("enabled") is not True:
+                    continue
+            if self._is_resource_low(
+                resource_type, cached_frame, config=config, token=token
+            ):
+                executed = self._execute_resource(
+                    resource_type, config, token=token
+                ) or executed
         return executed
 
-    def _check_internal_cooldown(self, resource_type: str) -> bool:
+    def _check_internal_cooldown(self, resource_type: str, config=None) -> bool:
         """检查内部冷却是否就绪"""
-        config = self.hp_config if resource_type == "hp" else self.mp_config
+        if config is None:
+            config = self.hp_config if resource_type == "hp" else self.mp_config
         try:
             cooldown_ms = config_float(config.get("cooldown", 5000))
         except ValueError:
@@ -234,13 +272,20 @@ class ResourceManager:
 
         return current_time - last_press_time >= cooldown_seconds
 
-    def _is_resource_low(self, resource_type: str, cached_frame: Optional[np.ndarray]) -> bool:
+    def _is_resource_low(
+        self, resource_type: str, cached_frame: Optional[np.ndarray],
+        *, config=None, token: Optional[ProductionToken] = None,
+    ) -> bool:
         """检查资源是否低于阈值（使用统一的百分比检测接口）"""
-        config = self.hp_config if resource_type == "hp" else self.mp_config
+        if config is None:
+            config = self.hp_config if resource_type == "hp" else self.mp_config
 
         # 检查内部冷却
-        if not self._check_internal_cooldown(resource_type):
-            return False
+        with self._runtime().lock:
+            if token is not None and not self._runtime().accepts(token):
+                return False
+            if not self._check_internal_cooldown(resource_type, config):
+                return False
 
         try:
             threshold = config_float(config.get("threshold", 50))
@@ -455,12 +500,15 @@ class ResourceManager:
             )
             return False
 
-        # 上报OSD
-        if self.debug_display_manager:
-            if resource_type == "hp":
-                self.debug_display_manager.update_health(match_percentage)
-            elif resource_type == "mp":
-                self.debug_display_manager.update_mana(match_percentage)
+        # 迟到计算连观测状态也不覆盖新运行；最终输入还会再次在锁内复核。
+        with self._runtime().lock:
+            if token is not None and not self._runtime().accepts(token):
+                return False
+            if self.debug_display_manager:
+                if resource_type == "hp":
+                    self.debug_display_manager.update_health(match_percentage)
+                elif resource_type == "mp":
+                    self.debug_display_manager.update_mana(match_percentage)
 
         return bool(match_percentage < threshold)
 
@@ -614,7 +662,23 @@ class ResourceManager:
             return None
         return frame[y:y + height, x:x + width]
 
-    def _execute_resource(self, resource_type: str, config: Dict[str, Any]) -> bool:
+    def _execute_resource(
+        self, resource_type: str, config: Dict[str, Any],
+        *, token: Optional[ProductionToken] = None,
+    ) -> bool:
+        """结果提交边界：许可/配置核验和有界发送必须与 stop/config 串行。"""
+        context = self._runtime()
+        with context.lock:
+            if token is None:
+                token = context.capture()
+            if not context.accepts(token):
+                return False
+            current = self.hp_config if resource_type == "hp" else self.mp_config
+            if current.get("enabled") is not True or current != config:
+                return False
+            return self._send_resource(resource_type, config)
+
+    def _send_resource(self, resource_type: str, config: Dict[str, Any]) -> bool:
         """执行资源操作"""
         key = config.get("key", "1" if resource_type == "hp" else "2")
 
@@ -683,29 +747,36 @@ class ResourceManager:
 
     def start(self):
         """启动资源管理器"""
-        if not self._is_running:
-            self._is_running = True
-            self._is_paused = False
-            LOG_INFO("[ResourceManager] 已启动")
+        with self._runtime().lock:
+            if not self._is_running:
+                self._runtime().start()
+                self._is_running = True
+                self._is_paused = False
+                LOG_INFO("[ResourceManager] 已启动")
 
     def stop(self):
         """停止资源管理器"""
-        if self._is_running:
+        with self._runtime().lock:
+            self._runtime().stop()
             self._is_running = False
             self._is_paused = False
             LOG_INFO("[ResourceManager] 已停止")
 
     def pause(self):
         """暂停资源管理器"""
-        if self._is_running and not self._is_paused:
-            self._is_paused = True
-            LOG_INFO("[ResourceManager] 已暂停")
+        with self._runtime().lock:
+            self._runtime().pause()
+            if self._is_running and not self._is_paused:
+                self._is_paused = True
+                LOG_INFO("[ResourceManager] 已暂停")
 
     def resume(self):
         """恢复资源管理器"""
-        if self._is_running and self._is_paused:
-            self._is_paused = False
-            LOG_INFO("[ResourceManager] 已恢复")
+        with self._runtime().lock:
+            if self._is_running and self._is_paused:
+                self._runtime().resume()
+                self._is_paused = False
+                LOG_INFO("[ResourceManager] 已恢复")
 
     def auto_detect_orbs(self, orb_type: str) -> Dict[str, Dict[str, Any]]:
         """

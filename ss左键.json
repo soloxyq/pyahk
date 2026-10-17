@@ -4,7 +4,7 @@
             "Enabled": true,
             "Key": "c",
             "Priority": false,
-            "Timer": 9800,
+            "Timer": 7400,
             "TriggerMode": 0,
             "BossOnly": false,
             "CooldownCoordX": 790,

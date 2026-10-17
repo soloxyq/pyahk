@@ -298,11 +298,16 @@ class SimpleAffixRerollManager:
         reason: str = "用户手动停止",
         *,
         cleanup_runtime: bool = True,
+        expected_generation: Optional[int] = None,
     ):
         with self._run_lock:
             run = self._active_run
+            if expected_generation is not None and (
+                run is None or run.generation != expected_generation
+            ):
+                return False
         if run is not None:
-            self._stop_run(run, reason, cleanup_runtime=cleanup_runtime)
+            return self._stop_run(run, reason, cleanup_runtime=cleanup_runtime)
 
     def _set_runtime_owner(self, generation: int, context: str) -> bool:
         try:

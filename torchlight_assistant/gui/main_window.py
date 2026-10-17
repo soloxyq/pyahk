@@ -16,13 +16,14 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
 )
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, QSignalBlocker
 from typing import Dict, Optional, Any
 
 from ..core.macro_engine import MacroState
 from ..core.event_bus import event_bus
 from .status_window import OSDStatusWindow, format_queue_stats_line
 from .debug_osd_window import DebugOsdWindow # Import DebugOsdWindow
+from .event_bridge import UiEventBridge
 from .skill_config_widget import SimplifiedSkillWidget
 from .ui_components import (
     StatusStrings,
@@ -162,25 +163,55 @@ class GameSkillConfigUI(QMainWindow):
         self.main_layout.addWidget(self.status_label)
 
     def _connect_to_engine(self):
-        event_bus.subscribe("engine:state_changed", self._on_macro_state_changed)
-        event_bus.subscribe("engine:status_updated", self._on_macro_status_updated)
-        event_bus.subscribe("engine:config_updated", self._on_config_update)
-        event_bus.subscribe("engine:config_load_result", self._on_config_load_result)
-        event_bus.subscribe("engine:config_save_result", self._on_config_save_result)
-        event_bus.subscribe("affix_reroll:status_updated", self._on_affix_reroll_status_updated)
-        event_bus.subscribe("affix_reroll:success", self._on_affix_reroll_success)
-        event_bus.subscribe("affix_reroll:hide_ui", self._on_affix_reroll_hide_ui)
-        event_bus.subscribe("affix_reroll:show_ui", self._on_affix_reroll_show_ui)
-        event_bus.subscribe("ocr:init_success", self._on_ocr_init_success)
-        event_bus.subscribe("ocr:init_failed", self._on_ocr_init_failed)
-        # AHK 每秒推送的队列观测(实时深度 + 累计丢弃),RUNNING/PAUSED 时挂到 OSD
-        event_bus.subscribe("stats", self._on_queue_stats)
-        # DEBUG OSD 窗口在自身构造/cleanup 中对称管理订阅。
+        self._ui_event_bridge = UiEventBridge(event_bus, self)
+        notifications = {
+            "engine:state_changed": self._on_macro_state_changed,
+            "engine:status_updated": self._on_macro_status_updated,
+            "engine:config_updated": self._on_config_update,
+            "engine:config_load_result": self._on_config_load_result,
+            "engine:config_save_result": self._on_config_save_result,
+            "affix_reroll:status_updated": self._on_affix_reroll_status_updated,
+            "affix_reroll:success": self._on_affix_reroll_success,
+            "affix_reroll:hide_ui": self._on_affix_reroll_hide_ui,
+            "affix_reroll:show_ui": self._on_affix_reroll_show_ui,
+            "ocr:init_success": self._on_ocr_init_success,
+            "ocr:init_failed": self._on_ocr_init_failed,
+            "stats": self._on_queue_stats,
+        }
+        for name, handler in notifications.items():
+            guarded = (
+                name.startswith("affix_reroll:")
+                or name in {"engine:state_changed", "engine:status_updated", "stats"}
+            )
+            self._ui_event_bridge.subscribe_notification(
+                name, handler,
+                guard_factory=self._make_runtime_ui_guard if guarded else None,
+            )
+
+    def _make_runtime_ui_guard(self):
+        """Capture the publisher's run before crossing the Qt queue boundary."""
+        engine = self.macro_engine
+
+        def identity():
+            return (
+                getattr(engine, "_runtime_start_epoch", 0),
+                getattr(getattr(engine, "affix_reroll_manager", None), "_run_generation", 0),
+                engine.get_current_state(),
+                getattr(getattr(self, "_ui_event_bridge", None), "closed", False),
+            )
+
+        expected = identity()
+        return lambda: identity() == expected
 
     def _setup_hotkeys(self):
-        event_bus.subscribe("hotkey:f8_system_toggle", self._toggle_visibility_and_macro)
-        event_bus.subscribe("hotkey:f7_system_toggle", self._sync_and_toggle_affix)
-        event_bus.subscribe("hotkey:f9_system_toggle", self._sync_and_toggle_pathfinding)
+        # GUI-originated requests must collect controls synchronously before
+        # the engine begins READY; a worker-originated request is queued to Qt.
+        for name, handler in (
+            ("hotkey:f8_system_toggle", self._toggle_visibility_and_macro),
+            ("hotkey:f7_system_toggle", self._sync_and_toggle_affix),
+            ("hotkey:f9_system_toggle", self._sync_and_toggle_pathfinding),
+        ):
+            self._ui_event_bridge.subscribe_command(name, handler)
 
     def _load_initial_config_to_ui(self):
         if self.top_controls:
@@ -266,7 +297,8 @@ class GameSkillConfigUI(QMainWindow):
         
         def delayed_ui_update():
             if (
-                self.macro_engine.get_current_state() != state
+                getattr(getattr(self, "_ui_event_bridge", None), "closed", False)
+                or self.macro_engine.get_current_state() != state
                 or getattr(self.macro_engine, "_runtime_start_epoch", 0) != start_epoch
             ):
                 return
@@ -347,7 +379,7 @@ class GameSkillConfigUI(QMainWindow):
             self.osd_status_window.update_status(osd_text, color)
 
     def _on_queue_stats(self, key: str = ""):
-        """AHK 每秒推送的队列观测(已在 GUI 线程:WM_COPYDATA → 信号桥)。
+        """AHK 每秒推送的队列观测，由 UiEventBridge 投递到 GUI 线程。
 
         只在 RUNNING/PAUSED 刷新 OSD 队列行 —— 其他状态 OSD 展示的是纯状态文本,
         队列必然为空,挂一行 0 只会加噪音。最新一行始终缓存,状态切换时由
@@ -362,7 +394,8 @@ class GameSkillConfigUI(QMainWindow):
         self.osd_status_window.update_status(text, self._osd_base_color)
 
     def _on_macro_status_updated(self, engine_state: Dict[str, Any]):
-        QTimer.singleShot(0, lambda: self._perform_macro_status_updated_ui(engine_state))
+        if engine_state.get("state") == self.macro_engine.get_current_state():
+            self._perform_macro_status_updated_ui(engine_state)
 
 
     def _on_config_update(self, skills_config: Dict[str, Any], global_config: Dict[str, Any]):
@@ -380,7 +413,10 @@ class GameSkillConfigUI(QMainWindow):
         debug_config = raw_debug_config if isinstance(raw_debug_config, dict) else {}
         debug_mode_enabled = debug_config.get("enabled") is True
         if self.top_controls and hasattr(self.top_controls, 'debug_mode_checkbox'):
-            self.top_controls.debug_mode_checkbox.setChecked(debug_mode_enabled)
+            checkbox = self.top_controls.debug_mode_checkbox
+            blocker = QSignalBlocker(checkbox)
+            checkbox.setChecked(debug_mode_enabled)
+            del blocker
             LOG_INFO(f"[UI] DEBUG MODE复选框状态已更新为: {debug_mode_enabled}")
 
         LOG_INFO("[UI] 调用 _refresh_all_widgets() 刷新UI。")
@@ -422,7 +458,7 @@ class GameSkillConfigUI(QMainWindow):
                     osd_text, osd_color = f"洗练成功!\n找到: {matched_affix}", "lime"
                 else:
                     osd_text, osd_color = "洗练已停止\n等待F7启动", "#E0E0E0"
-            QTimer.singleShot(0, lambda: self._perform_affix_reroll_ui_update(osd_text, osd_color))
+            self._perform_affix_reroll_ui_update(osd_text, osd_color)
         except Exception as e:
             LOG_ERROR(f"[UI] 更新洗练状态异常: {e}")
 
@@ -433,24 +469,27 @@ class GameSkillConfigUI(QMainWindow):
         if self.osd_status_window: self.osd_status_window.hide()
         title = "洗练成功！"
         message = f"找到目标词缀：{success_data.get('matched_affix', '')}\n\n尝试次数：{success_data.get('attempts', 0)} 次"
-        QTimer.singleShot(100, lambda: QMessageBox.information(self, title, message))
+        guard = self._make_runtime_ui_guard()
+        QTimer.singleShot(100, lambda: QMessageBox.information(self, title, message) if guard() else None)
 
     def _on_affix_reroll_success(self, success_data: Dict[str, Any]):
-        QTimer.singleShot(0, lambda: self._perform_affix_reroll_success_ui(success_data))
+        self._perform_affix_reroll_success_ui(success_data)
 
     def _perform_affix_reroll_hide_ui(self):
         if self.isVisible(): self.hide()
         if self.osd_status_window: self.osd_status_window.show()
 
     def _on_affix_reroll_hide_ui(self):
-        QTimer.singleShot(0, self._perform_affix_reroll_hide_ui)
+        if self.macro_engine.affix_reroll_manager.status.is_running:
+            self._perform_affix_reroll_hide_ui()
 
     def _perform_affix_reroll_show_ui(self):
         if self.osd_status_window: self.osd_status_window.hide()
         if not self.isVisible(): self.show()
 
     def _on_affix_reroll_show_ui(self):
-        QTimer.singleShot(0, self._perform_affix_reroll_show_ui)
+        if not self.macro_engine.affix_reroll_manager.status.is_running:
+            self._perform_affix_reroll_show_ui()
 
     # OCR相关方法
     def _on_load_ocr_clicked(self):
@@ -471,11 +510,17 @@ class GameSkillConfigUI(QMainWindow):
             self._on_ocr_init_failed({"error": str(e)})
             
     def _on_ocr_init_success(self):
-        QTimer.singleShot(0, lambda: self.affix_reroll.update_ocr_status("OCR引擎已就绪", "#4CAF50") if self.affix_reroll else None)
+        if self.affix_reroll:
+            self.affix_reroll.update_ocr_status("OCR引擎已就绪", "#4CAF50")
+            self.affix_reroll.ocr_load_button.setText("重新加载OCR")
+            self.affix_reroll.ocr_load_button.setEnabled(True)
 
     def _on_ocr_init_failed(self, error_data=None):
         error_msg = error_data.get("error", "未知错误") if error_data else "初始化失败"
-        QTimer.singleShot(0, lambda: self.affix_reroll.update_ocr_status(f"OCR引擎加载失败: {error_msg}", "#f44336") if self.affix_reroll else None)
+        if self.affix_reroll:
+            self.affix_reroll.update_ocr_status(f"OCR引擎加载失败: {error_msg}", "#f44336")
+            self.affix_reroll.ocr_load_button.setText("重试加载OCR")
+            self.affix_reroll.ocr_load_button.setEnabled(True)
 
     def _update_ocr_status_display(self):
         if not self.affix_reroll: return
@@ -708,11 +753,8 @@ class GameSkillConfigUI(QMainWindow):
             QMessageBox.critical(self, "错误", f"保存配置文件失败: {e}")
 
     def _on_config_save_result(self, file_path: str, success: bool, error: str = ""):
-        """保存结果可能来自事件链,统一切回 Qt 事件循环更新控件。"""
-        QTimer.singleShot(
-            0,
-            lambda: self._perform_config_save_result(file_path, success, error),
-        )
+        """UiEventBridge 已退出 EventBus 发布栈并切回 Qt 线程。"""
+        self._perform_config_save_result(file_path, success, error)
 
     def _perform_config_save_result(
         self, file_path: str, success: bool, error: str = ""
@@ -740,11 +782,8 @@ class GameSkillConfigUI(QMainWindow):
             QMessageBox.critical(self, "错误", f"加载配置文件失败: {e}")
 
     def _on_config_load_result(self, file_path: str, success: bool, error: str = ""):
-        """延后显示加载结果,避免在 EventBus publish 链中进入模态事件循环。"""
-        QTimer.singleShot(
-            0,
-            lambda: self._perform_config_load_result(file_path, success, error),
-        )
+        """通知已由 UiEventBridge 排队，弹窗不再进入发布者调用栈。"""
+        self._perform_config_load_result(file_path, success, error)
 
     def _perform_config_load_result(
         self, file_path: str, success: bool, error: str = ""
@@ -781,19 +820,46 @@ class GameSkillConfigUI(QMainWindow):
                 combo = self.window_activation.widgets.get("exe")
                 if combo:
                     current_text = combo.currentText()
-                    combo.clear()
-                    combo.addItems(unique_processes)
-                    if current_text and current_text not in unique_processes:
-                        combo.addItem(current_text)
-                    if current_text:
-                        combo.setCurrentText(current_text)
+                    blocker = QSignalBlocker(combo)
+                    try:
+                        combo.clear()
+                        combo.addItems(unique_processes)
+                        if current_text and current_text not in unique_processes:
+                            combo.addItem(current_text)
+                        combo.setEditText(current_text)
+                    finally:
+                        del blocker
         except Exception as e:
             LOG_ERROR(f"[UI] 刷新进程列表时出错: {e}")
 
     def _set_mumu_config(self):
         if self.window_activation and hasattr(self.window_activation, "widgets"):
-            self.window_activation.widgets["class"].setText("Qt5QWindowIcon")
-            self.window_activation.widgets["exe"].setCurrentText("MuMuPlayer.exe")
+            from ..utils.window_utils import WindowUtils
+            import win32gui
+
+            status = self.window_activation.widgets["status_label"]
+            candidates = WindowUtils.find_windows_by_criteria(ahk_exe="MuMuNxDevice.exe")
+            if len(candidates) != 1:
+                status.setText(
+                    "发现多个 MuMu 设备窗口，请手动选择目标，原配置已保留"
+                    if candidates else "未找到 MuMu 安卓设备窗口，原配置已保留"
+                )
+                return
+            try:
+                class_name = win32gui.GetClassName(candidates[0])
+            except Exception as exc:
+                LOG_ERROR(f"[窗口激活] 读取 MuMu 设备窗口失败: {exc}")
+                status.setText("读取 MuMu 设备窗口失败，原配置已保留")
+                return
+            if not class_name:
+                status.setText("MuMu 设备窗口类名为空，原配置已保留")
+                return
+            combo = self.window_activation.widgets["exe"]
+            blocker = QSignalBlocker(combo)
+            combo.setEditText("MuMuNxDevice.exe")
+            self.window_activation.widgets["class"].setText(class_name)
+            del blocker
+            status.setText(f"已选择 MuMu 安卓设备 (类名: {class_name})")
 
     def _on_process_selection_changed(self, process_name: str):
         """处理进程选择变化，并自动获取窗口类名"""
@@ -833,5 +899,8 @@ class GameSkillConfigUI(QMainWindow):
 
 
     def closeEvent(self, event):
+        bridge = getattr(self, "_ui_event_bridge", None)
+        if bridge is not None:
+            bridge.close()
         # 实际资源释放统一由 main.py 的 QApplication.aboutToQuit 处理。
         event.accept()
