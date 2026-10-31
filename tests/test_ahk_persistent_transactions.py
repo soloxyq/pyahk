@@ -14,9 +14,10 @@ import uuid
 
 import pytest
 
-from hold_client import send_ahk_cmd_ex
+from hold_client import SEND_OK, SEND_REJECTED, send_ahk_cmd_ex
 from torchlight_assistant.config.ahk_commands import (
-    CMD_PING, CMD_SET_ACCEPTING_ACTIONS, CMD_SET_MACRO_STEPS,
+    CMD_CLEAR_QUEUE, CMD_PING, CMD_SET_ACCEPTING_ACTIONS,
+    CMD_SET_MACRO_STEPS, CMD_SET_MANAGED_KEY_CONFIG,
     CMD_START_MACRO, CMD_SET_SKILL_HOLD_KEYS,
 )
 
@@ -226,3 +227,23 @@ def test_serialized_sender_never_overlaps_ahk_message_handlers(isolated_server):
     assert stopped, "stop must wait for the active WM_COPYDATA handler"
     assert probe(1) == 0
     assert not sender.transport_unavailable
+
+
+def test_malformed_numeric_commands_are_rejected_without_mutation(isolated_server):
+    title, _directory, _probe = isolated_server
+
+    for param in ("nan", "1.5", "", "-3", "4"):
+        assert send_ahk_cmd_ex(title, CMD_CLEAR_QUEUE, param) == (
+            False,
+            SEND_REJECTED,
+        )
+
+    for param in ("e:+:not-a-number", "e:+:50:1.5", "e:+:-1:0", "e:+:50:-1"):
+        assert send_ahk_cmd_ex(title, CMD_SET_MANAGED_KEY_CONFIG, param) == (
+            False,
+            SEND_REJECTED,
+        )
+
+    # A valid command still reaches the handler after malformed input, proving
+    # the protocol exception did not break the AHK message loop.
+    assert send_ahk_cmd_ex(title, CMD_CLEAR_QUEUE, "-1") == (True, SEND_OK)

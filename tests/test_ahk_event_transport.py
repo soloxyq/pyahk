@@ -1403,6 +1403,21 @@ def test_activate_command_returns_before_winactivate_delay():
     assert "WinActivate(TargetWin)" in activate
 
 
+def test_persistent_routes_are_owner_aware_for_matching_up_edges():
+    with open(AHK_SCRIPT, encoding="utf-8") as fp:
+        lines = fp.read().splitlines()
+    route_id = _extract_function(lines, "PersistentPressId")
+    track = _extract_function(lines, "TrackPersistentPressRoute")
+    send_down = _extract_function(lines, "SendDown")
+    send_up = _extract_function(lines, "SendUp")
+
+    assert 'PersistentPressId(key, owner := "")' in route_id
+    assert "PersistentPressRoutes[entry.id] := entry" in track
+    assert 'TrackPersistentPressRoute(key, mode, routeTarget, owner)' in send_down
+    assert 'SendUp(key, owner := "")' in send_up
+    assert "PersistentPressId(key, owner)" in send_up
+
+
 if __name__ == "__main__":
     tests = sorted(
         (name, fn)

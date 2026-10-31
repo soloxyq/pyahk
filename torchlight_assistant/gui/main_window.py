@@ -899,6 +899,17 @@ class GameSkillConfigUI(QMainWindow):
 
 
     def closeEvent(self, event):
+        # Debug OSD is an independent top-level window, so closing the main
+        # window does not automatically invoke its closeEvent.  Close it first
+        # to stop its timer and release its EventBus subscriptions.
+        debug_osd = getattr(self, "debug_osd_window", None)
+        if debug_osd is not None:
+            try:
+                debug_osd.close()
+            except RuntimeError:
+                # Qt may already have destroyed the auxiliary window during
+                # application teardown.
+                pass
         bridge = getattr(self, "_ui_event_bridge", None)
         if bridge is not None:
             bridge.close()

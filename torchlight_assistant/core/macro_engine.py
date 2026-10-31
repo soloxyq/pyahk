@@ -620,7 +620,14 @@ class MacroEngine:
                     False,
                 )
             )
-            if self._state == MacroState.STOPPED and not affix_running:
+            affix_starting = bool(
+                getattr(self.affix_reroll_manager, "is_starting", False)
+            )
+            if (
+                self._state == MacroState.STOPPED
+                and not affix_running
+                and not affix_starting
+            ):
                 # 启动方向必须先读取当前 GUI；停止方向不能受控件采集失败阻断。
                 event_bus.publish("hotkey:f7_system_toggle")
             else:
@@ -1256,8 +1263,7 @@ class MacroEngine:
         if full_config is None:
             return True
         try:
-            skills_config, global_config = self._validated_config_sections(full_config)
-            normalize_config_keys(full_config)
+            skills_config, global_config = self._prepare_config_sections(full_config)
             # SoundManager can reject malformed nested data; do not expose a
             # partially committed engine snapshot if that preparation fails.
             self.sound_manager.update_config(global_config)
@@ -1335,12 +1341,22 @@ class MacroEngine:
         self, full_config: Optional[Dict[str, Any]] = None
     ):
         with self._transition_lock:
-            if self._state != MacroState.STOPPED:
+            affix_running = bool(
+                getattr(
+                    getattr(self.affix_reroll_manager, "status", None),
+                    "is_running",
+                    False,
+                )
+            )
+            affix_starting = bool(
+                getattr(self.affix_reroll_manager, "is_starting", False)
+            )
+            is_stopping = affix_running or affix_starting
+            if self._state != MacroState.STOPPED and not is_stopping:
                 LOG_INFO("[MacroEngine] 主功能运行时无法启动洗练功能")
                 return
 
             # 已运行时 F7 是安全停止，不能因目标窗口后来消失而拒绝。
-            is_stopping = self.affix_reroll_manager.status.is_running
             if not is_stopping:
                 if not self._recover_ahk_transport_for_start():
                     LOG_ERROR("[MacroEngine] AHK 通信尚未恢复，取消洗练启动")
@@ -2176,6 +2192,20 @@ class MacroEngine:
             )
         return skills_config, global_config
 
+    @classmethod
+    def _prepare_config_sections(
+        cls, config_data: Dict[str, Any]
+    ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+        """Validate and normalize one complete configuration snapshot.
+
+        Loading and saving both use the same boundary: validation must happen
+        before the snapshot is committed, while key normalization mutates the
+        caller-owned document before it is persisted or published.
+        """
+        sections = cls._validated_config_sections(config_data)
+        normalize_config_keys(config_data)
+        return sections
+
     def load_config(self, config_file: str) -> bool:
         """加载并验证完整配置,成功后才提交到运行态。"""
         LOG_INFO(f"[配置加载] 开始加载配置文件: {config_file}")
@@ -2191,11 +2221,7 @@ class MacroEngine:
                 LOG_INFO(f"[MacroEngine] 从文件 '{config_file}' 加载配置。")
                 config_data = self.config_manager.load_config(config_file)
 
-            skills_config, global_config = self._validated_config_sections(
-                config_data
-            )
-            # 🔧 统一归一化所有按键字段为 AHK 标准名(单一可信源,见 utils/key_names.py)
-            normalize_config_keys(config_data)
+            skills_config, global_config = self._prepare_config_sections(config_data)
         except Exception as e:
             LOG_ERROR(f"加载配置文件 '{config_file}' 失败: {e}")
             # 暂存失败结果:启动期(GUI 尚未订阅)这条 publish 会被丢弃,
@@ -2231,11 +2257,7 @@ class MacroEngine:
         因此不会未经用户点击“保存”就覆盖配置文件。
         """
         try:
-            skills_config, global_config = self._validated_config_sections(
-                full_config
-            )
-            # 🔧 保存前归一化按键字段,保证写回磁盘的也是 AHK 标准名
-            normalize_config_keys(full_config)
+            skills_config, global_config = self._prepare_config_sections(full_config)
             self.config_manager.save_config(full_config, file_path)
         except Exception as e:
             LOG_ERROR(f"保存配置文件 '{file_path}' 失败: {e}")

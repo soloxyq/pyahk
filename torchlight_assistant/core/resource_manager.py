@@ -676,6 +676,11 @@ class ResourceManager:
             current = self.hp_config if resource_type == "hp" else self.mp_config
             if current.get("enabled") is not True or current != config:
                 return False
+            # 两个检测回调可能同时在锁外完成 OCR，并都通过了入口冷却检查。
+            # 在真正发送前重新检查，避免第一个发送刚记录时间戳后，第二个
+            # 已经排队的结果绕过冷却再次使用同一药剂。
+            if not self._check_internal_cooldown(resource_type, current):
+                return False
             return self._send_resource(resource_type, config)
 
     def _send_resource(self, resource_type: str, config: Dict[str, Any]) -> bool:

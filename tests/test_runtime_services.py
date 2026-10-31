@@ -207,6 +207,52 @@ def test_resource_detection_requires_current_production_token(runtime, boundary)
     assert runtime.input_handler.sent == []
 
 
+def test_concurrent_resource_results_are_serialized_by_cooldown(runtime):
+    resources = runtime.resource_manager
+    runtime.input_handler.gate = True
+    resources.start()
+    token = resources._runtime().capture()
+    assert token is not None
+
+    entered = threading.Event()
+    release = threading.Event()
+    sent = []
+
+    def send_hp(key):
+        sent.append(key)
+        entered.set()
+        assert release.wait(2)
+        return True
+
+    runtime.input_handler.execute_hp_potion = send_hp
+    config = dict(resources.hp_config)
+    first = threading.Thread(
+        target=resources._execute_resource,
+        args=("hp", config),
+        kwargs={"token": token},
+    )
+    second = threading.Thread(
+        target=resources._execute_resource,
+        args=("hp", config),
+        kwargs={"token": token},
+    )
+    try:
+        first.start()
+        assert entered.wait(1)
+        second.start()
+        release.set()
+        first.join(2)
+        second.join(2)
+    finally:
+        release.set()
+        first.join(2)
+        second.join(2)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert sent == [config["key"]]
+
+
 @pytest.mark.parametrize("mode", ["combat", "pathfinding"])
 def test_resource_task_runs_in_both_main_modes(runtime, mode):
     engine = runtime

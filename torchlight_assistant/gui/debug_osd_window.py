@@ -1,3 +1,5 @@
+from copy import deepcopy
+
 from PySide6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame, QGridLayout
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter
@@ -12,6 +14,8 @@ class DebugOsdWindow(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._closed = False
+        self._subscriptions_active = False
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint | Qt.WindowType.Tool)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet("background:transparent;")
@@ -150,26 +154,55 @@ class DebugOsdWindow(QWidget):
         return label
 
     def _setup_event_subscriptions(self):
+        if self._subscriptions_active:
+            return
         event_bus.subscribe("debug_osd_update", self._on_debug_osd_update)
         event_bus.subscribe("debug_osd_show", self._safe_show)
         event_bus.subscribe("debug_osd_hide", self._safe_hide)
         event_bus.subscribe("debug_osd_ready_state", self._on_ready_state)
+        self._subscriptions_active = True
         LOG_INFO("[DebugOsdWindow] 事件订阅完成")
+
+    def _unsubscribe_event_subscriptions(self):
+        """对称、幂等地移除 EventBus 回调。"""
+        if not self._subscriptions_active:
+            return
+        self._subscriptions_active = False
+        for event_name, handler in (
+            ("debug_osd_update", self._on_debug_osd_update),
+            ("debug_osd_show", self._safe_show),
+            ("debug_osd_hide", self._safe_hide),
+            ("debug_osd_ready_state", self._on_ready_state),
+        ):
+            try:
+                event_bus.unsubscribe(event_name, handler)
+            except (RuntimeError, TypeError, KeyError, ValueError):
+                # Teardown must remain safe if the EventBus is already being
+                # torn down or a test double has removed the callback.
+                pass
 
     def _safe_show(self):
         """线程安全的显示方法"""
+        if self._closed:
+            return
         self._show_requested.emit()
 
     def _safe_hide(self):
         """线程安全的隐藏方法"""
+        if self._closed:
+            return
         self._hide_requested.emit()
 
     def _on_ready_state(self):
         """处理READY状态，显示准备提示"""
+        if self._closed:
+            return
         self._ready_requested.emit()
 
     def _show_ready_state(self):
         """显示DEBUG OSD READY状态"""
+        if self._closed:
+            return
         # 重置为READY状态显示
         self.hp_label.setText("HP: READY")
         self.mp_label.setText("MP: READY") 
@@ -181,12 +214,19 @@ class DebugOsdWindow(QWidget):
 
     def _on_debug_osd_update(self, state_data):
         """线程安全的状态更新"""
-        payload = dict(state_data or {})
+        if self._closed:
+            return
+        # EventBus publishers may reuse and mutate nested skills/actions/
+        # detection_regions after publish returns.  A deep snapshot is needed
+        # before crossing into the queued Qt signal.
+        payload = deepcopy(state_data) if isinstance(state_data, dict) else {}
         self._state_update_requested.emit(payload)
         LOG_INFO(f"[DebugOsdWindow] 收到状态更新: HP={payload.get('hp')}, MP={payload.get('mp')}, Skills={len(payload.get('skills', {}))}")
 
     def _apply_state_update(self, state_data):
         """GUI 线程中的不可变快照提交。"""
+        if self._closed:
+            return
         self.current_state = state_data
         self._update_display_from_state()
 
@@ -198,6 +238,8 @@ class DebugOsdWindow(QWidget):
 
     def _update_display_from_state(self):
         """更新显示内容"""
+        if self._closed:
+            return
         # 只有在有实际数据时才切换到运行状态显示
         has_data = (self.current_state.get('hp') is not None or 
                    self.current_state.get('mp') is not None or 
@@ -286,12 +328,25 @@ class DebugOsdWindow(QWidget):
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor(0, 0, 0, 0)) # Fill with transparent color
 
+    def close(self):
+        """关闭窗口并立即阻断/退订迟到的 EventBus 事件。"""
+        if self._closed:
+            return False
+        self._closed = True
+        timer = getattr(self, "update_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._unsubscribe_event_subscriptions()
+        return super().close()
+
     def closeEvent(self, event):
-        self.update_timer.stop()
-        event_bus.unsubscribe("debug_osd_update", self._on_debug_osd_update)
-        event_bus.unsubscribe("debug_osd_show", self._safe_show)
-        event_bus.unsubscribe("debug_osd_hide", self._safe_hide)
-        event_bus.unsubscribe("debug_osd_ready_state", self._on_ready_state)
+        # Qt may invoke closeEvent directly during application teardown;
+        # retain the same idempotent guard as the explicit close() path.
+        self._closed = True
+        timer = getattr(self, "update_timer", None)
+        if timer is not None:
+            timer.stop()
+        self._unsubscribe_event_subscriptions()
         LOG_INFO("[DebugOsdWindow] 关闭并取消订阅")
         super().closeEvent(event)
 

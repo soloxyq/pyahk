@@ -1,11 +1,11 @@
 {
     "skills": {
         "Skill1": {
-            "Enabled": false,
-            "Key": "LButton",
+            "Enabled": true,
+            "Key": "RButton",
             "Priority": false,
             "Timer": 250,
-            "TriggerMode": 0,
+            "TriggerMode": 2,
             "CooldownCoordX": 815,
             "CooldownCoordY": 1000,
             "CooldownSize": 12,
@@ -33,14 +33,14 @@
             "BossOnly": false
         },
         "Skill3": {
-            "Enabled": false,
+            "Enabled": true,
             "Key": "q",
             "Priority": false,
             "Timer": 650,
             "TriggerMode": 1,
-            "CooldownCoordX": 925,
-            "CooldownCoordY": 1000,
-            "CooldownSize": 12,
+            "CooldownCoordX": 842,
+            "CooldownCoordY": 954,
+            "CooldownSize": 14,
             "ExecuteCondition": 0,
             "ConditionCoordX": 0,
             "ConditionCoordY": 0,
@@ -65,7 +65,7 @@
             "BossOnly": false
         },
         "Skill5": {
-            "Enabled": true,
+            "Enabled": false,
             "Key": "RButton",
             "Priority": false,
             "Timer": 150,

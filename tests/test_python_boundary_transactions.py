@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import numpy as np
+import pytest
 
 from torchlight_assistant.core.ahk_input_handler import AHKInputHandler
 from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
@@ -20,6 +21,23 @@ from torchlight_assistant.core.simple_affix_reroll_manager import (
 from torchlight_assistant.core.skill_manager import SkillManager
 from torchlight_assistant.core.states import MacroState
 from torchlight_assistant.utils.border_frame_manager import BorderFrameManager
+
+
+def test_prepare_config_sections_validates_then_normalizes_once():
+    config = {
+        "skills": {"Skill1": {"Key": "right_mouse"}},
+        "global": {"boss_mode_hotkey": " left_mouse "},
+    }
+
+    skills, global_config = MacroEngine._prepare_config_sections(config)
+
+    assert skills is config["skills"]
+    assert global_config is config["global"]
+    assert skills["Skill1"]["Key"] == "RButton"
+    assert global_config["boss_mode_hotkey"] == "LButton"
+
+    with pytest.raises(ValueError, match="skills"):
+        MacroEngine._prepare_config_sections({"skills": [], "global": {}})
 
 
 class _Input:

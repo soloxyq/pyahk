@@ -1,8 +1,10 @@
 """Behavior checks for one wire owner, stop priority and native-only GUI waits."""
 
 import ctypes
+import gc
 import threading
 import time
+import weakref
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -13,6 +15,19 @@ from hold_client import SEND_ERROR, SEND_OK, SEND_REJECTED, SEND_TIMEOUT
 from torchlight_assistant.core.command_transport import CommandTransport
 from torchlight_assistant.core.ahk_command_sender import AHKCommandSender
 import torchlight_assistant.core.ahk_command_sender as sender_module
+import torchlight_assistant.core.command_transport as transport_module
+
+
+def test_transport_registry_does_not_retain_unused_window_titles():
+    title = "unreferenced-" + uuid4().hex
+    transport = sender_module.get_command_transport(title)
+    transport_ref = weakref.ref(transport)
+
+    del transport
+    gc.collect()
+
+    assert transport_ref() is None
+    assert title not in transport_module._transports
 
 
 def _wait_pending(transport, ordinary=0, safety=0):

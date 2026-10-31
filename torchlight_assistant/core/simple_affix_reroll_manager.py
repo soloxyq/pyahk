@@ -109,6 +109,12 @@ class SimpleAffixRerollManager:
         self._run_lock = threading.RLock()
         self._run_generation = 0
         self._active_run: Optional[_AffixRerollRun] = None
+        # A start performs target/OCR setup outside ``_run_lock`` so stop and
+        # cleanup remain responsive.  Reserve that transition explicitly and
+        # let stop/config updates cancel it instead of allowing a late start
+        # to open the AHK gate after the user already stopped the mode.
+        self._start_in_progress = False
+        self._start_cancel_event: Optional[threading.Event] = None
         self._gate_owner_generation: Optional[int] = None
         self._cleanup_done = False
         event_bus.subscribe("hotkey:affix_reroll_start", self._on_f7_pressed)
@@ -118,10 +124,21 @@ class SimpleAffixRerollManager:
     def _on_f7_pressed(self, runtime_epoch: Optional[int] = None):
         if getattr(self, "_cleanup_done", False):
             return
-        if self.status.is_running:
+        with self._run_lock:
+            starting = getattr(self, "_start_in_progress", False)
+            running = self._active_run is not None or self.status.is_running
+        if running or starting:
             self.stop_reroll("用户按F7停止")
         else:
-            self.start_reroll(runtime_epoch=runtime_epoch)
+            # OCR 初始化可能等待 15 秒；不能阻塞 Qt 主线程，否则第二次 F7
+            # 会一直排队，无法及时设置取消标志。
+            self.start_reroll_async(runtime_epoch=runtime_epoch)
+
+    @property
+    def is_starting(self) -> bool:
+        """返回是否存在可取消的启动准备过程。"""
+        with self._run_lock:
+            return bool(getattr(self, "_start_in_progress", False))
 
     def _on_config_updated(
         self, skills_config: Dict[str, Any], global_config: Dict[str, Any]
@@ -134,24 +151,105 @@ class SimpleAffixRerollManager:
             else {}
         )
         LOG_INFO(f"[洗练管理器] 接收到配置更新: {config_data}")
-        self.config = SimpleAffixRerollConfig.from_dict(config_data)
+        with self._run_lock:
+            self.config = SimpleAffixRerollConfig.from_dict(config_data)
+            start_cancel_event = getattr(self, "_start_cancel_event", None)
+            if getattr(self, "_start_in_progress", False) and start_cancel_event:
+                start_cancel_event.set()
         LOG_INFO(
             f"[洗练管理器] 配置更新完成: 启用={self.config.enabled}, 目标词缀={self.config.target_affixes}"
         )
 
+    @staticmethod
+    def _copy_config(config: SimpleAffixRerollConfig) -> SimpleAffixRerollConfig:
+        return SimpleAffixRerollConfig(
+            enabled=config.enabled,
+            target_affixes=list(config.target_affixes),
+            max_attempts=config.max_attempts,
+            click_delay=config.click_delay,
+            enchant_button_coord=config.enchant_button_coord,
+            first_affix_button_coord=config.first_affix_button_coord,
+            replace_button_coord=config.replace_button_coord,
+            close_button_coord=config.close_button_coord,
+        )
+
+    @staticmethod
+    def _start_cancelled(cancel_event: threading.Event) -> bool:
+        return cancel_event.is_set()
+
     def start_reroll(self, runtime_epoch: Optional[int] = None) -> bool:
+        claimed = self._claim_start()
+        if claimed is None:
+            return False
+        config, cancel_event = claimed
+        try:
+            return self._start_reroll_impl(runtime_epoch, config, cancel_event)
+        finally:
+            self._release_start(cancel_event)
+
+    def start_reroll_async(self, runtime_epoch: Optional[int] = None) -> bool:
+        """在后台执行可能阻塞的目标/OCR准备，并立即返回给 Qt 事件循环。"""
+        claimed = self._claim_start()
+        if claimed is None:
+            return False
+        config, cancel_event = claimed
+
+        def run_startup():
+            try:
+                self._start_reroll_impl(runtime_epoch, config, cancel_event)
+            except Exception as exc:
+                LOG_ERROR(f"[配置驱动洗练管理器] 异步启动异常: {exc}")
+            finally:
+                self._release_start(cancel_event)
+
+        try:
+            threading.Thread(target=run_startup, daemon=True).start()
+        except Exception as exc:
+            self._release_start(cancel_event)
+            LOG_ERROR(f"[配置驱动洗练管理器] 创建异步启动线程失败: {exc}")
+            return False
+        return True
+
+    def _claim_start(self):
+        with self._run_lock:
+            if (
+                self._active_run is not None
+                or self.status.is_running
+                or getattr(self, "_start_in_progress", False)
+            ):
+                return None
+            cancel_event = threading.Event()
+            self._start_in_progress = True
+            self._start_cancel_event = cancel_event
+            config = self._copy_config(self.config)
+        return config, cancel_event
+
+    def _release_start(self, cancel_event: threading.Event):
+        with self._run_lock:
+            if getattr(self, "_start_cancel_event", None) is cancel_event:
+                self._start_in_progress = False
+                self._start_cancel_event = None
+
+    def _start_reroll_impl(
+        self,
+        runtime_epoch: Optional[int],
+        config: SimpleAffixRerollConfig,
+        cancel_event: threading.Event,
+    ) -> bool:
         with self._run_lock:
             if self._active_run is not None or self.status.is_running:
                 return False
+        if cancel_event.is_set():
+            return False
         required_coordinates = (
-            self.config.enchant_button_coord,
-            self.config.first_affix_button_coord,
-            self.config.replace_button_coord,
-            self.config.close_button_coord,
+            config.enchant_button_coord,
+            config.first_affix_button_coord,
+            config.replace_button_coord,
+            config.close_button_coord,
         )
         if (
-            not self.config.enabled
-            or not self.config.target_affixes
+            not config.enabled
+            or not config.target_affixes
             or any(coordinate is None for coordinate in required_coordinates)
         ):
             LOG_ERROR("[配置驱动洗練管理器] 配置无效或不完整，无法启动")
@@ -165,6 +263,8 @@ class SimpleAffixRerollManager:
             self.border_manager, "window_activation_config", {}
         ) or {}
         target = WindowUtils.build_ahk_target(window_config)
+        if self._start_cancelled(cancel_event):
+            return False
         if not target:
             LOG_ERROR("[洗练管理器] 未配置显式目标窗口，拒绝坐标点击模式")
             self.status.error_message = "洗练需要配置目标窗口"
@@ -179,8 +279,13 @@ class SimpleAffixRerollManager:
             self.status.error_message = "目标窗口同步失败"
             self._publish_status_update()
             return False
+        if self._start_cancelled(cancel_event):
+            return False
 
         # 获取全局OCR管理器实例
+        if self._start_cancelled(cancel_event):
+            return False
+
         if self.ocr_manager is None:
             try:
                 from ..utils.paddle_ocr_manager import get_paddle_ocr_manager
@@ -194,19 +299,29 @@ class SimpleAffixRerollManager:
                 return False
 
         # 检查OCR是否就绪，如果没有就等待
+        if self._start_cancelled(cancel_event):
+            return False
         if not self.ocr_manager.is_ready():
             LOG_INFO("[洗练管理器] OCR引擎正在初始化，等待完成...")
-            if not self.ocr_manager.wait_for_initialization(timeout=15.0):
+            if not self._wait_for_ocr_ready(cancel_event, timeout=15.0):
+                if self._start_cancelled(cancel_event):
+                    return False
                 LOG_ERROR("[洗练管理器] OCR引擎初始化超时")
                 self.status.error_message = "OCR引擎初始化超时"
                 self._publish_status_update()
                 return False
+        if self._start_cancelled(cancel_event):
+            return False
 
         # 洗练是 STOPPED 之外的独立输入模式，必须显式拥有 AHK 闸门。
         # 创建 generation 和开闸受同一把锁保护：超时未退出的旧 worker
         # 无法在新一轮开闸后夹入迟到点击。
         with self._run_lock:
-            if self._active_run is not None or self.status.is_running:
+            if (
+                self._start_cancelled(cancel_event)
+                or self._active_run is not None
+                or self.status.is_running
+            ):
                 return False
 
             recover = getattr(self.input_handler, "recover_transport", None)
@@ -225,16 +340,7 @@ class SimpleAffixRerollManager:
                 )
                 run = _AffixRerollRun(
                     generation=self._run_generation,
-                    config=SimpleAffixRerollConfig(
-                        enabled=self.config.enabled,
-                        target_affixes=list(self.config.target_affixes),
-                        max_attempts=self.config.max_attempts,
-                        click_delay=self.config.click_delay,
-                        enchant_button_coord=self.config.enchant_button_coord,
-                        first_affix_button_coord=self.config.first_affix_button_coord,
-                        replace_button_coord=self.config.replace_button_coord,
-                        close_button_coord=self.config.close_button_coord,
-                    ),
+                    config=config,
                     status=SimpleAffixRerollStatus(is_running=True),
                 )
                 publish_failure = False
@@ -293,6 +399,30 @@ class SimpleAffixRerollManager:
             return False
         return True
 
+    def _wait_for_ocr_ready(
+        self, cancel_event: threading.Event, *, timeout: float
+    ) -> bool:
+        """Poll OCR initialization in short slices so F7 cancellation stays prompt."""
+        deadline = time.monotonic() + max(0.0, float(timeout))
+        wait_for_initialization = getattr(
+            self.ocr_manager, "wait_for_initialization", None
+        )
+        while True:
+            if self._start_cancelled(cancel_event):
+                return False
+            if self.ocr_manager.is_ready():
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if callable(wait_for_initialization):
+                if wait_for_initialization(timeout=min(0.1, remaining)):
+                    return not self._start_cancelled(cancel_event)
+                if getattr(self.ocr_manager, "_init_error", None):
+                    return False
+            elif cancel_event.wait(min(0.1, remaining)):
+                return False
+
     def stop_reroll(
         self,
         reason: str = "用户手动停止",
@@ -302,10 +432,15 @@ class SimpleAffixRerollManager:
     ):
         with self._run_lock:
             run = self._active_run
+            start_cancel_event = getattr(self, "_start_cancel_event", None)
+            start_in_progress = getattr(self, "_start_in_progress", False)
             if expected_generation is not None and (
                 run is None or run.generation != expected_generation
             ):
                 return False
+            if run is None and start_in_progress and start_cancel_event is not None:
+                start_cancel_event.set()
+                return True
         if run is not None:
             return self._stop_run(run, reason, cleanup_runtime=cleanup_runtime)
 

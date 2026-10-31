@@ -12,7 +12,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication, QMainWindow
 
 from torchlight_assistant.core.states import MacroState
+from torchlight_assistant.core.debug_display_manager import DebugDisplayManager
 from torchlight_assistant.gui import main_window
+from torchlight_assistant.gui import debug_osd_window
 from torchlight_assistant.gui.config_widgets import WindowActivationWidget
 from torchlight_assistant.gui.event_bridge import UiEventBridge
 from torchlight_assistant.gui.skill_config_widget import SimplifiedSkillWidget
@@ -99,6 +101,86 @@ def test_close_discards_pending_notifications_and_unsubscribes(app):
     app.processEvents()
     callback.assert_not_called()
     assert bus.handlers["event"] == []
+
+
+def test_debug_display_manager_publishes_deep_snapshot():
+    bus = LocalBus()
+
+    class Scheduler:
+        def get_status(self):
+            return {"running": False, "task_count": 0}
+
+        def start(self):
+            return True
+
+        def add_task(self, *args, **kwargs):
+            return True
+
+        def remove_task(self, *_args):
+            return True
+
+        def stop(self):
+            return True
+
+    manager = DebugDisplayManager(bus, Scheduler())
+    manager.is_active = True
+    manager.update_skill_status("Q", 95.0, True)
+    manager.add_action("press Q")
+    manager.update_detection_region("skill", {"x": 10})
+
+    # Install a recorder so the assertion exercises the actual EventBus
+    # boundary and receives the nested snapshot.
+    received = []
+    bus.subscribe("debug_osd_update", received.append)
+    manager.publish_state()
+    snapshot = received[-1]
+    manager.update_skill_status("Q", 10.0, False)
+    manager.add_action("mutated after publish")
+    manager.update_detection_region("skill", {"x": 99})
+
+    assert snapshot["skills"]["Q"]["similarity"] == 95.0
+    assert snapshot["actions"][0]["text"] == "press Q"
+    assert snapshot["detection_regions"]["skill"]["x"] == 10
+    state = manager.get_state()
+    state["skills"]["Q"]["similarity"] = -1
+    assert manager.state["skills"]["Q"]["similarity"] == 10.0
+
+
+def test_debug_osd_deep_copies_payload_and_closes_idempotently(app, monkeypatch):
+    bus = LocalBus()
+    monkeypatch.setattr(debug_osd_window, "event_bus", bus)
+    window = debug_osd_window.DebugOsdWindow()
+    payload = {
+        "hp": 90,
+        "skills": {"Q": {"similarity": 95.0, "is_ready": True}},
+        "actions": [{"text": "press Q"}],
+        "detection_regions": {"skill": {"x": 10}},
+    }
+    window._on_debug_osd_update(payload)
+    payload["skills"]["Q"]["similarity"] = 1.0
+    payload["actions"][0]["text"] = "mutated"
+    app.processEvents()
+
+    assert window.current_state["skills"]["Q"]["similarity"] == 95.0
+    assert window.current_state["actions"][0]["text"] == "press Q"
+    assert bus.handlers["debug_osd_update"]
+
+    window.close()
+    window.close()
+    assert all(not handlers for handlers in bus.handlers.values())
+
+
+def test_main_window_close_closes_independent_debug_osd(app, monkeypatch):
+    bus = LocalBus()
+    monkeypatch.setattr(main_window, "event_bus", bus)
+    window = MinimalWindow()
+    debug_osd = Mock()
+    window.debug_osd_window = debug_osd
+    try:
+        window.close()
+        debug_osd.close.assert_called_once_with()
+    finally:
+        window.close()
 
 
 class MinimalWindow(main_window.GameSkillConfigUI):

@@ -187,7 +187,7 @@ SendPress(key, forceMoveBypass := false) {
 SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData := 0) {
     return true
 }
-SendUp(key) {
+SendUp(key, owner := "") {
     return true
 }
 ShouldBlockMouseInStationary(key) {
@@ -197,8 +197,6 @@ ForgetSkillHeldKey(key) {
     return false
 }
 ReconcileSkillHoldKeys() {
-}
-MarkManagedHoldTarget(key) {
 }
 ClearManagedHoldTarget(key) {
 }

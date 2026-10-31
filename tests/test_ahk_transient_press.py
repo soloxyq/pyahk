@@ -56,6 +56,9 @@ global TransientPressOrder := []
 global PersistentPressRoutes := Map()
 global SkillHeldKeys := Map()
 global SkillHeldOrder := []
+global ManagedHoldTargets := Map()
+global CoordinateMouseHoldActive := false
+global CoordinateMouseHoldPriority := -1
 global SkillHoldDesiredOrder := []
 global MacroHeldKeys := Map()
 global MacroHeldOrder := []
@@ -71,6 +74,17 @@ global ReentryOnDown := 0
 global ReentryOnDownKey := ""
 global RuntimeAcceptingActions := true
 global RuntimeInputGeneration := 0
+global ManagedDelayUntil := 0
+global ACTION_CLEANUP := "cleanup"
+global ACTION_PRESS := "press"
+global ACTION_SEQUENCE := "sequence"
+global ACTION_HOLD := "hold"
+global ACTION_RELEASE := "release"
+global ACTION_MOUSE_CLICK := "mouse_click"
+global ACTION_MOUSE_CLICK_AT := "mouse_click_at"
+global ACTION_DELAY := "delay"
+global ACTION_NOTIFY := "notify"
+global ACTION_SEQ_RUNNING := "seqrun"
 global SendKeyMode := "direct"
 global TargetWin := ""
 global ResolvedControlTarget := ""
@@ -83,6 +97,39 @@ MonotonicMs() {
 
 CachedStrLower(value) {
     return StrLower(value)
+}
+
+CachedStrSplit(str, delim, omit := "", max := -1) {
+    if (max > 0) {
+        return StrSplit(str, delim, omit, max)
+    }
+    return StrSplit(str, delim, omit)
+}
+
+IsEmergencyAction(action) {
+    return false
+}
+
+ClearManagedHoldTarget(key) {
+    global ManagedHoldTargets
+    if (ManagedHoldTargets.Has(key)) {
+        ManagedHoldTargets.Delete(key)
+    }
+}
+
+ClearCoordinateMouseHoldState(key, priority := 2) {
+    global CoordinateMouseHoldActive, CoordinateMouseHoldPriority
+    if (key = "LButton") {
+        CoordinateMouseHoldActive := false
+        CoordinateMouseHoldPriority := -1
+    }
+}
+
+SendPress(key, forceMoveBypass := false) {
+    return true
+}
+
+ClearManagedKeyMark(key) {
 }
 
 ReconcileSkillHoldKeys() {
@@ -195,6 +242,7 @@ Expect(label, actual, expected) {
 ResetProbe() {
     global FakeNow, KeyPressDurationMs, TransientPressKeys, TransientPressOrder
     global PersistentPressRoutes, SkillHeldKeys, SkillHeldOrder, SendKeyMode, TargetWin
+    global ManagedHoldTargets, CoordinateMouseHoldActive, CoordinateMouseHoldPriority
     global EdgeLog, ReconcileCalls, FailControlKey, DirectAllowed
     global ReentryOnUp, ReentryOnDown, ReentryOnDownKey, RuntimeAcceptingActions
     global RuntimeInputGeneration
@@ -207,6 +255,9 @@ ResetProbe() {
     PersistentPressRoutes := Map()
     SkillHeldKeys := Map()
     SkillHeldOrder := []
+    ManagedHoldTargets := Map()
+    CoordinateMouseHoldActive := false
+    CoordinateMouseHoldPriority := -1
     EdgeLog := []
     ReconcileCalls := 0
     FailControlKey := ""
@@ -344,6 +395,44 @@ Expect("persistent-control-route", PersistentPressRoutes.Count, 1)
 Expect("persistent-control-up", SendUp("q") ? 1 : 0, 1)
 Expect("persistent-control-edges", Join(EdgeLog),
     "control:ahk_exe game.exe:q:down,control:ahk_exe game.exe:q:up")
+
+; 同一标准键由不同持键 owner 使用时，down/up 必须按 owner 路由配对，不能
+; 让后来的 skill route 覆盖 macro route。
+ResetProbe()
+TargetWin := "ahk_exe game.exe"
+SendKeyMode := "direct"
+Expect("owner-macro-down", SendDown("q", false, "", "macro") ? 1 : 0, 1)
+SkillHoldDesiredOrder := ["q"]
+SendKeyMode := "control"
+ResolvedControlTarget := 101
+Expect("owner-skill-down", SendDown("q", false, "", "skill", SkillHoldDesiredOrder) ? 1 : 0, 1)
+Expect("owner-route-count", PersistentPressRoutes.Count, 2)
+Expect("owner-macro-up", SendUp("q", "macro") ? 1 : 0, 1)
+Expect("owner-skill-up", SendUp("q", "skill") ? 1 : 0, 1)
+Expect("owner-route-edges", Join(EdgeLog),
+    "direct::q:down,control:101:q:down,direct::q:up,control:101:q:up")
+
+; Coordinate holds share ManagedHoldTargets, but their route owner remains
+; coordinate and must be used during queue cleanup.
+ResetProbe()
+Expect("coordinate-down", SendDown("LButton", true, "target", "coordinate",
+    {priority: 1, holdMs: 100}) ? 1 : 0, 1)
+Expect("coordinate-route-count", PersistentPressRoutes.Count, 1)
+ReleaseAllManagedHoldTargets()
+Expect("coordinate-route-cleared", PersistentPressRoutes.Count, 0)
+Expect("coordinate-release-owner", Join(EdgeLog),
+    "direct::LButton:down,direct::LButton:up")
+
+; ExecuteAction 的 release 分支也必须命中 coordinate owner 路由，不能只验证
+; ReleaseAllManagedHoldTargets 的批量清理路径。
+ResetProbe()
+Expect("execute-release-coordinate-down",
+    SendDown("LButton", true, "target", "coordinate",
+        {priority: 1, holdMs: 100}) ? 1 : 0, 1)
+ExecuteAction("release:LButton", 2)
+Expect("execute-release-route-cleared", PersistentPressRoutes.Count, 0)
+Expect("execute-release-coordinate-owner", Join(EdgeLog),
+    "direct::LButton:down,direct::LButton:up")
 
 ; press 后的显式 down 接管同一路由；旧计时器不能在持键期间插入 up。
 ResetProbe()
@@ -532,7 +621,10 @@ def _build_harness():
         "IsTransientGlobalPressActive",
         "PersistentPressId",
         "TrackPersistentPressRoute",
+        "PersistentHoldOwner",
         "ReleaseAllPersistentPressKeys",
+        "ReleaseAllManagedHoldTargets",
+        "ExecuteAction",
         "SendDown",
         "CommitPersistentDownOwner",
         "IsPersistentDownOwnerCurrent",

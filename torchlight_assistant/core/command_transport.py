@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from threading import Condition, Event, Lock, Thread, current_thread
 from time import monotonic
 from typing import Callable, Optional, Tuple
+from weakref import WeakValueDictionary
 
 from hold_client import SEND_ERROR, SEND_REJECTED, SEND_TIMEOUT, pump_sent_messages
 
@@ -144,7 +145,11 @@ class CommandTransport:
                 command.done.set()
 
 
-_transports = {}
+# Facades retain the transport they use, so the registry only needs to keep a
+# shared instance alive while at least one facade or worker still references it.
+# A regular dict would retain every historical window title forever (tests and
+# reconnects commonly generate unique titles).
+_transports = WeakValueDictionary()
 _transports_lock = Lock()
 
 

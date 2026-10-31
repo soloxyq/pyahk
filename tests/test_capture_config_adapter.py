@@ -37,3 +37,45 @@ def test_running_capture_configuration_roundtrips_through_real_wrapper():
         manager.session_id = None
         manager.capture_manager = None
         native._initialized = False
+
+
+def test_start_capture_reclaims_session_when_native_start_fails():
+    native = Mock()
+    native.create_window_session.return_value = 41
+    native.start_capture.return_value = False
+    # Reaping must continue to destroy the session even if stopping the failed
+    # native session itself reports an error.
+    native.stop_capture.side_effect = RuntimeError("already stopped")
+
+    manager = NativeGraphicsCaptureManager(
+        CaptureConfig(target_window_handle=1234)
+    )
+    manager.capture_manager = native
+    manager._frame_rect = {"x": 10, "y": 20, "width": 30, "height": 40}
+
+    assert manager.start_capture() is False
+
+    native.stop_capture.assert_called_once_with(41)
+    native.destroy_session.assert_called_once_with(41)
+    assert manager.session_id is None
+    assert manager._frame_rect is None
+    assert manager.is_running is False
+
+
+def test_stop_capture_destroys_session_when_native_stop_fails():
+    native = Mock()
+    native.stop_capture.side_effect = RuntimeError("already stopped")
+
+    manager = NativeGraphicsCaptureManager(CaptureConfig())
+    manager.capture_manager = native
+    manager.session_id = 73
+    manager.is_running = True
+    manager._frame_rect = {"x": 1, "y": 2, "width": 3, "height": 4}
+
+    manager.stop_capture()
+
+    native.stop_capture.assert_called_once_with(73)
+    native.destroy_session.assert_called_once_with(73)
+    assert manager.session_id is None
+    assert manager._frame_rect is None
+    assert manager.is_running is False

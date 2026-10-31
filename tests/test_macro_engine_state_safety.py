@@ -3,6 +3,7 @@
 import os
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from unittest import mock
 
@@ -1336,6 +1337,123 @@ def test_skill_input_sync_failure_callback_enters_stopped():
     engine._stop_due_to_skill_input_failure()
 
     engine.stop_macro.assert_called_once_with()
+
+
+def test_affix_start_cancelled_during_target_sync_never_opens_gate():
+    from torchlight_assistant.core import simple_affix_reroll_manager as affix_mod
+    from torchlight_assistant.core.simple_affix_reroll_manager import (
+        SimpleAffixRerollConfig,
+        SimpleAffixRerollManager,
+        SimpleAffixRerollStatus,
+    )
+
+    target_entered = threading.Event()
+    release_target = threading.Event()
+    gate_calls = []
+
+    def set_target_window(_target):
+        target_entered.set()
+        assert release_target.wait(1.0)
+        return True
+
+    manager = object.__new__(SimpleAffixRerollManager)
+    manager.input_handler = SimpleNamespace(
+        set_target_window=set_target_window,
+        set_accepting_actions=lambda enabled, **_kwargs: gate_calls.append(enabled)
+        or True,
+        recover_transport=lambda: True,
+        reset_runtime=lambda: True,
+    )
+    manager.border_manager = SimpleNamespace(
+        window_activation_config={"ahk_exe": "game.exe"}
+    )
+    manager.config = SimpleAffixRerollConfig(
+        enabled=True,
+        target_affixes=["test"],
+        enchant_button_coord=(10, 20),
+        first_affix_button_coord=(11, 21),
+        replace_button_coord=(12, 22),
+        close_button_coord=(13, 23),
+    )
+    manager.status = SimpleAffixRerollStatus()
+    manager.ocr_manager = SimpleNamespace(is_ready=lambda: True)
+    manager._run_lock = threading.RLock()
+    manager._run_generation = 0
+    manager._active_run = None
+    manager._start_in_progress = False
+    manager._start_cancel_event = None
+    manager._gate_owner_generation = None
+    manager._cleanup_done = False
+    manager._reroll_thread = None
+    result = []
+
+    with mock.patch.object(affix_mod.event_bus, "publish"):
+        worker = threading.Thread(
+            target=lambda: result.append(manager.start_reroll())
+        )
+        worker.start()
+        assert target_entered.wait(1.0)
+        assert manager.stop_reroll("cancel pending start") is True
+        release_target.set()
+        worker.join(1.0)
+
+    assert not worker.is_alive()
+    assert result == [False]
+    assert gate_calls == []
+    assert manager._active_run is None
+    assert manager._start_in_progress is False
+
+
+def test_affix_async_start_can_be_cancelled_without_blocking_caller():
+    from torchlight_assistant.core.simple_affix_reroll_manager import (
+        SimpleAffixRerollConfig,
+        SimpleAffixRerollManager,
+        SimpleAffixRerollStatus,
+    )
+
+    entered = threading.Event()
+    release = threading.Event()
+    manager = object.__new__(SimpleAffixRerollManager)
+    manager.config = SimpleAffixRerollConfig()
+    manager.status = SimpleAffixRerollStatus()
+    manager._run_lock = threading.RLock()
+    manager._active_run = None
+    manager._start_in_progress = False
+    manager._start_cancel_event = None
+
+    def blocking_start(_epoch, _config, cancel_event):
+        entered.set()
+        assert cancel_event.wait(1.0)
+        release.set()
+        return False
+
+    manager._start_reroll_impl = blocking_start
+    assert manager.start_reroll_async() is True
+    assert entered.wait(1.0)
+    assert manager.is_starting is True
+    assert manager.stop_reroll("cancel pending start") is True
+    assert release.wait(1.0)
+
+    for _ in range(100):
+        if not manager.is_starting:
+            break
+        time.sleep(0.005)
+    assert manager.is_starting is False
+
+
+def test_f7_intercept_cancels_affix_startup_without_gui_config_collection():
+    engine = object.__new__(MacroEngine)
+    engine._state = MacroState.STOPPED
+    engine.affix_reroll_manager = SimpleNamespace(
+        status=SimpleNamespace(is_running=False), is_starting=True
+    )
+    engine._on_f7_key_press = mock.Mock()
+
+    with mock.patch.object(macro_mod.event_bus, "publish") as publish:
+        engine._handle_ahk_intercept_key("F7")
+
+    engine._on_f7_key_press.assert_called_once_with()
+    publish.assert_not_called()
 
 
 if __name__ == "__main__":

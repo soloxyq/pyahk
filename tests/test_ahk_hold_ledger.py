@@ -63,8 +63,8 @@ _EXTRACT = [
     "ReconcileSkillHoldKeys",
     "ForgetSkillHeldKey",
     "ReleaseAllSkillHoldKeys",
-    "MarkManagedHoldTarget",
     "ClearManagedHoldTarget",
+    "PersistentHoldOwner",
     "ReleaseAllManagedHoldTargets",
     "ClearCoordinateMouseHoldState",
     "ClearManagedKeyMark",
@@ -179,7 +179,7 @@ SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData :
         SkillHeldKeys[key] := true
         SkillHeldOrder.Push(key)
     } else if (owner = "managed" || owner = "coordinate") {
-        MarkManagedHoldTarget(key)
+        ManagedHoldTargets[key] := {key: key, owner: owner}
         if (owner = "coordinate") {
             CoordinateMouseHoldActive := true
             CoordinateMouseHoldPriority := ownerData.priority
@@ -188,7 +188,7 @@ SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData :
     }
     return true
 }
-SendUp(key) {
+SendUp(key, owner := "") {
     global KeyLog
     KeyLog.Push("up:" key)
     return true

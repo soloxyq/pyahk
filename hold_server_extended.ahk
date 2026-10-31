@@ -716,7 +716,7 @@ MacroTick() {
         ; 同技能持键账本:被 block_mouse 吞掉时不记账,避免 ReleaseMacroHeldKeys 发出多余的 up
         SendDown(data, false, "", "macro")
     } else if (stype = "up") {
-        SendUp(data)
+        SendUp(data, "macro")
         TrackMacroUp(data)
     } else if (stype = "press") {
         SendPress(data, false)
@@ -773,7 +773,7 @@ ReleaseMacroHeldKeys() {
         index := keys.Length
         while (index > 0) {
             key := keys[index]
-            id := PersistentPressId(key)
+            id := PersistentPressId(key, "macro")
             if (MacroHeldKeys.Has(key) && !seen.Has(id)) {
                 pending.Push({key: key, id: id,
                     route: PersistentPressRoutes.Has(id) ? PersistentPressRoutes[id] : 0})
@@ -794,7 +794,7 @@ ReleaseMacroHeldKeys() {
                 SendTransientKeyEdge(route.mode, route.target, route.key, false)
             } else if (!PersistentPressRoutes.Has(item.id)) {
                 ; 兼容没有 route 的历史/异常账本；新世代路由存在时绝不兜底 up。
-                SendUp(item.key)
+                SendUp(item.key, "macro")
             }
         }
     } finally {
@@ -893,7 +893,7 @@ ReconcileSkillHoldKeys() {
     while (idx > 0) {
         key := SkillHeldOrder[idx]
         if (!desired.Has(key)) {
-            SendUp(key)
+            SendUp(key, "skill")
             if (generation != RuntimeInputGeneration || desiredOrder != SkillHoldDesiredOrder) {
                 return
             }
@@ -961,16 +961,18 @@ ForgetSkillHeldKey(key) {
 }
 
 ; ---------- 队列级临时持键(管理键 hold_ms)----------
-MarkManagedHoldTarget(key) {
-    global ManagedHoldTargets
-    ManagedHoldTargets[key] := true
-}
-
 ClearManagedHoldTarget(key) {
     global ManagedHoldTargets
     if (ManagedHoldTargets.Has(key)) {
         ManagedHoldTargets.Delete(key)
     }
+}
+
+PersistentHoldOwner(entry, fallback := "managed") {
+    if (IsObject(entry) && entry.HasOwnProp("owner") && entry.owner != "") {
+        return entry.owner
+    }
+    return fallback
 }
 
 ; 清队列会丢弃还没执行的 release:target,必须在这里补发 up,否则该键真实卡死。
@@ -982,13 +984,13 @@ ReleaseAllManagedHoldTargets(preserveNonEmergencyCoordinate := false) {
 
     forgotHold := false
     preserved := Map()
-    for key, _ in ManagedHoldTargets {
+    for key, heldEntry in ManagedHoldTargets {
         if (preserveNonEmergencyCoordinate && key = "LButton"
             && CoordinateMouseHoldActive && CoordinateMouseHoldPriority > 0) {
-            preserved[key] := true
+            preserved[key] := heldEntry
             continue
         }
-        SendUp(key)
+        SendUp(key, PersistentHoldOwner(heldEntry))
         ; 该 target 可能同时是 TriggerMode=2 持久持键:这里真实发了 up,
         ; 技能账本必须同步,否则 Reconcile 以为还按着 → 永不补按。
         if (ForgetSkillHeldKey(key)) {
@@ -1016,7 +1018,7 @@ ReleaseCoordinateMouseHoldIfCleared(priority) {
         return false
     }
 
-    SendUp("LButton")
+    SendUp("LButton", "coordinate")
     ClearManagedHoldTarget("LButton")
     CoordinateMouseHoldActive := false
     CoordinateMouseHoldPriority := -1
@@ -1047,7 +1049,7 @@ ReleaseAllSkillHoldKeys(clearDesired := true) {
     while (idx > 0) {
         key := SkillHeldOrder[idx]
         if (SkillHeldKeys.Has(key)) {
-            SendUp(key)
+            SendUp(key, "skill")
             released[key] := true
         }
         idx -= 1
@@ -1055,7 +1057,7 @@ ReleaseAllSkillHoldKeys(clearDesired := true) {
     ; 兜底:未进 Order 的账本残留也一并释放
     for key, _ in SkillHeldKeys {
         if (!released.Has(key)) {
-            SendUp(key)
+            SendUp(key, "skill")
         }
     }
 
@@ -1201,7 +1203,13 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
 
         case CMD_CLEAR_QUEUE:
             ; CLEAR_QUEUE - 清空队列
-            priority := Integer(param)
+            ; WM_COPYDATA 是外部协议边界，不能让畸形参数把 Integer() 异常
+            ; 带出消息处理器；同时只接受 ClearQueue 实际支持的优先级。
+            if (!TryParseFiniteInteger(param, &priority)
+                || (priority != -2 && priority != -1
+                    && (priority < 0 || priority > 3))) {
+                return AHK_RESULT_REJECTED
+            }
             ClearQueue(priority)
             return 1
 
@@ -1259,11 +1267,16 @@ WM_COPYDATA(wParam, lParam, msg, hwnd) {
             ; 参数格式: "key:target:delay[:hold_ms]" 例如: "e:+:500" 或 "c:c:75:50"
             global ManagedKeysConfig
             parts := CachedStrSplit(param, ":")
-            if (parts.Length >= 3) {
+            if (parts.Length >= 3 && parts.Length <= 4
+                && TryParseFiniteInteger(parts[3], &delay)
+                && delay >= 0) {
                 key := parts[1]
                 target := parts[2]
-                delay := Integer(parts[3])
-                hold_ms := (parts.Length >= 4) ? Integer(parts[4]) : 0
+                hold_ms := 0
+                if (parts.Length = 4
+                    && (!TryParseFiniteInteger(parts[4], &hold_ms) || hold_ms < 0)) {
+                    return AHK_RESULT_REJECTED
+                }
                 ManagedKeysConfig[key] := { target: target, delay: delay, hold_ms: hold_ms }
                 return 1
             }
@@ -2111,7 +2124,16 @@ ExecuteAction(action, priority := 2) {
     } else if (actionType = ACTION_HOLD) {
         SendDown(actionData, false, "", "managed")
     } else if (actionType = ACTION_RELEASE) {
-        SendUp(actionData)
+        ; A managed release should prefer its own route.  If no managed hold
+        ; exists, retain the legacy owner-agnostic fallback for explicit
+        ; release actions that also clear a skill hold ledger.
+        if (ManagedHoldTargets.Has(actionData)) {
+            SendUp(actionData, PersistentHoldOwner(ManagedHoldTargets[actionData]))
+        } else if (CoordinateMouseHoldActive && actionData = "LButton") {
+            SendUp(actionData, "coordinate")
+        } else {
+            SendUp(actionData)
+        }
         ClearManagedHoldTarget(actionData)
         ClearCoordinateMouseHoldState(actionData, priority)
         if (ForgetSkillHeldKey(actionData)) {
@@ -2631,19 +2653,24 @@ IsTransientGlobalPressActive(key) {
     return false
 }
 
-PersistentPressId(key) {
-    return CachedStrLower(key)
+PersistentPressId(key, owner := "") {
+    ; A physical key can have independent persistent routes (macro, skill,
+    ; managed and coordinate).  Include the owner so one route cannot replace
+    ; another before its matching up edge is processed.
+    return CachedStrLower(key) "|" CachedStrLower(owner)
 }
 
-TrackPersistentPressRoute(key, mode, target) {
+TrackPersistentPressRoute(key, mode, target, owner := "") {
     global PersistentPressRoutes, TransientPressKeys, TransientPressOrder
 
     entry := {
         key: key,
         mode: mode,
-        target: target
+        target: target,
+        owner: owner,
+        id: PersistentPressId(key, owner)
     }
-    PersistentPressRoutes[PersistentPressId(key)] := entry
+    PersistentPressRoutes[entry.id] := entry
     ; 成功的显式 down 接管同一路由的临时 press，最终 up 由持键所有者负责。
     ; 只撤销该键的旧 release；同一 chord 的其他键、其他目标仍按原时刻释放。
     transientId := TransientPressId(mode, target, key)
@@ -2714,7 +2741,13 @@ SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData :
                 return false
             }
         }
-        entry := {key: key, mode: mode, target: routeTarget}
+        entry := {
+            key: key,
+            mode: mode,
+            target: routeTarget,
+            owner: owner,
+            id: PersistentPressId(key, owner)
+        }
         if (!RuntimeAcceptingActions || generation != RuntimeInputGeneration
             || !IsPersistentDownOwnerCurrent(owner, ownerData, key)) {
             RollbackPersistentDown(entry)
@@ -2729,7 +2762,7 @@ SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData :
             RollbackPersistentDown(entry)
             return false
         }
-        entry := TrackPersistentPressRoute(key, mode, routeTarget)
+        entry := TrackPersistentPressRoute(key, mode, routeTarget, owner)
         if (!CommitPersistentDownOwner(entry, generation, owner, ownerData, held, order)) {
             RollbackPersistentDown(entry)
             return false
@@ -2747,7 +2780,7 @@ SendDown(key, forceDirect := false, directTarget := "", owner := "", ownerData :
 CommitPersistentDownOwner(entry, generation, owner, ownerData, held, order) {
     global RuntimeAcceptingActions, RuntimeInputGeneration, PersistentPressRoutes
     global CoordinateMouseHoldActive, CoordinateMouseHoldPriority
-    id := PersistentPressId(entry.key)
+    id := entry.HasOwnProp("id") ? entry.id : PersistentPressId(entry.key, entry.owner)
     if (!RuntimeAcceptingActions || generation != RuntimeInputGeneration
         || !IsPersistentDownOwnerCurrent(owner, ownerData, entry.key)
         || !PersistentPressRoutes.Has(id) || PersistentPressRoutes[id] != entry) {
@@ -2810,7 +2843,7 @@ IsPersistentDownOwnerCurrent(owner, ownerData, key) {
 
 RollbackPersistentDown(entry) {
     global PersistentPressRoutes, TransientPressKeys
-    id := PersistentPressId(entry.key)
+    id := entry.HasOwnProp("id") ? entry.id : PersistentPressId(entry.key, entry.owner)
     if (PersistentPressRoutes.Has(id)) {
         current := PersistentPressRoutes[id]
         if (current = entry) {
@@ -2818,6 +2851,16 @@ RollbackPersistentDown(entry) {
         } else if (current.mode = entry.mode && current.target = entry.target) {
             ; 重入已经按下同一路由的新世代键，旧事务不得抬起它。
             return
+        }
+    } else {
+        ; owner-aware ids allow another owner to claim the same physical route.
+        ; An interrupted old down must not release that newer route merely
+        ; because its owner differs.
+        for _, current in PersistentPressRoutes {
+            if (CachedStrLower(current.key) = CachedStrLower(entry.key)
+                && current.mode = entry.mode && current.target = entry.target) {
+                return
+            }
         }
     }
     if (!TransientPressKeys.Has(TransientPressId(entry.mode, entry.target, entry.key))) {
@@ -2838,13 +2881,27 @@ ResolveControlTarget(target) {
     }
 }
 
-SendUp(key) {
-    ; 释放永不被目标/抑制门禁拦截。优先沿 down 的真实 route 配对；没有账本
-    ; 时仍发一个全局 up 作为历史状态/异常路径的防卡键兜底。
+SendUp(key, owner := "") {
+    ; 释放永不被目标/抑制门禁拦截。显式 owner 时沿对应 down 的真实
+    ; route 配对，避免 macro/skill/coordinate 同键互相抬起；没有 owner
+    ; 时保留历史的最近匹配/全局 up 兜底，用于协议 release:key。
     global PersistentPressRoutes
 
-    id := PersistentPressId(key)
-    if (PersistentPressRoutes.Has(id)) {
+    id := ""
+    if (owner != "") {
+        candidate := PersistentPressId(key, owner)
+        if (PersistentPressRoutes.Has(candidate)) {
+            id := candidate
+        }
+    } else {
+        lower := CachedStrLower(key)
+        for candidate, candidateEntry in PersistentPressRoutes {
+            if (CachedStrLower(candidateEntry.key) = lower) {
+                id := candidate
+            }
+        }
+    }
+    if (id != "") {
         entry := PersistentPressRoutes[id]
         PersistentPressRoutes.Delete(id)
         return SendTransientKeyEdge(entry.mode, entry.target, entry.key, false)
@@ -4194,6 +4251,23 @@ ActivateTargetWindow() {
 ; 辅助函数
 ; ===============================================================================
 ; 注: AHK v2 已有内置 Trim(),原自定义实现已删除以避免 shadow 内置函数
+
+TryParseFiniteInteger(value, &parsed) {
+    ; 协议参数先经过 IsInteger，再调用 Integer；这样 NaN/Infinity、浮点文本
+    ; 和溢出值都会返回 false，而不是从 WM_COPYDATA 处理器抛出异常。
+    parsed := 0
+    value := Trim(value)
+    if (value = "" || !IsInteger(value)) {
+        return false
+    }
+    try {
+        parsed := Integer(value)
+    } catch {
+        parsed := 0
+        return false
+    }
+    return true
+}
 
 ; ===============================================================================
 ; 启动信息

@@ -126,6 +126,11 @@ class NativeGraphicsCaptureManager:
         LOG_INFO(f"[捕获启动] 开始启动捕获会话")
         if not self._start_capture_session():
             LOG_ERROR(f"[捕获启动] 启动捕获会话失败")
+            # 会话已经由 _create_capture_session 创建，但尚未进入运行态，
+            # 因此 stop_capture() 的 is_running 短路不会替我们释放它。无论
+            # stop_capture 是否抛错，都必须调用原生 destroy_session，并清掉
+            # Python 侧句柄/帧坐标，避免下一次启动复用一个失效会话。
+            self._release_capture_session(log_prefix="[捕获启动] 回收失败会话")
             return False
 
         self.is_running = True
@@ -328,15 +333,29 @@ class NativeGraphicsCaptureManager:
                 LOG_ERROR(f"等待捕获线程时异常: {e}")
         self.capture_thread = None
 
-        try:
-            if self.capture_manager and self.session_id is not None:
-                self.capture_manager.stop_capture(self.session_id)
-                self.capture_manager.destroy_session(self.session_id)
-                self.session_id = None
-                self._frame_rect = None
+        self._release_capture_session(log_prefix="停止或销毁捕获会话")
 
+    def _release_capture_session(self, *, log_prefix: str) -> None:
+        """Stop and destroy one native session, attempting both operations.
+
+        Native stop can fail when a partially started session has already
+        stopped.  Destruction must still be attempted, and Python-side handles
+        must be cleared even when either native call raises.
+        """
+        session_id = self.session_id
+        manager = self.capture_manager
+        self.session_id = None
+        self._frame_rect = None
+        if manager is None or session_id is None:
+            return
+        try:
+            manager.stop_capture(session_id)
         except Exception as e:
-            LOG_ERROR(f"停止或销毁捕获会话时异常: {e}")
+            LOG_ERROR(f"[{log_prefix}] 停止异常: {e}")
+        try:
+            manager.destroy_session(session_id)
+        except Exception as e:
+            LOG_ERROR(f"[{log_prefix}] 销毁异常: {e}")
 
     def pause_capture(self):
         """暂停捕获（停止C++库捕获，节省CPU资源）"""
